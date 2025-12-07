@@ -38,7 +38,7 @@ ROOT_HTML = """<!doctype html>
       ul {
         padding-left:1.2rem;
       }
-      textarea, input, button {
+      textarea, input, button, select {
         font-family:inherit;
         font-size:0.95rem;
       }
@@ -53,7 +53,7 @@ ROOT_HTML = """<!doctype html>
         margin-bottom:0.5rem;
         resize:vertical;
       }
-      input {
+      input, select {
         width:100%;
         background:#020617;
         border:1px solid #1f2937;
@@ -61,6 +61,9 @@ ROOT_HTML = """<!doctype html>
         border-radius:0.5rem;
         padding:0.45rem 0.6rem;
         margin-bottom:0.75rem;
+      }
+      select {
+        cursor:pointer;
       }
       button {
         background:#2563eb;
@@ -70,10 +73,14 @@ ROOT_HTML = """<!doctype html>
         border-radius:999px;
         cursor:pointer;
         font-weight:500;
+        margin-right:0.5rem;
       }
       button:disabled {
         opacity:0.6;
         cursor:default;
+      }
+      button.secondary {
+        background:#4b5563;
       }
       pre {
         background:#020617;
@@ -88,18 +95,60 @@ ROOT_HTML = """<!doctype html>
       small {
         color:#9ca3af;
       }
+      .snapshot-info {
+        background:#1e293b;
+        border:1px solid #334155;
+        border-radius:0.5rem;
+        padding:0.75rem;
+        margin-bottom:0.75rem;
+        font-size:0.9rem;
+      }
+      .snapshot-info.loaded {
+        border-color:#10b981;
+      }
+      .snapshot-info .label {
+        color:#9ca3af;
+        font-size:0.85rem;
+      }
+      .snapshot-info .value {
+        color:#e5e7eb;
+        font-weight:500;
+      }
+      .flex {
+        display:flex;
+        gap:0.5rem;
+        align-items:center;
+      }
     </style>
   </head>
   <body>
     <h1>CodeSmith Ollama Helper</h1>
 
+    <h2>Snapshot Context</h2>
+    <p><small>Load a snapshot to provide code context to the model</small></p>
+    <div class=\"flex\">
+      <select id=\"snapshotSelect\" style=\"flex:1\">
+        <option value=\"\">-- Select a snapshot --</option>
+      </select>
+      <button id=\"loadSnapshot\" class=\"secondary\">Load</button>
+      <button id=\"refreshSnapshots\" class=\"secondary\">Refresh</button>
+    </div>
+    <div id=\"snapshotInfo\" class=\"snapshot-info\" style=\"display:none\">
+      <div class=\"label\">Loaded Snapshot:</div>
+      <div class=\"value\" id=\"loadedSnapshotName\">None</div>
+      <div class=\"label\" style=\"margin-top:0.5rem\">Files: <span class=\"value\" id=\"loadedFileCount\">0</span> | Size: <span class=\"value\" id=\"loadedTotalSize\">0</span></div>
+    </div>
+
     <h2>Quick chat test</h2>
-    <p><small>Uses <code>POST /api/chat</code> on this helper.</small></p>
+    <p><small>Uses <code>POST /api/chat</code> on this helper. Includes loaded snapshot as context.</small></p>
     <label><small>Prompt</small></label>
     <textarea id=\"prompt\" placeholder=\"Ask the model something...\"></textarea>
     <label><small>Model (optional, blank = default)</small></label>
     <input id=\"model\" placeholder=\"qwen2.5-coder:7b\">
-    <button id=\"send\">Send</button>
+    <div class=\"flex\">
+      <button id=\"send\">Send</button>
+      <button id=\"clearSnapshot\" class=\"secondary\" style=\"display:none\">Clear Snapshot</button>
+    </div>
     <p><small><span id=\"status\"></span></small></p>
     <pre id=\"output\"></pre>
 
@@ -126,9 +175,92 @@ ROOT_HTML = """<!doctype html>
       const statusEl = document.getElementById("status");
       const outEl    = document.getElementById("output");
 
+      const snapshotSelectEl = document.getElementById("snapshotSelect");
+      const loadSnapshotBtn = document.getElementById("loadSnapshot");
+      const refreshSnapshotsBtn = document.getElementById("refreshSnapshots");
+      const clearSnapshotBtn = document.getElementById("clearSnapshot");
+      const snapshotInfoEl = document.getElementById("snapshotInfo");
+      const loadedSnapshotNameEl = document.getElementById("loadedSnapshotName");
+      const loadedFileCountEl = document.getElementById("loadedFileCount");
+      const loadedTotalSizeEl = document.getElementById("loadedTotalSize");
+
       const snapshotInput  = document.getElementById("snapshotFile");
       const uploadBtn      = document.getElementById("uploadSnapshot");
       const snapshotOutEl  = document.getElementById("snapshotResult");
+
+      let currentSnapshot = null;
+      let currentSnapshotFiles = [];
+
+      async function loadSnapshots() {
+        try {
+          const resp = await fetch("/api/snapshots");
+          const data = await resp.json();
+          snapshotSelectEl.innerHTML = '<option value="">-- Select a snapshot --</option>';
+          if (data.snapshots && data.snapshots.length > 0) {
+            data.snapshots.forEach(snap => {
+              const opt = document.createElement("option");
+              opt.value = snap.filename;
+              const fileCount = snap.meta?.file_count || 0;
+              const size = (snap.size / 1024).toFixed(1);
+              opt.textContent = `${snap.filename} (${fileCount} files, ${size}KB)`;
+              snapshotSelectEl.appendChild(opt);
+            });
+          }
+        } catch (err) {
+          console.error("Failed to load snapshots:", err);
+        }
+      }
+
+      async function loadSnapshot() {
+        const filename = snapshotSelectEl.value;
+        if (!filename) return;
+
+        statusEl.textContent = "Loading snapshot...";
+        try {
+          const resp = await fetch("/api/snapshot/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              filename: filename,
+              max_total_chars: 50000,
+              max_file_chars: 10000,
+              include_source: true
+            })
+          });
+          const data = await resp.json();
+          if (data.error) {
+            alert("Error loading snapshot: " + data.error);
+            return;
+          }
+
+          currentSnapshot = data.snapshot;
+          currentSnapshotFiles = data.files || [];
+
+          loadedSnapshotNameEl.textContent = filename;
+          loadedFileCountEl.textContent = currentSnapshotFiles.length;
+          loadedTotalSizeEl.textContent = ((currentSnapshot.total_size || 0) / 1024).toFixed(1) + "KB";
+
+          snapshotInfoEl.style.display = "block";
+          snapshotInfoEl.classList.add("loaded");
+          clearSnapshotBtn.style.display = "inline-block";
+
+          statusEl.textContent = `✓ Loaded ${currentSnapshotFiles.length} files`;
+          setTimeout(() => statusEl.textContent = "", 3000);
+        } catch (err) {
+          alert("Failed to load snapshot: " + err);
+        }
+      }
+
+      function clearSnapshot() {
+        currentSnapshot = null;
+        currentSnapshotFiles = [];
+        snapshotInfoEl.style.display = "none";
+        snapshotInfoEl.classList.remove("loaded");
+        clearSnapshotBtn.style.display = "none";
+        snapshotSelectEl.value = "";
+        statusEl.textContent = "Snapshot cleared";
+        setTimeout(() => statusEl.textContent = "", 2000);
+      }
 
       async function send() {
         const prompt = promptEl.value.trim();
@@ -137,8 +269,26 @@ ROOT_HTML = """<!doctype html>
         sendBtn.disabled = true;
         statusEl.textContent = "Calling /api/chat...";
         outEl.textContent = "";
+
         try {
-          const body = { prompt: prompt };
+          // Build context from loaded snapshot
+          let fullPrompt = prompt;
+          if (currentSnapshotFiles.length > 0) {
+            const contextParts = ["Here is the codebase context:\n"];
+            currentSnapshotFiles.forEach(file => {
+              if (file.snippet) {
+                contextParts.push(`\n--- ${file.path} ---`);
+                contextParts.push(file.snippet);
+                if (file.snippet_truncated) {
+                  contextParts.push("\n[... truncated ...]");
+                }
+              }
+            });
+            contextParts.push(`\n\nUser question: ${prompt}`);
+            fullPrompt = contextParts.join("\n");
+          }
+
+          const body = { prompt: fullPrompt };
           if (model) body.model = model;
           const resp = await fetch("/api/chat", {
             method: "POST",
@@ -194,9 +344,16 @@ ROOT_HTML = """<!doctype html>
         }
       });
 
+      loadSnapshotBtn.addEventListener("click", loadSnapshot);
+      refreshSnapshotsBtn.addEventListener("click", loadSnapshots);
+      clearSnapshotBtn.addEventListener("click", clearSnapshot);
+
       if (uploadBtn) {
         uploadBtn.addEventListener("click", uploadSnapshot);
       }
+
+      // Load snapshots on page load
+      loadSnapshots();
     </script>
   </body>
 </html>
