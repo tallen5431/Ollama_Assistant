@@ -112,6 +112,36 @@ def get_max_snapshots() -> int:
         return 100
 
 
+def require_ollama_on_startup() -> bool:
+    """Return whether Ollama connectivity is required at startup (default: True)."""
+    value = os.getenv("REQUIRE_OLLAMA_ON_STARTUP", "true").lower()
+    return value in ("true", "1", "yes", "on")
+
+
+def get_ollama_startup_retries() -> int:
+    """Return number of times to retry Ollama connection at startup (default: 5)."""
+    try:
+        retries = int(os.getenv("OLLAMA_STARTUP_RETRIES", "5"))
+        if retries < 0:
+            raise ValueError("Retries cannot be negative")
+        return retries
+    except (ValueError, TypeError):
+        logger.warning("Invalid OLLAMA_STARTUP_RETRIES, using default 5")
+        return 5
+
+
+def get_ollama_startup_retry_delay() -> float:
+    """Return initial delay between Ollama connection retries in seconds (default: 2.0)."""
+    try:
+        delay = float(os.getenv("OLLAMA_STARTUP_RETRY_DELAY", "2.0"))
+        if delay < 0:
+            raise ValueError("Delay cannot be negative")
+        return delay
+    except (ValueError, TypeError):
+        logger.warning("Invalid OLLAMA_STARTUP_RETRY_DELAY, using default 2.0s")
+        return 2.0
+
+
 def validate_config() -> None:
     """Validate configuration on startup and log warnings for issues."""
     logger.info("Validating configuration...")
@@ -126,3 +156,4 @@ def validate_config() -> None:
     logger.info("Max upload size: %d MB", get_max_upload_size() // (1024 * 1024))
     logger.info("Ollama timeout: %.1f seconds", get_request_timeout())
     logger.info("Max snapshots: %d (0=unlimited)", get_max_snapshots())
+    logger.info("Require Ollama on startup: %s", require_ollama_on_startup())

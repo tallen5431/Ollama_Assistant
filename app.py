@@ -30,10 +30,19 @@ from config_ollama_helper import (
     get_max_snapshots,
     get_max_upload_size,
     get_ollama_base,
+    get_ollama_startup_retries,
+    get_ollama_startup_retry_delay,
     logger,
+    require_ollama_on_startup,
     validate_config,
 )
-from ollama_client import check_ollama_health, post_ollama, post_ollama_stream
+from ollama_client import (
+    check_ollama_health,
+    get_ollama_startup_instructions,
+    post_ollama,
+    post_ollama_stream,
+    wait_for_ollama,
+)
 from codesmith_patch_utils import (
     build_code_system_prompt,
     normalize_patch_text,
@@ -653,15 +662,34 @@ def snapshot_files() -> Any:
 
 
 def main() -> None:
+    import sys
+
     # Validate configuration on startup
     validate_config()
 
-    # Check Ollama connectivity
-    if not check_ollama_health():
-        logger.warning(
-            "Cannot connect to Ollama at %s. The server will start but API calls will fail.",
-            get_ollama_base()
-        )
+    # Check Ollama connectivity with retry logic
+    max_retries = get_ollama_startup_retries()
+    retry_delay = get_ollama_startup_retry_delay()
+    require_ollama = require_ollama_on_startup()
+
+    ollama_available = wait_for_ollama(
+        max_retries=max_retries,
+        initial_delay=retry_delay,
+        timeout=5.0
+    )
+
+    if not ollama_available:
+        if require_ollama:
+            # Print helpful instructions and exit
+            print(get_ollama_startup_instructions(), file=sys.stderr)
+            logger.error("Ollama is not available and REQUIRE_OLLAMA_ON_STARTUP is enabled. Exiting.")
+            sys.exit(1)
+        else:
+            logger.warning(
+                "Cannot connect to Ollama at %s. The server will start but API calls will fail.",
+                get_ollama_base()
+            )
+            logger.warning("Set REQUIRE_OLLAMA_ON_STARTUP=true to enforce Ollama availability at startup.")
 
     host, port = get_host_port(default_port=8070)
     logger.info(

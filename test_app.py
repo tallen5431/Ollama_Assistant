@@ -20,7 +20,11 @@ from config_ollama_helper import (
     get_ollama_base,
     get_default_model,
     get_max_upload_size,
+    require_ollama_on_startup,
+    get_ollama_startup_retries,
+    get_ollama_startup_retry_delay,
 )
+from ollama_client import check_ollama_health, wait_for_ollama
 from codesmith_patch_utils import (
     normalize_patch_text,
     build_code_system_prompt,
@@ -55,6 +59,23 @@ class TestConfigHelpers:
         size = get_max_upload_size()
         assert size > 0
         assert isinstance(size, int)
+
+    def test_require_ollama_on_startup(self):
+        """Test require Ollama on startup config."""
+        result = require_ollama_on_startup()
+        assert isinstance(result, bool)
+
+    def test_get_ollama_startup_retries(self):
+        """Test startup retries config."""
+        retries = get_ollama_startup_retries()
+        assert isinstance(retries, int)
+        assert retries >= 0
+
+    def test_get_ollama_startup_retry_delay(self):
+        """Test startup retry delay config."""
+        delay = get_ollama_startup_retry_delay()
+        assert isinstance(delay, float)
+        assert delay >= 0
 
 
 class TestPatchUtils:
@@ -291,6 +312,75 @@ class TestCodeAssist:
         assert response.status_code == 200
         data = json.loads(response.data)
         assert "reply" in data
+
+
+class TestOllamaStartup:
+    """Test Ollama startup verification."""
+
+    def test_check_ollama_health_returns_bool(self):
+        """Test health check returns boolean."""
+        result = check_ollama_health()
+        assert isinstance(result, bool)
+
+    @patch("ollama_client.requests.get")
+    def test_check_ollama_health_success(self, mock_get):
+        """Test successful health check."""
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_get.return_value = mock_response
+
+        result = check_ollama_health()
+        assert result is True
+
+    @patch("ollama_client.requests.get")
+    def test_check_ollama_health_failure(self, mock_get):
+        """Test failed health check."""
+        mock_get.side_effect = Exception("Connection refused")
+
+        result = check_ollama_health()
+        assert result is False
+
+    @patch("ollama_client.requests.get")
+    @patch("ollama_client.time.sleep")
+    def test_wait_for_ollama_success_first_try(self, mock_sleep, mock_get):
+        """Test wait_for_ollama succeeds on first attempt."""
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_get.return_value = mock_response
+
+        result = wait_for_ollama(max_retries=3, initial_delay=1.0)
+        assert result is True
+        mock_sleep.assert_not_called()
+
+    @patch("ollama_client.requests.get")
+    @patch("ollama_client.time.sleep")
+    def test_wait_for_ollama_retry_then_success(self, mock_sleep, mock_get):
+        """Test wait_for_ollama retries then succeeds."""
+        mock_response_fail = Mock()
+        mock_response_fail.ok = False
+        mock_response_success = Mock()
+        mock_response_success.ok = True
+
+        # Fail first two times, succeed on third
+        mock_get.side_effect = [
+            Exception("Connection refused"),
+            Exception("Connection refused"),
+            mock_response_success
+        ]
+
+        result = wait_for_ollama(max_retries=3, initial_delay=0.1, timeout=1.0)
+        assert result is True
+        assert mock_sleep.call_count == 2
+
+    @patch("ollama_client.requests.get")
+    @patch("ollama_client.time.sleep")
+    def test_wait_for_ollama_max_retries_exceeded(self, mock_sleep, mock_get):
+        """Test wait_for_ollama fails after max retries."""
+        mock_get.side_effect = Exception("Connection refused")
+
+        result = wait_for_ollama(max_retries=3, initial_delay=0.1, timeout=1.0)
+        assert result is False
+        assert mock_sleep.call_count == 2  # Sleeps between retries, not after last
 
 
 if __name__ == "__main__":

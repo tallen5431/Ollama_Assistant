@@ -134,3 +134,110 @@ def check_ollama_health() -> bool:
         return resp.ok
     except requests.RequestException:
         return False
+
+
+def wait_for_ollama(
+    max_retries: int = 5,
+    initial_delay: float = 2.0,
+    timeout: float = 5.0
+) -> bool:
+    """Wait for Ollama server to become available with exponential backoff.
+
+    Parameters
+    ----------
+    max_retries:
+        Maximum number of connection attempts.
+    initial_delay:
+        Initial delay between retries in seconds.
+    timeout:
+        Timeout for each health check request.
+
+    Returns
+    -------
+    bool
+        True if Ollama became available, False if max retries exceeded.
+    """
+    import time
+
+    delay = initial_delay
+    url = get_ollama_base()
+
+    logger.info("Checking Ollama connectivity at %s...", url)
+
+    for attempt in range(max_retries):
+        try:
+            endpoint = url + "/api/tags"
+            resp = requests.get(endpoint, timeout=timeout)
+            if resp.ok:
+                logger.info("✓ Successfully connected to Ollama")
+                return True
+        except requests.RequestException as exc:
+            if attempt < max_retries - 1:
+                logger.warning(
+                    "Attempt %d/%d: Cannot connect to Ollama at %s (%s). Retrying in %.1fs...",
+                    attempt + 1,
+                    max_retries,
+                    url,
+                    type(exc).__name__,
+                    delay
+                )
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+            else:
+                logger.error(
+                    "Attempt %d/%d: Cannot connect to Ollama at %s (%s)",
+                    attempt + 1,
+                    max_retries,
+                    url,
+                    type(exc).__name__
+                )
+
+    return False
+
+
+def get_ollama_startup_instructions() -> str:
+    """Return helpful instructions for starting Ollama.
+
+    Returns
+    -------
+    str
+        Multi-line string with platform-specific instructions.
+    """
+    instructions = """
+╔══════════════════════════════════════════════════════════════════════╗
+║                    Ollama Server Not Running                         ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+The CodeSmith Ollama Helper requires Ollama to be running.
+
+To start Ollama:
+
+  1. Check if Ollama is installed:
+     $ ollama --version
+
+  2. If not installed, download from: https://ollama.ai/
+
+  3. Start Ollama service:
+     • macOS/Linux:   $ ollama serve
+     • Windows:       Ollama runs automatically, check system tray
+
+  4. Verify Ollama is running:
+     $ ollama list
+
+  5. Pull a model if needed:
+     $ ollama pull qwen2.5-coder:7b
+
+  6. Check the configured Ollama host:
+     Current: {ollama_host}
+
+If Ollama is running on a different host/port, set OLLAMA_HOST:
+  $ export OLLAMA_HOST=http://your-host:11434
+
+To disable this check and start anyway, set:
+  $ export REQUIRE_OLLAMA_ON_STARTUP=false
+
+For more information: https://github.com/ollama/ollama
+"""
+    from config_ollama_helper import get_ollama_base
+    return instructions.format(ollama_host=get_ollama_base())
+

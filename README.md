@@ -5,12 +5,14 @@ A Flask-based API server that bridges CodeSmith with local Ollama LLMs for AI-as
 ## Features
 
 - 🤖 **LLM Integration**: Seamless connection to local Ollama models
+- ✅ **Startup Verification**: Ensures Ollama is running with automatic retry logic
 - 📝 **Code Assistance**: Specialized endpoints for code analysis and patch generation
 - 📦 **Snapshot Management**: Upload, validate, and manage CodeSmith project snapshots
 - 🔒 **Security**: File validation, size limits, and input sanitization
 - 🌊 **Streaming Support**: Real-time streaming responses for long-running queries
 - 🎨 **Web UI**: Built-in browser interface for testing
 - ⚡ **Auto-cleanup**: Automatic management of old snapshot files
+- 🔧 **Smart Retries**: Exponential backoff for Ollama connection attempts
 
 ## Architecture
 
@@ -73,10 +75,34 @@ All configuration is done via environment variables. See `.env.example` for all 
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen2.5-coder:7b` | Default model for requests |
 | `OLLAMA_TIMEOUT` | `120` | Request timeout (seconds) |
+| `REQUIRE_OLLAMA_ON_STARTUP` | `true` | Require Ollama at startup |
+| `OLLAMA_STARTUP_RETRIES` | `5` | Connection retry attempts |
+| `OLLAMA_STARTUP_RETRY_DELAY` | `2.0` | Initial retry delay (exponential backoff) |
 | `HOST` | `0.0.0.0` | Flask bind address |
 | `PORT` | `8070` | Flask port |
 | `MAX_UPLOAD_SIZE_MB` | `50` | Max snapshot upload size |
 | `MAX_SNAPSHOTS` | `100` | Max snapshots to keep (0=unlimited) |
+
+### Ollama Startup Verification
+
+By default, the server **requires Ollama to be running** at startup and will:
+- Automatically retry connection with exponential backoff (2s, 4s, 8s, 16s, 32s)
+- Display helpful error messages with setup instructions if Ollama is not available
+- Exit with error code 1 if Ollama cannot be reached after retries
+
+**To bypass this check** (start server even without Ollama):
+```bash
+export REQUIRE_OLLAMA_ON_STARTUP=false
+python app.py
+```
+
+**Customize retry behavior**:
+```bash
+# Try 10 times with 1 second initial delay
+export OLLAMA_STARTUP_RETRIES=10
+export OLLAMA_STARTUP_RETRY_DELAY=1.0
+python app.py
+```
 
 ## Usage
 
@@ -310,9 +336,25 @@ curl -X POST http://localhost:8070/api/upload-snapshot \
 ## Troubleshooting
 
 ### "Cannot connect to Ollama"
-- Ensure Ollama is running: `ollama list`
-- Check `OLLAMA_HOST` environment variable
-- Verify firewall settings
+The server now **automatically checks** for Ollama at startup with retry logic:
+
+1. **If server exits immediately**: Ollama is not running
+   - Start Ollama: `ollama serve` (macOS/Linux) or check system tray (Windows)
+   - Verify: `ollama list`
+   - Check configured host matches your setup: `echo $OLLAMA_HOST`
+
+2. **To start server without Ollama** (for testing):
+   ```bash
+   REQUIRE_OLLAMA_ON_STARTUP=false python app.py
+   ```
+
+3. **If Ollama is on a different host/port**:
+   ```bash
+   export OLLAMA_HOST=http://your-server:11434
+   python app.py
+   ```
+
+4. **Check firewall settings** if Ollama is remote
 
 ### "File too large" errors
 - Increase `MAX_UPLOAD_SIZE_MB` in `.env`
