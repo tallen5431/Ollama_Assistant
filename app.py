@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -27,10 +27,13 @@ from config_ollama_helper import (
     get_default_model,
     get_heavy_model,
     get_host_port,
+    get_max_snapshots,
+    get_max_upload_size,
     get_ollama_base,
     logger,
+    validate_config,
 )
-from ollama_client import post_ollama
+from ollama_client import check_ollama_health, post_ollama, post_ollama_stream
 from codesmith_patch_utils import (
     build_code_system_prompt,
     normalize_patch_text,
@@ -48,13 +51,104 @@ UPLOAD_DIR = Path(
 ).resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# Allowed MIME types for snapshot uploads
+ALLOWED_MIME_TYPES = {"application/json", "text/plain"}
+ALLOWED_EXTENSIONS = {".json"}
+
+
+# -------------------------------------------------------------------
+# Helper functions
+# -------------------------------------------------------------------
+
+
+def cleanup_old_snapshots() -> None:
+    """Remove oldest snapshots if count exceeds MAX_SNAPSHOTS."""
+    max_count = get_max_snapshots()
+    if max_count == 0:
+        return  # Unlimited
+
+    try:
+        snapshots = sorted(
+            UPLOAD_DIR.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        if len(snapshots) > max_count:
+            to_delete = snapshots[max_count:]
+            for snapshot in to_delete:
+                try:
+                    snapshot.unlink()
+                    logger.info("Deleted old snapshot: %s", snapshot.name)
+                except OSError as exc:
+                    logger.warning("Failed to delete snapshot %s: %s", snapshot.name, exc)
+    except Exception as exc:
+        logger.error("Error during snapshot cleanup: %s", exc)
+
+
+def validate_snapshot_file(filename: str, content: bytes) -> Optional[str]:
+    """Validate uploaded snapshot file.
+
+    Returns None if valid, or an error message string if invalid.
+    """
+    # Check file extension
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return f"Invalid file type. Only {', '.join(ALLOWED_EXTENSIONS)} files are allowed"
+
+    # Check if content is valid JSON
+    try:
+        obj = json.loads(content)
+    except json.JSONDecodeError as exc:
+        return f"Invalid JSON file: {exc}"
+
+    # Basic schema validation
+    if not isinstance(obj, dict):
+        return "Snapshot must be a JSON object"
+
+    # Check for required fields
+    if "files" not in obj:
+        return "Snapshot missing 'files' field"
+
+    if not isinstance(obj.get("files"), list):
+        return "'files' field must be a list"
+
+    return None
+
 
 # -------------------------------------------------------------------
 # Flask app + routes
 # -------------------------------------------------------------------
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = get_max_upload_size()
 CORS(app)
+
+
+# -------------------------------------------------------------------
+# Error handlers
+# -------------------------------------------------------------------
+
+
+@app.errorhandler(413)
+def request_entity_too_large(error: Any) -> Any:
+    """Handle file upload size exceeded."""
+    max_mb = get_max_upload_size() // (1024 * 1024)
+    return jsonify(
+        {"error": f"File too large. Maximum upload size is {max_mb}MB"}
+    ), 413
+
+
+@app.errorhandler(500)
+def internal_server_error(error: Any) -> Any:
+    """Handle internal server errors."""
+    logger.error("Internal server error: %s", error)
+    return jsonify({"error": "Internal server error"}), 500
+
+
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
 
 
 @app.route("/", methods=["GET"])
@@ -65,13 +159,18 @@ def index() -> Any:
 
 @app.route("/api/health", methods=["GET"])
 def health() -> Any:
-    """Simple health check."""
+    """Health check with Ollama connectivity status."""
+    ollama_healthy = check_ollama_health()
+    status = "ok" if ollama_healthy else "degraded"
+
     return jsonify(
         {
-            "status": "ok",
+            "status": status,
             "ollama_host": get_ollama_base(),
+            "ollama_connected": ollama_healthy,
             "default_model": get_default_model(),
             "heavy_model": get_heavy_model(get_default_model()),
+            "max_upload_mb": get_max_upload_size() // (1024 * 1024),
         }
     )
 
@@ -94,6 +193,7 @@ def chat() -> Any:
     body = request.get_json(silent=True) or {}
     model = body.get("model") or get_default_model()
     messages: Optional[List[Dict[str, str]]] = body.get("messages")
+    stream = body.get("stream", False)
 
     if messages is None:
         prompt = body.get("prompt")
@@ -103,6 +203,14 @@ def chat() -> Any:
                 400,
             )
         messages = [{"role": "user", "content": str(prompt)}]
+
+    # Validate messages structure
+    if not isinstance(messages, list):
+        return jsonify({"error": "'messages' must be a list"}), 400
+
+    for msg in messages:
+        if not isinstance(msg, dict) or "role" not in msg or "content" not in msg:
+            return jsonify({"error": "Each message must have 'role' and 'content'"}), 400
 
     payload = {
         "model": model,
@@ -126,6 +234,50 @@ def chat() -> Any:
             "raw": data,
         }
     )
+
+
+@app.route("/api/chat/stream", methods=["POST"])
+def chat_stream() -> Any:
+    """Streaming chat endpoint for long-running model responses."""
+    from flask import Response
+
+    body = request.get_json(silent=True) or {}
+    model = body.get("model") or get_default_model()
+    messages: Optional[List[Dict[str, str]]] = body.get("messages")
+
+    if messages is None:
+        prompt = body.get("prompt")
+        if not prompt:
+            return (
+                jsonify({"error": "Missing 'messages' or 'prompt' in request"}),
+                400,
+            )
+        messages = [{"role": "user", "content": str(prompt)}]
+
+    # Validate messages structure
+    if not isinstance(messages, list):
+        return jsonify({"error": "'messages' must be a list"}), 400
+
+    for msg in messages:
+        if not isinstance(msg, dict) or "role" not in msg or "content" not in msg:
+            return jsonify({"error": "Each message must have 'role' and 'content'"}), 400
+
+    payload = {
+        "model": model,
+        "messages": messages,
+    }
+
+    def generate() -> Generator[str, None, None]:
+        """Generator function for streaming responses."""
+        try:
+            for chunk in post_ollama_stream("/api/chat", payload):
+                yield json.dumps(chunk) + "\n"
+        except ValueError as exc:
+            error_chunk = {"error": str(exc)}
+            yield json.dumps(error_chunk) + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson")
+
 
 
 @app.route("/api/code-assist", methods=["POST"])
@@ -226,6 +378,8 @@ def upload_snapshot() -> Any:
     Expects multipart/form-data with a "file" field containing the
     snapshot JSON. Returns basic metadata about the saved file and,
     when possible, some snapshot details (schema, root_path, file_count).
+
+    Enhanced with validation and automatic cleanup of old snapshots.
     """
     if "file" not in request.files:
         return jsonify({"error": "Missing 'file' in form-data"}), 400
@@ -238,19 +392,34 @@ def upload_snapshot() -> Any:
     if not filename:
         return jsonify({"error": "Invalid filename"}), 400
 
+    # Read file content for validation
+    try:
+        content = file.read()
+    except Exception as exc:
+        logger.error("Failed to read uploaded file: %s", exc)
+        return jsonify({"error": "Failed to read uploaded file"}), 500
+
+    # Validate file
+    validation_error = validate_snapshot_file(filename, content)
+    if validation_error:
+        return jsonify({"error": validation_error}), 400
+
+    # Save file
     dest = UPLOAD_DIR / filename
     try:
-        file.save(dest)
-    except Exception as exc:  # pragma: no cover - defensive
+        with dest.open("wb") as fh:
+            fh.write(content)
+        logger.info("Uploaded snapshot: %s (%d bytes)", filename, len(content))
+    except OSError as exc:
         logger.error("Failed to save uploaded snapshot %s: %s", dest, exc)
         return jsonify({"error": f"Failed to save file: {exc}"}), 500
 
+    # Parse metadata
     size = dest.stat().st_size
     meta: Optional[Dict[str, Any]] = None
 
     try:
-        with dest.open("r", encoding="utf-8") as fh:
-            obj = json.load(fh)
+        obj = json.loads(content)
         schema = obj.get("schema")
         root_path = obj.get("root_path")
         files = obj.get("files") or []
@@ -260,8 +429,11 @@ def upload_snapshot() -> Any:
             "root_path": root_path,
             "file_count": file_count,
         }
-    except Exception as exc:  # pragma: no cover - best-effort introspection
+    except Exception as exc:
         logger.warning("Failed to inspect uploaded snapshot %s: %s", dest, exc)
+
+    # Cleanup old snapshots
+    cleanup_old_snapshots()
 
     return jsonify(
         {
@@ -481,6 +653,16 @@ def snapshot_files() -> Any:
 
 
 def main() -> None:
+    # Validate configuration on startup
+    validate_config()
+
+    # Check Ollama connectivity
+    if not check_ollama_health():
+        logger.warning(
+            "Cannot connect to Ollama at %s. The server will start but API calls will fail.",
+            get_ollama_base()
+        )
+
     host, port = get_host_port(default_port=8070)
     logger.info(
         "Starting CodeSmith Ollama Helper on %s:%s (OLLAMA_HOST=%s, MODEL=%s, HEAVY_MODEL=%s)",
@@ -490,6 +672,7 @@ def main() -> None:
         get_default_model(),
         get_heavy_model(get_default_model()),
     )
+    logger.info("Upload directory: %s", UPLOAD_DIR)
     app.run(host=host, port=port, debug=False)
 
 
