@@ -153,9 +153,11 @@ ROOT_HTML = """<!doctype html>
     <pre id=\"output\"></pre>
 
     <h2>Upload CodeSmith snapshot</h2>
-    <p><small>Upload a snapshot <code>.json</code> file; the helper will save it under its uploads folder.</small></p>
-    <input id=\"snapshotFile\" type=\"file\" accept=\".json\">
-    <button id=\"uploadSnapshot\">Upload snapshot</button>
+    <p><small>Upload a snapshot <code>.json</code> file. After upload, it will appear in the dropdown above.</small></p>
+    <div class=\"flex\">
+      <input id=\"snapshotFile\" type=\"file\" accept=\".json\" style=\"flex:1\">
+      <button id=\"uploadSnapshot\">Upload</button>
+    </div>
     <pre id=\"snapshotResult\"></pre>
 
     <h2>API endpoints</h2>
@@ -325,14 +327,25 @@ ROOT_HTML = """<!doctype html>
           const data = await resp.json();
           if (data.error) {
             snapshotOutEl.textContent = "Error: " + data.error;
+            snapshotOutEl.style.color = "#ef4444";
           } else {
-            snapshotOutEl.textContent = JSON.stringify(data, null, 2);
+            snapshotOutEl.textContent = "✓ Upload successful!\n\n" + JSON.stringify(data, null, 2);
+            snapshotOutEl.style.color = "#10b981";
+            // Clear file input
+            snapshotInput.value = "";
+            // Auto-refresh snapshots list and show success message
+            statusEl.textContent = "✓ Snapshot uploaded! Refreshing list...";
+            await loadSnapshots();
+            setTimeout(() => {
+              statusEl.textContent = "✓ Snapshot ready to load";
+              setTimeout(() => statusEl.textContent = "", 3000);
+            }, 500);
           }
         } catch (err) {
           snapshotOutEl.textContent = "Upload failed: " + err;
+          snapshotOutEl.style.color = "#ef4444";
         } finally {
           uploadBtn.disabled = false;
-          statusEl.textContent = "";
         }
       }
 
