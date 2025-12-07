@@ -142,6 +142,12 @@ def get_ollama_startup_retry_delay() -> float:
         return 2.0
 
 
+def verify_models_on_startup() -> bool:
+    """Return whether to verify required models exist at startup (default: True)."""
+    value = os.getenv("VERIFY_MODELS_ON_STARTUP", "true").lower()
+    return value in ("true", "1", "yes", "on")
+
+
 def validate_config() -> None:
     """Validate configuration on startup and log warnings for issues."""
     logger.info("Validating configuration...")
@@ -157,3 +163,4 @@ def validate_config() -> None:
     logger.info("Ollama timeout: %.1f seconds", get_request_timeout())
     logger.info("Max snapshots: %d (0=unlimited)", get_max_snapshots())
     logger.info("Require Ollama on startup: %s", require_ollama_on_startup())
+    logger.info("Verify models on startup: %s", verify_models_on_startup())

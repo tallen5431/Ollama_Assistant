@@ -35,9 +35,13 @@ from config_ollama_helper import (
     logger,
     require_ollama_on_startup,
     validate_config,
+    verify_models_on_startup,
 )
 from ollama_client import (
+    check_model_exists,
     check_ollama_health,
+    get_available_models,
+    get_missing_models_instructions,
     get_ollama_startup_instructions,
     post_ollama,
     post_ollama_stream,
@@ -690,6 +694,27 @@ def main() -> None:
                 get_ollama_base()
             )
             logger.warning("Set REQUIRE_OLLAMA_ON_STARTUP=true to enforce Ollama availability at startup.")
+    else:
+        # Ollama is available, check if required models exist
+        if verify_models_on_startup():
+            logger.info("Verifying required models are available...")
+            available_models = get_available_models()
+            required_models = [get_default_model()]
+
+            # Also check heavy model if it's different
+            heavy_model = get_heavy_model(get_default_model())
+            if heavy_model != get_default_model():
+                required_models.append(heavy_model)
+
+            missing_models = [model for model in required_models if not check_model_exists(model)]
+
+            if missing_models:
+                print(get_missing_models_instructions(missing_models, available_models), file=sys.stderr)
+                logger.error("Required models not found. Please pull them using 'ollama pull <model-name>'")
+                logger.error("Missing models: %s", ", ".join(missing_models))
+                sys.exit(1)
+            else:
+                logger.info("✓ All required models are available")
 
     host, port = get_host_port(default_port=8070)
     logger.info(

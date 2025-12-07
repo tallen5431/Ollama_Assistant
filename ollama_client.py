@@ -136,6 +136,43 @@ def check_ollama_health() -> bool:
         return False
 
 
+def get_available_models() -> list[str]:
+    """Get list of models available in Ollama.
+
+    Returns
+    -------
+    list[str]
+        List of model names, or empty list if unable to fetch.
+    """
+    try:
+        url = get_ollama_base() + "/api/tags"
+        resp = requests.get(url, timeout=5.0)
+        if resp.ok:
+            data = resp.json()
+            models = data.get("models", [])
+            return [model.get("name", "") for model in models if model.get("name")]
+        return []
+    except requests.RequestException:
+        return []
+
+
+def check_model_exists(model_name: str) -> bool:
+    """Check if a specific model exists in Ollama.
+
+    Parameters
+    ----------
+    model_name:
+        Name of the model to check (e.g., "qwen2.5-coder:7b").
+
+    Returns
+    -------
+    bool
+        True if model exists, False otherwise.
+    """
+    available_models = get_available_models()
+    return model_name in available_models
+
+
 def wait_for_ollama(
     max_retries: int = 5,
     initial_delay: float = 2.0,
@@ -240,4 +277,56 @@ For more information: https://github.com/ollama/ollama
 """
     from config_ollama_helper import get_ollama_base
     return instructions.format(ollama_host=get_ollama_base())
+
+
+def get_missing_models_instructions(missing_models: list[str], available_models: list[str]) -> str:
+    """Return helpful instructions for pulling missing models.
+
+    Parameters
+    ----------
+    missing_models:
+        List of model names that are not available.
+    available_models:
+        List of model names that are currently available.
+
+    Returns
+    -------
+    str
+        Multi-line string with instructions for pulling models.
+    """
+    models_list = "\n".join(f"     • {model}" for model in missing_models)
+    available_list = "\n".join(f"     • {model}" for model in available_models) if available_models else "     (none)"
+
+    pull_commands = "\n".join(f"     $ ollama pull {model}" for model in missing_models)
+
+    instructions = f"""
+╔══════════════════════════════════════════════════════════════════════╗
+║                    Required Models Not Found                         ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+The following models are configured but not available in Ollama:
+{models_list}
+
+Currently available models:
+{available_list}
+
+To pull the required models:
+{pull_commands}
+
+After pulling, restart this server:
+     $ python app.py
+
+Alternative options:
+
+  1. Use a different model that's already available:
+     $ export OLLAMA_MODEL=<model-name>
+     $ python app.py
+
+  2. Disable model verification at startup:
+     $ export VERIFY_MODELS_ON_STARTUP=false
+     $ python app.py
+
+For more information: https://ollama.ai/library
+"""
+    return instructions
 
