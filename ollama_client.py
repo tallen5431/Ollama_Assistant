@@ -12,7 +12,7 @@ for internet traffic must not swallow that direct call.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 import requests
 
@@ -78,3 +78,34 @@ def chat(model: str, messages: List[Dict[str, str]]) -> str:
     data = post_ollama("/api/chat", payload)
     message = data.get("message") or {}
     return message.get("content") or data.get("response") or ""
+
+
+def chat_stream(model: str, messages: List[Dict[str, str]]) -> Iterator[str]:
+    """Stream a chat completion, yielding raw NDJSON lines from Ollama.
+
+    Each line is a JSON object: incremental ``{"message": {"content": "..."}}``
+    chunks (and ``"thinking"`` for reasoning models), ending with a
+    ``{"done": true, "eval_count": ..., "eval_duration": ...}`` summary that
+    carries the token-usage stats.
+    """
+    url = get_ollama_base() + "/api/chat"
+    payload = {"model": model, "messages": messages, "stream": True}
+
+    try:
+        resp = requests.post(
+            url, json=payload, stream=True, timeout=get_request_timeout(), proxies=_NO_PROXY
+        )
+    except requests.RequestException as exc:
+        logger.error("Error calling Ollama at %s: %s", url, exc)
+        raise ValueError(f"Could not reach Ollama at {get_ollama_base()}: {exc}") from exc
+
+    if not resp.ok:
+        text = resp.text[:256]
+        resp.close()
+        logger.error("Ollama error (%s): %s", resp.status_code, text)
+        raise ValueError(f"Ollama returned HTTP {resp.status_code}: {text}")
+
+    with resp:
+        for line in resp.iter_lines(decode_unicode=True):
+            if line:
+                yield line

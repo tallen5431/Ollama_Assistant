@@ -17,15 +17,17 @@ Configuration is entirely via environment variables — see config.py / authz.py
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 from typing import Any, Dict, List, Optional
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import authz
+import voice
 from chat_ui import render_page
 from config import (
     get_app_title,
@@ -35,7 +37,7 @@ from config import (
     logger,
 )
 from ollama_client import chat as ollama_chat
-from ollama_client import list_models
+from ollama_client import chat_stream, list_models
 
 # -------------------------------------------------------------------
 # Flask app
@@ -101,6 +103,7 @@ def health() -> Any:
             "ollama_host": get_ollama_base(),
             "default_model": get_default_model(),
             "auth": AUTH_ENABLED,
+            "voice": voice.voice_available(),
         }
     )
 
@@ -117,7 +120,11 @@ def api_models() -> Any:
 
 @app.route("/api/chat", methods=["POST"])
 def api_chat() -> Any:
-    """Chat completion. Accepts a ``messages`` array or a single ``prompt``."""
+    """Chat completion. Accepts a ``messages`` array or a single ``prompt``.
+
+    Streams token-by-token NDJSON by default (what the UI consumes). Pass
+    ``{"stream": false}`` to get a single JSON ``{"model", "reply"}`` object.
+    """
     body = request.get_json(silent=True) or {}
     model = body.get("model") or get_default_model()
     messages: Optional[List[Dict[str, str]]] = body.get("messages")
@@ -131,12 +138,45 @@ def api_chat() -> Any:
     if not isinstance(messages, list) or not messages:
         return jsonify({"error": "'messages' must be a non-empty list"}), 400
 
-    try:
-        reply = ollama_chat(model, messages)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 502
+    # Non-streaming path — single JSON object.
+    if body.get("stream") is False:
+        try:
+            reply = ollama_chat(model, messages)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 502
+        return jsonify({"model": model, "reply": reply})
 
-    return jsonify({"model": model, "reply": reply})
+    # Streaming path — pass Ollama's NDJSON lines straight through.
+    @stream_with_context
+    def generate() -> Any:
+        try:
+            for line in chat_stream(model, messages):
+                yield line + "\n"
+        except ValueError as exc:
+            yield json.dumps({"error": str(exc)}) + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson")
+
+
+@app.route("/api/transcribe", methods=["POST"])
+def api_transcribe() -> Any:
+    """Transcribe posted WAV audio to text with Vosk (offline)."""
+    if not voice.voice_available():
+        return jsonify({"error": "Voice input is not available (vosk not installed)."}), 501
+
+    audio = request.get_data()
+    if not audio:
+        return jsonify({"error": "No audio received"}), 400
+
+    try:
+        text = voice.transcribe(audio)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - defensive (model load/download)
+        logger.exception("Transcription failed")
+        return jsonify({"error": f"Transcription failed: {exc}"}), 500
+
+    return jsonify({"text": text})
 
 
 # -------------------------------------------------------------------
