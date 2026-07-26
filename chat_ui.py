@@ -79,14 +79,17 @@ _PAGE = """<!doctype html>
       footer { border-top:1px solid var(--border); background:var(--panel); padding:0.6rem 1rem; }
       .composer { display:flex; gap:0.5rem; align-items:flex-end; }
       textarea {
-        flex:1 1 auto; resize:none; font-family:inherit; font-size:0.95rem;
+        flex:1 1 auto; min-width:0; resize:none; font-family:inherit; font-size:0.95rem;
         background:var(--panel2); color:var(--text);
         border:1px solid var(--border); border-radius:0.7rem;
         padding:0.6rem 0.75rem; max-height:40vh; min-height:2.6rem; line-height:1.4;
       }
+      .composer button { flex:0 0 auto; white-space:nowrap; }
       #mic { font-size:1.1rem; line-height:1; padding:0.5rem 0.6rem; }
       #mic.rec { background:var(--danger); border-color:var(--danger); animation:pulse 1.2s infinite; }
-      #voiceModel { max-width:11rem; font-size:0.82rem; padding:0.5rem 0.4rem; }
+      .voicebar { display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem; }
+      .voicebar-label { font-size:0.75rem; color:var(--muted); white-space:nowrap; }
+      #voiceModel { flex:0 1 auto; min-width:0; max-width:16rem; font-size:0.82rem; padding:0.45rem 0.4rem; }
       @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.55;} }
       .hint { color:var(--muted); font-size:0.72rem; margin:0.35rem 0.2rem 0; min-height:1rem; }
     </style>
@@ -109,10 +112,13 @@ _PAGE = """<!doctype html>
 
     <footer>
       <div class="wrap">
+        <div class="voicebar" id="voicebar" hidden>
+          <span class="voicebar-label">🎙 Voice</span>
+          <select id="voiceModel" title="Speech recognition language"></select>
+        </div>
         <div class="composer">
-          <select id="voiceModel" title="Speech recognition language" hidden></select>
-          <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
           <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
+          <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
           <button class="primary" id="send">Send</button>
           <button class="danger" id="stop" hidden>Stop</button>
         </div>
@@ -128,6 +134,7 @@ _PAGE = """<!doctype html>
       const stopBtn  = document.getElementById("stop");
       const newBtn   = document.getElementById("newChat");
       const micBtn   = document.getElementById("mic");
+      const voiceBar = document.getElementById("voicebar");
       const voiceSel = document.getElementById("voiceModel");
       const modelEl  = document.getElementById("model");
       const dotEl    = document.getElementById("dot");
@@ -266,7 +273,7 @@ _PAGE = """<!doctype html>
             o.dataset.download = "1";
             voiceSel.appendChild(o);
           }
-          voiceSel.hidden = voiceSel.options.length <= 1;
+          voiceBar.hidden = voiceSel.options.length === 0;
         } catch (e) { /* leave picker hidden */ }
       }
 

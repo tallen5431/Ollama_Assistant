@@ -146,14 +146,18 @@ def api_chat() -> Any:
             return jsonify({"error": str(exc)}), 502
         return jsonify({"model": model, "reply": reply})
 
-    # Streaming path — pass Ollama's NDJSON lines straight through.
+    # Streaming path — pass Ollama's NDJSON lines straight through. Any failure
+    # (including one raised mid-stream while iterating) is turned into a final
+    # JSON error line rather than a bare HTTP 500, so the UI can show why.
     @stream_with_context
     def generate() -> Any:
         try:
             for line in chat_stream(model, messages):
                 yield line + "\n"
-        except ValueError as exc:
-            yield json.dumps({"error": str(exc)}) + "\n"
+        except Exception as exc:  # noqa: BLE001 - surface any error to the client
+            logger.exception("Chat stream failed")
+            message = str(exc) or exc.__class__.__name__
+            yield json.dumps({"error": message}) + "\n"
 
     return Response(generate(), mimetype="application/x-ndjson")
 
