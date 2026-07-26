@@ -64,7 +64,8 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_TIMEOUT`    | `300`                       | Per-request timeout, in seconds |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_AUTH_USER` / `CHAT_AUTH_PASSWORD` | *(unset)* | Enable HTTP Basic Auth (or use `CHAT_AUTH=user:password`) |
-| `VOSK_MODEL_PATH`   | *(unset)*                   | Path to an unpacked Vosk model. If unset, the small English model is downloaded once into `models/` on first use. |
+| `VOSK_MODEL`        | `en-us`                     | Default Vosk language id (e.g. `es`, `fr`, `de`) |
+| `VOSK_MODEL_PATH`   | *(unset)*                   | Path to an unpacked Vosk model. Used as the default when set (no download). |
 | `VOSK_MODELS_DIR`   | `./models`                  | Where downloaded Vosk models are stored |
 
 > `Start.sh` defaults `OLLAMA_HOST` to `http://100.98.112.1:11434` (the Tailscale
@@ -107,6 +108,14 @@ The mic button only shows when the `vosk` package is installed; without it the
 app runs exactly as before. Audio is captured in the browser, downsampled to
 16 kHz mono, and posted to `/api/transcribe` — it never leaves your network.
 
+**Choosing a language.** Next to the mic is a small language picker. It lists the
+models already on the server first, then the rest of a built-in catalog (English,
+Spanish, French, German, Italian, Portuguese, Dutch, Russian, Chinese, Japanese,
+Korean, Hindi, and a large English model) marked with their download size. Pick
+one that isn't downloaded yet and it's fetched once (into `models/`), then used
+for transcription. Set `VOSK_MODEL` to change the default language, or
+`VOSK_MODEL_PATH` to use your own model directory.
+
 ## API endpoints
 
 | Method & path        | Purpose |
@@ -116,7 +125,9 @@ app runs exactly as before. Audio is captured in the browser, downsampled to
 | `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
 | `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...] }` or `{ "prompt": "..." }` |
-| `POST /api/transcribe` | Speech-to-text: POST WAV audio, returns `{ "text": ... }` |
+| `GET /api/voice/models` | Available + downloadable Vosk speech models |
+| `POST /api/voice/download` | Download a catalog model — body `{ "id": "fr" }` |
+| `POST /api/transcribe` | Speech-to-text: POST WAV audio (`?model=<id>` optional), returns `{ "text": ... }` |
 
 ## Expose it to the internet (optional)
 

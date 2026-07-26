@@ -158,9 +158,40 @@ def api_chat() -> Any:
     return Response(generate(), mimetype="application/x-ndjson")
 
 
+@app.route("/api/voice/models", methods=["GET"])
+def api_voice_models() -> Any:
+    """List downloadable + already-downloaded Vosk speech models."""
+    if not voice.voice_available():
+        return jsonify({"error": "Voice input is not available (vosk not installed)."}), 501
+    return jsonify(voice.list_models())
+
+
+@app.route("/api/voice/download", methods=["POST"])
+def api_voice_download() -> Any:
+    """Download a catalog Vosk model so it's ready before recording."""
+    if not voice.voice_available():
+        return jsonify({"error": "Voice input is not available (vosk not installed)."}), 501
+    body = request.get_json(silent=True) or {}
+    model_id = body.get("id")
+    if not model_id:
+        return jsonify({"error": "Missing 'id'"}), 400
+    try:
+        info = voice.download_model(str(model_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Voice model download failed")
+        return jsonify({"error": f"Download failed: {exc}"}), 500
+    return jsonify(info)
+
+
 @app.route("/api/transcribe", methods=["POST"])
 def api_transcribe() -> Any:
-    """Transcribe posted WAV audio to text with Vosk (offline)."""
+    """Transcribe posted WAV audio to text with Vosk (offline).
+
+    The Vosk model is chosen with a ``?model=<id>`` query parameter (defaults to
+    the configured default language).
+    """
     if not voice.voice_available():
         return jsonify({"error": "Voice input is not available (vosk not installed)."}), 501
 
@@ -168,15 +199,16 @@ def api_transcribe() -> Any:
     if not audio:
         return jsonify({"error": "No audio received"}), 400
 
+    model_id = request.args.get("model") or None
     try:
-        text = voice.transcribe(audio)
+        text = voice.transcribe(audio, model_id)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:  # pragma: no cover - defensive (model load/download)
         logger.exception("Transcription failed")
         return jsonify({"error": f"Transcription failed: {exc}"}), 500
 
-    return jsonify({"text": text})
+    return jsonify({"text": text, "model": model_id or voice.default_model_id()})
 
 
 # -------------------------------------------------------------------

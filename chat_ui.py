@@ -86,6 +86,7 @@ _PAGE = """<!doctype html>
       }
       #mic { font-size:1.1rem; line-height:1; padding:0.5rem 0.6rem; }
       #mic.rec { background:var(--danger); border-color:var(--danger); animation:pulse 1.2s infinite; }
+      #voiceModel { max-width:11rem; font-size:0.82rem; padding:0.5rem 0.4rem; }
       @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.55;} }
       .hint { color:var(--muted); font-size:0.72rem; margin:0.35rem 0.2rem 0; min-height:1rem; }
     </style>
@@ -109,6 +110,7 @@ _PAGE = """<!doctype html>
     <footer>
       <div class="wrap">
         <div class="composer">
+          <select id="voiceModel" title="Speech recognition language" hidden></select>
           <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
           <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
           <button class="primary" id="send">Send</button>
@@ -126,6 +128,7 @@ _PAGE = """<!doctype html>
       const stopBtn  = document.getElementById("stop");
       const newBtn   = document.getElementById("newChat");
       const micBtn   = document.getElementById("mic");
+      const voiceSel = document.getElementById("voiceModel");
       const modelEl  = document.getElementById("model");
       const dotEl    = document.getElementById("dot");
       const statusEl = document.getElementById("statusText");
@@ -241,9 +244,51 @@ _PAGE = """<!doctype html>
       async function checkVoice() {
         try {
           const data = await (await fetch("api/health")).json();
-          if (data.voice) micBtn.hidden = false;
+          if (data.voice) { micBtn.hidden = false; await loadVoiceModels(); }
         } catch (e) { /* leave mic hidden */ }
       }
+
+      // Populate the speech-model picker: downloaded languages first, then the
+      // rest of the catalog (marked with size + ⬇, downloaded on first pick).
+      async function loadVoiceModels() {
+        try {
+          const data = await (await fetch("api/voice/models")).json();
+          if (data.error) return;
+          voiceSel.innerHTML = "";
+          const seen = new Set();
+          for (const m of (data.available || [])) {
+            seen.add(m.id);
+            voiceSel.appendChild(new Option(m.label, m.id, false, m.id === data.default));
+          }
+          for (const m of (data.catalog || [])) {
+            if (m.downloaded || seen.has(m.id)) continue;
+            const o = new Option(m.label + " — " + m.size + " ⬇", m.id);
+            o.dataset.download = "1";
+            voiceSel.appendChild(o);
+          }
+          voiceSel.hidden = voiceSel.options.length <= 1;
+        } catch (e) { /* leave picker hidden */ }
+      }
+
+      // Downloading a not-yet-present language happens on selection so the mic
+      // is ready before you speak.
+      voiceSel.addEventListener("change", async () => {
+        const opt = voiceSel.selectedOptions[0];
+        if (!opt || opt.dataset.download !== "1") return;
+        const id = opt.value;
+        voiceSel.disabled = true; micBtn.disabled = true;
+        hintEl.textContent = "Downloading " + opt.textContent.replace(" ⬇", "") + "… (one-time)";
+        try {
+          const resp = await fetch("api/voice/download", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id }),
+          });
+          const j = await resp.json();
+          if (j.error) { hintEl.textContent = j.error; }
+          else { hintEl.textContent = "Ready — " + (j.label || id) + " downloaded."; await loadVoiceModels(); voiceSel.value = id; }
+        } catch (e) { hintEl.textContent = "Download failed: " + e; }
+        finally { voiceSel.disabled = false; micBtn.disabled = false; }
+      });
 
       async function send() {
         const text = inputEl.value.trim();
@@ -361,7 +406,8 @@ _PAGE = """<!doctype html>
         if (!wav) { hintEl.textContent = "No audio captured."; return; }
         hintEl.textContent = "Transcribing…";
         try {
-          const resp = await fetch("api/transcribe", { method: "POST",
+          const mq = voiceSel.value ? ("?model=" + encodeURIComponent(voiceSel.value)) : "";
+          const resp = await fetch("api/transcribe" + mq, { method: "POST",
             headers: { "Content-Type": "audio/wav" }, body: wav });
           const j = await resp.json();
           if (j.error) { hintEl.textContent = j.error; return; }
