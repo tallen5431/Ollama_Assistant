@@ -31,6 +31,13 @@ if exist "%APP_DIR%requirements.txt" (
     "%PYTHON_EXE%" -m pip install -r "%APP_DIR%requirements.txt" >nul 2>&1
 )
 
+REM Optional voice support — a failure here is not fatal, the mic just stays hidden.
+if exist "%APP_DIR%requirements-voice.txt" (
+    echo [SETUP] Installing optional voice support...
+    "%PYTHON_EXE%" -m pip install -r "%APP_DIR%requirements-voice.txt" >nul 2>&1
+    if errorlevel 1 echo [WARN] Voice support ^(vosk^) unavailable - continuing without the mic button.
+)
+
 REM Defaults (Server Manager will usually override these via program.env)
 if not defined HOST set "HOST=0.0.0.0"
 if not defined PORT set "PORT=8070"

@@ -33,7 +33,7 @@ def get_ollama_base() -> str:
 
     Points at wherever Ollama is running. When the app runs on the server
     manager and the model runs on your desktop, set ``OLLAMA_HOST`` to the
-    desktop's LAN or Tailscale address, e.g. ``http://100.98.112.1:11434``.
+    desktop's LAN or Tailscale address, e.g. ``http://192.168.1.50:11434``.
     A trailing ``/v1`` (the OpenAI-compatible form other cards use) is accepted
     and stripped so the native Ollama API is used.
     """
@@ -55,6 +55,21 @@ def get_request_timeout() -> float:
         return float(os.getenv("OLLAMA_TIMEOUT", "300"))
     except (TypeError, ValueError):
         return 300.0
+
+
+def get_max_body_bytes() -> int:
+    """Return the maximum accepted request body size, in bytes.
+
+    Guards the in-memory WAV upload on ``/api/transcribe``. ``CHAT_MAX_BODY_MB``
+    overrides the 25 MB default (roughly 13 minutes of 16 kHz mono audio).
+    """
+    try:
+        mb = float(os.getenv("CHAT_MAX_BODY_MB", "25"))
+    except (TypeError, ValueError):
+        mb = 25.0
+    if mb <= 0:
+        mb = 25.0
+    return int(mb * 1024 * 1024)
 
 
 def get_app_title() -> str:

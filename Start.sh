@@ -39,13 +39,25 @@ if [[ -f "$APP_DIR/requirements.txt" ]]; then
   "$PY_CMD" -m pip install -r "$APP_DIR/requirements.txt"
 fi
 
+# --- Optional voice support (vosk has no wheel on some platforms) ---
+# A failure here must not stop the app: voice input is optional, and without it
+# the mic button just stays hidden.
+if [[ -f "$APP_DIR/requirements-voice.txt" ]]; then
+  echo "[SETUP] Installing optional voice support..."
+  if ! "$PY_CMD" -m pip install -r "$APP_DIR/requirements-voice.txt"; then
+    echo "[WARN] Voice support (vosk) could not be installed on this platform."
+    echo "[WARN] Continuing without it — the mic button will be hidden."
+  fi
+fi
+
 # --- Network (Server Manager passes HOST/PORT in env) ---
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8070}"
 
 # --- Ollama server (where the model runs). Point this at your desktop's LAN or
-# Tailscale address so the app on the server manager can reach it. ---
-export OLLAMA_HOST="${OLLAMA_HOST:-http://100.98.112.1:11434}"
+# Tailscale address (e.g. http://192.168.1.50:11434) so the app on the server
+# manager can reach it — set it here or in the program's env. ---
+export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 export OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.1:8b}"
 
 echo "[RUN] Starting Ollama Chat on ${HOST}:${PORT}  (OLLAMA_HOST=${OLLAMA_HOST})"

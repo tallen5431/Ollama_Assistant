@@ -23,7 +23,7 @@ import socket
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, Response, jsonify, request, stream_with_context
-from flask_cors import CORS
+from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import authz
@@ -33,6 +33,7 @@ from config import (
     get_app_title,
     get_default_model,
     get_host_port,
+    get_max_body_bytes,
     get_ollama_base,
     logger,
 )
@@ -44,11 +45,25 @@ from ollama_client import chat_stream, list_models
 # -------------------------------------------------------------------
 
 app = Flask(__name__)
-CORS(app)
+
+# No CORS: the UI ships with this app and only calls relative paths, so nothing
+# legitimate is cross-origin. Allowing any origin would let a page the user
+# happens to visit drive their local model over the LAN and read the reply.
+
+# Cap request bodies so a single oversized POST (notably the raw WAV upload to
+# /api/transcribe, which is buffered in memory) can't exhaust RAM.
+app.config["MAX_CONTENT_LENGTH"] = get_max_body_bytes()
 
 # Respect X-Forwarded-* headers so the app works behind the manager's reverse
 # proxy (Caddy) as well as when accessed directly.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def _too_large(_exc: RequestEntityTooLarge) -> Any:
+    """Return the body-size rejection as JSON — the UI only parses JSON."""
+    limit = app.config["MAX_CONTENT_LENGTH"]
+    return jsonify({"error": f"Request body too large (limit {limit // (1024 * 1024)} MB)"}), 413
 
 
 # -------------------------------------------------------------------
@@ -88,7 +103,7 @@ def index() -> Any:
     return render_page(get_app_title())
 
 
-@app.route("/healthz", methods=["GET"])
+@app.route("/healthz", methods=["GET"], strict_slashes=False)
 def healthz() -> Any:
     """Plain-text health probe for the server manager / tunnels."""
     return "ok", 200
@@ -256,7 +271,17 @@ def main() -> None:
     try:
         from waitress import serve
 
-        serve(app, host=host, port=port)
+        # Backstop the app-level cap at the socket layer so a hugely oversized
+        # upload is refused before waitress spools it. Deliberately set higher
+        # than MAX_CONTENT_LENGTH: waitress rejects with a plain-text body, so
+        # anything merely over the limit should reach Flask and get the JSON
+        # error the UI can display.
+        serve(
+            app,
+            host=host,
+            port=port,
+            max_request_body_size=app.config["MAX_CONTENT_LENGTH"] * 2,
+        )
     except ImportError:
         # Fall back to the Flask dev server if waitress isn't installed.
         logger.warning("waitress not installed; using the Flask dev server")

@@ -1,0 +1,8 @@
+# Optional: offline speech-to-text for the mic button.
+#
+# Installed separately from requirements.txt because it is genuinely optional —
+# without it the mic button simply stays hidden and the rest of the app is
+# unaffected. vosk ships prebuilt wheels for linux x86_64/aarch64/armv7l and
+# win_amd64 only (no sdist), so on other platforms this install fails; the
+# launchers treat that as a warning rather than a fatal error.
+vosk==0.3.45

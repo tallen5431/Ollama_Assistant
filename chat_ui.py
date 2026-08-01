@@ -10,6 +10,8 @@ own ``/api/models``, ``/api/chat`` (streaming), ``/api/health`` and
 
 from __future__ import annotations
 
+import html
+
 _PAGE = """<!doctype html>
 <html lang="en">
   <head>
@@ -193,15 +195,16 @@ _PAGE = """<!doctype html>
         if (emptyEl) emptyEl.remove();
         const wrap = document.createElement("div");
         wrap.className = "wrap";
-        const label = modelEl.value || "Assistant";
         wrap.innerHTML =
           '<div class="msg assistant"><div class="col">' +
-            '<div class="role">' + label + '</div>' +
+            '<div class="role"></div>' +
             '<details class="think" hidden><summary>Show thinking</summary>' +
               '<div class="think-body"></div></details>' +
             '<div class="bubble">…</div>' +
             '<div class="meta"></div>' +
           '</div></div>';
+        // Model names come from the Ollama server — set as text, never markup.
+        wrap.querySelector(".role").textContent = modelEl.value || "Assistant";
         chatEl.appendChild(wrap); scrollDown();
         return {
           root: wrap,
@@ -473,5 +476,9 @@ _PAGE = """<!doctype html>
 
 
 def render_page(title: str) -> str:
-    """Return the chat page HTML with ``title`` substituted in."""
-    return _PAGE.replace("__TITLE__", title)
+    """Return the chat page HTML with ``title`` substituted in.
+
+    ``title`` comes from ``CHAT_TITLE``; escape it so a stray ``<`` or ``&`` in
+    the configured name can't break out of the tag it lands in.
+    """
+    return _PAGE.replace("__TITLE__", html.escape(title))

@@ -48,8 +48,23 @@ Manual run:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-voice.txt   # optional: mic support
 OLLAMA_HOST=http://<desktop-ip>:11434 .venv/bin/python app.py
 ```
+
+Voice support lives in a separate `requirements-voice.txt` because `vosk` only
+ships wheels for some platforms. The launchers install it too, but treat a
+failure as a warning — the app still starts, just without the mic button.
+
+## Tests
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -q
+```
+
+The suite covers the auth logic, voice-model path handling, request validation,
+and the HTTP layer. It does not require `vosk` or a running Ollama server.
 
 ## Configuration
 
@@ -63,14 +78,16 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_MODEL`      | `llama3.1:8b`               | Default model shown/selected in the UI |
 | `OLLAMA_TIMEOUT`    | `300`                       | Per-request timeout, in seconds |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
+| `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `CHAT_AUTH_USER` / `CHAT_AUTH_PASSWORD` | *(unset)* | Enable HTTP Basic Auth (or use `CHAT_AUTH=user:password`) |
 | `VOSK_MODEL`        | `en-us`                     | Default Vosk language id (e.g. `es`, `fr`, `de`) |
 | `VOSK_MODEL_PATH`   | *(unset)*                   | Path to an unpacked Vosk model. Used as the default when set (no download). |
 | `VOSK_MODELS_DIR`   | `./models`                  | Where downloaded Vosk models are stored |
 
-> `Start.sh` defaults `OLLAMA_HOST` to `http://100.98.112.1:11434` (the Tailscale
-> address the other cards use) — change it to wherever your desktop's Ollama is
-> reachable, or set it in the program's **env** in the server manager.
+> Both launchers default `OLLAMA_HOST` to `http://127.0.0.1:11434`. Unless Ollama
+> runs on the same machine, point it at your desktop's LAN or Tailscale address
+> (e.g. `http://192.168.1.50:11434`) — edit the launcher or set it in the
+> program's **env** in the server manager.
 
 ## Running the model on your desktop
 
@@ -153,4 +170,5 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `chat_ui.py`      | Single-page chat UI (inline HTML/CSS/JS) |
 | `authz.py`        | Optional HTTP Basic Auth |
 | `voice.py`        | Offline speech-to-text with Vosk |
+| `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |

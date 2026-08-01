@@ -15,9 +15,13 @@ Environment:
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
+import re
+import shutil
+import tempfile
 import wave
 import zipfile
 from pathlib import Path
@@ -53,6 +57,11 @@ CATALOG: Dict[str, Dict[str, str]] = {
 
 _DEFAULT_ID = os.getenv("VOSK_MODEL", "en-us")
 _DIR_TO_ID = {entry["dir"]: mid for mid, entry in CATALOG.items()}
+
+# Model ids arrive from the client (``?model=``) and may be joined onto the
+# models dir, so they must stay a single plain folder name — no separators, no
+# "..", nothing that could climb out of _MODELS_DIR.
+_SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _models: Dict[str, object] = {}  # cache: resolved dir path -> vosk.Model
 
@@ -152,8 +161,11 @@ def _resolve_dir(model_id: Optional[str], *, download: bool = True) -> Path:
     if mid == "custom":  # requested custom but none configured -> fall back
         mid = _DEFAULT_ID if _DEFAULT_ID in CATALOG else "en-us"
 
-    # A raw directory name that already exists under the models dir.
+    # A raw directory name that already exists under the models dir. Reject
+    # anything that isn't a plain name before touching the filesystem.
     if mid not in CATALOG:
+        if not _SAFE_ID.match(mid) or mid in (".", ".."):
+            raise ValueError(f"Unknown voice model: {mid!r}")
         direct = _MODELS_DIR / mid
         if _looks_like_model(direct):
             return direct
@@ -168,15 +180,22 @@ def _resolve_dir(model_id: Optional[str], *, download: bool = True) -> Path:
 
 
 def _download(model_id: str) -> Path:
-    """Download and unpack a catalog model, returning its directory."""
+    """Download and unpack a catalog model, returning its directory.
+
+    The zip is streamed to a private temp file rather than read into memory —
+    the large English model is 1.8 GB — and the temp name is unique so two
+    concurrent downloads of the same model can't clobber each other's file.
+    """
     entry = CATALOG[model_id]
     url = _MODEL_HOST + entry["dir"] + ".zip"
     _MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    zip_path = _MODELS_DIR / f"_{model_id}.zip"
+    fd, tmp_name = tempfile.mkstemp(prefix=f"_{model_id}-", suffix=".zip", dir=_MODELS_DIR)
+    zip_path = Path(tmp_name)
     logger.info("Downloading Vosk model '%s' from %s (one-time) ...", model_id, url)
     try:
-        with urlopen(url, timeout=600) as resp, open(zip_path, "wb") as fh:
-            fh.write(resp.read())
+        # fdopen first: if urlopen raises, the fd is still wrapped and closed.
+        with os.fdopen(fd, "wb") as fh, urlopen(url, timeout=600) as resp:
+            shutil.copyfileobj(resp, fh)
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(_MODELS_DIR)
     except URLError as exc:
@@ -184,6 +203,11 @@ def _download(model_id: str) -> Path:
             f"Could not download the '{model_id}' voice model ({exc.reason}). "
             f"Download it manually from {url}, unzip it into {_MODELS_DIR}, "
             "or set VOSK_MODEL_PATH to an unpacked model folder."
+        ) from exc
+    except zipfile.BadZipFile as exc:
+        raise ValueError(
+            f"The downloaded '{model_id}' voice model was not a valid zip "
+            "(the download may have been truncated). Try again."
         ) from exc
     finally:
         try:
@@ -232,18 +256,19 @@ def transcribe(wav_bytes: bytes, model_id: Optional[str] = None) -> str:
     except (wave.Error, EOFError) as exc:
         raise ValueError(f"Could not read audio as WAV: {exc}") from exc
 
-    if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
-        raise ValueError("Audio must be 16-bit mono PCM WAV")
+    with contextlib.closing(wf):
+        if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
+            raise ValueError("Audio must be 16-bit mono PCM WAV")
 
-    from vosk import KaldiRecognizer
+        from vosk import KaldiRecognizer
 
-    rec = KaldiRecognizer(_get_model(model_id), wf.getframerate())
-    pieces = []
-    while True:
-        data = wf.readframes(4000)
-        if not data:
-            break
-        if rec.AcceptWaveform(data):
-            pieces.append(json.loads(rec.Result()).get("text", ""))
-    pieces.append(json.loads(rec.FinalResult()).get("text", ""))
+        rec = KaldiRecognizer(_get_model(model_id), wf.getframerate())
+        pieces = []
+        while True:
+            data = wf.readframes(4000)
+            if not data:
+                break
+            if rec.AcceptWaveform(data):
+                pieces.append(json.loads(rec.Result()).get("text", ""))
+        pieces.append(json.loads(rec.FinalResult()).get("text", ""))
     return " ".join(p for p in pieces if p).strip()
