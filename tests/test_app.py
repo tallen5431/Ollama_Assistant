@@ -232,3 +232,49 @@ class TestBindHostResolution:
     def test_unresolvable_placeholder_falls_back(self):
         # The bug this guards: a launcher passing an unsubstituted "HOST=PORT".
         assert app_module._resolve_bind_host("HOST=PORT") == "0.0.0.0"
+
+
+class TestReviewRegressions:
+    """Cases found by the code review — each failed before its fix."""
+
+    def test_non_ascii_credentials_are_rejected_not_a_500(self, auth_client):
+        """compare_digest raises TypeError on non-ASCII str; it must not escape."""
+        token = base64.b64encode("üser:nope".encode()).decode()
+        assert auth_client.get("/api/health", headers={"Authorization": "Basic " + token}).status_code == 401
+
+    def test_non_ascii_password_does_not_lock_the_app_out(self, monkeypatch):
+        mod = load_app(monkeypatch, {"CHAT_AUTH_USER": "tj", "CHAT_AUTH_PASSWORD": "café"})
+        client = mod.app.test_client()
+        token = base64.b64encode("tj:café".encode()).decode()
+        assert client.get("/api/health", headers={"Authorization": "Basic " + token}).status_code == 200
+        assert client.get("/api/health").status_code == 401
+
+    @pytest.mark.parametrize("body", ['["a"]', '"hi"', "5", "true", "null"])
+    def test_non_object_json_body_is_a_400_not_a_500(self, client, body):
+        resp = client.post("/api/chat", data=body, content_type="application/json")
+        assert resp.status_code == 400
+        assert "error" in resp.get_json()
+
+    def test_sub_megabyte_cap_is_not_reported_as_zero(self, monkeypatch):
+        mod = load_app(monkeypatch, {"CHAT_MAX_BODY_MB": "0.5"})
+        resp = mod.app.test_client().post(
+            "/api/chat", data=b"x" * 700_000, content_type="application/json"
+        )
+        assert resp.status_code == 413
+        assert "0 MB" not in resp.get_json()["error"]
+
+    def test_num_ctx_is_sent_on_every_turn(self, monkeypatch):
+        """Varying load options between turns makes Ollama reload the runner."""
+        import ollama_client
+
+        seen = {}
+
+        def fake_stream(model, messages, options=None):
+            seen["options"] = options
+            yield '{"done": true}'
+
+        monkeypatch.setattr(ollama_client, "chat_stream", fake_stream)
+        mod = load_app(monkeypatch)
+        monkeypatch.setattr(mod, "chat_stream", fake_stream)
+        mod.app.test_client().post("/api/chat", json={"prompt": "hi"}).get_data()
+        assert seen["options"]["num_ctx"] >= 4096

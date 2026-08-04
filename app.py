@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -68,7 +69,8 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_
 def _too_large(_exc: RequestEntityTooLarge) -> Any:
     """Return the body-size rejection as JSON — the UI only parses JSON."""
     limit = app.config["MAX_CONTENT_LENGTH"]
-    return jsonify({"error": f"Request body too large (limit {limit // (1024 * 1024)} MB)"}), 413
+    # :.3g not // — a sub-megabyte cap otherwise reports itself as "limit 0 MB".
+    return jsonify({"error": f"Request body too large (limit {limit / (1024 * 1024):.3g} MB)"}), 413
 
 
 # -------------------------------------------------------------------
@@ -146,7 +148,11 @@ def api_chat() -> Any:
     Streams token-by-token NDJSON by default (what the UI consumes). Pass
     ``{"stream": false}`` to get a single JSON ``{"model", "reply"}`` object.
     """
-    body = request.get_json(silent=True) or {}
+    # A top-level array/string/number is valid JSON but has no .get, and
+    # `or {}` only guards against falsy — so normalise before touching it.
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
     model = body.get("model") or get_default_model()
     messages: Optional[List[Dict[str, str]]] = body.get("messages")
 
@@ -176,15 +182,16 @@ def api_chat() -> Any:
     @stream_with_context
     def generate() -> Any:
         try:
-            convo, options = messages, None
+            # Always send num_ctx, not only on web turns: changing a model's
+            # load options mid-conversation makes Ollama reload the runner and
+            # throw away the KV cache.
+            convo, options = messages, {"num_ctx": get_num_ctx()}
             if use_web:
                 documents: List[Dict[str, str]] = []
                 for line in _gather_web(model, messages, documents):
                     yield line
                 if documents:
                     convo = web.with_context(messages, web.build_context(documents))
-                    # Only widen the window when there is extra material to hold.
-                    options = {"num_ctx": get_num_ctx()}
                     yield _line(
                         {"sources": [{"url": d["url"], "title": d["title"]} for d in documents]}
                     )
@@ -242,32 +249,51 @@ def _gather_web(
         return
 
     yield _line({"status": "Searching: " + " · ".join(queries)})
-    groups, failures = [], []
-    for query in queries:
-        try:
-            groups.append(web.search(query, limit=4))
-        except web.WebError as exc:
-            failures.append(str(exc))
+    # Concurrently: three searches then several fetches, run one after another,
+    # each with its own timeout, is the sum of every round trip before the user
+    # sees a single token.
+    groups, failures = _run_all(web.search, queries)
 
     max_docs = get_web_max_docs()
-    # Interleave so each query contributes, then fetch a few more candidates
-    # than needed since some will be paywalled, JS-only, or plain unreachable.
+    # Interleave so each query contributes, then fetch more candidates than
+    # needed since some will be paywalled, JS-only, or plain unreachable.
     results = web.merge_results(groups, limit=max_docs * 2)
     if not results:
         yield _line({"status": failures[0] if failures else "No search results found."})
         return
 
-    for result in results:
-        if len(documents) >= max_docs:
-            break
-        yield _line({"status": f"Reading {_host_of(result['url'])}…"})
-        try:
-            documents.append(web.fetch(result["url"]))
-        except web.WebError as exc:
-            logger.info("Skipping %s: %s", result["url"], exc)
+    urls = [r["url"] for r in results]
+    yield _line({"status": "Reading " + ", ".join(_host_of(u) for u in urls[:max_docs]) + "…"})
+    fetched, _ = _run_all(web.fetch, urls)
+    documents.extend(fetched[:max_docs])
 
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
+
+
+def _run_all(func: Any, items: List[Any]) -> Any:
+    """Run ``func`` over ``items`` concurrently, returning (results, errors).
+
+    Order is preserved so interleaving and ranking stay deterministic; a WebError
+    for one item is collected rather than raised, since one dead link must not
+    cost the others.
+    """
+    if not items:
+        return [], []
+    results: List[Any] = [None] * len(items)
+    errors: List[str] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(items))) as pool:
+        futures = {pool.submit(func, item): i for i, item in enumerate(items)}
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                results[index] = future.result()
+            except web.WebError as exc:
+                errors.append(str(exc))
+            except Exception as exc:  # noqa: BLE001 - one bad item, not the turn
+                logger.info("Retrieval failed for %r: %s", items[index], exc)
+                errors.append(str(exc))
+    return [r for r in results if r], errors
 
 
 @app.route("/api/voice/models", methods=["GET"])
@@ -283,7 +309,9 @@ def api_voice_download() -> Any:
     """Download a catalog Vosk model so it's ready before recording."""
     if not voice.voice_available():
         return jsonify({"error": "Voice input is not available (vosk not installed)."}), 501
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
     model_id = body.get("id")
     if not model_id:
         return jsonify({"error": "Missing 'id'"}), 400

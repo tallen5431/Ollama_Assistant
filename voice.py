@@ -16,12 +16,14 @@ Environment:
 from __future__ import annotations
 
 import contextlib
+import http.client
 import io
 import json
 import os
 import re
 import shutil
 import tempfile
+import threading
 import wave
 import zipfile
 from pathlib import Path
@@ -64,6 +66,7 @@ _DIR_TO_ID = {entry["dir"]: mid for mid, entry in CATALOG.items()}
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _models: Dict[str, object] = {}  # cache: resolved dir path -> vosk.Model
+_models_lock = threading.Lock()  # loading is slow; don't do it twice at once
 
 
 def vosk_installed() -> bool:
@@ -126,7 +129,9 @@ def list_models() -> Dict[str, object]:
 
     for path in _downloaded_dirs():
         mid = _DIR_TO_ID.get(path.name, path.name)
-        if mid in seen_ids:
+        # Don't advertise an id _resolve_dir would reject (e.g. a folder named
+        # "vosk-model-small-en-us-0.15 (1)") — it would 400 on first use.
+        if mid in seen_ids or not (mid in CATALOG or _SAFE_ID.match(mid)):
             continue
         seen_ids.add(mid)
         available.append({"id": mid, "label": _label_for_dir(path.name), "downloaded": True})
@@ -138,7 +143,7 @@ def list_models() -> Dict[str, object]:
                 "id": mid,
                 "label": entry["label"],
                 "size": entry["size"],
-                "downloaded": (_MODELS_DIR / entry["dir"]).is_dir(),
+                "downloaded": _looks_like_model(_MODELS_DIR / entry["dir"]),
             }
         )
 
@@ -172,7 +177,7 @@ def _resolve_dir(model_id: Optional[str], *, download: bool = True) -> Path:
         raise ValueError(f"Unknown voice model: {mid!r}")
 
     target = _MODELS_DIR / CATALOG[mid]["dir"]
-    if target.is_dir():
+    if _looks_like_model(target):
         return target
     if not download:
         raise ValueError(f"Voice model '{mid}' is not downloaded yet")
@@ -191,13 +196,25 @@ def _download(model_id: str) -> Path:
     _MODELS_DIR.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f"_{model_id}-", suffix=".zip", dir=_MODELS_DIR)
     zip_path = Path(tmp_name)
+    staging: Optional[Path] = None
     logger.info("Downloading Vosk model '%s' from %s (one-time) ...", model_id, url)
     try:
         # fdopen first: if urlopen raises, the fd is still wrapped and closed.
         with os.fdopen(fd, "wb") as fh, urlopen(url, timeout=600) as resp:
             shutil.copyfileobj(resp, fh)
+        # Unpack to a staging dir and move into place only once complete: a
+        # download interrupted at 1.7 of 1.8 GB would otherwise leave a folder
+        # that every later check reports as "already downloaded".
+        staging = Path(tempfile.mkdtemp(prefix=f"_{model_id}-unpack-", dir=_MODELS_DIR))
         with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(_MODELS_DIR)
+            zf.extractall(staging)
+        unpacked = staging / entry["dir"]
+        if not _looks_like_model(unpacked):
+            raise ValueError("Voice model archive did not contain the expected folder")
+        final = _MODELS_DIR / entry["dir"]
+        if final.exists():
+            shutil.rmtree(final, ignore_errors=True)
+        os.replace(unpacked, final)
     except URLError as exc:
         raise ValueError(
             f"Could not download the '{model_id}' voice model ({exc.reason}). "
@@ -209,11 +226,19 @@ def _download(model_id: str) -> Path:
             f"The downloaded '{model_id}' voice model was not a valid zip "
             "(the download may have been truncated). Try again."
         ) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise ValueError(
+            f"The '{model_id}' voice model download failed ({exc}). "
+            f"Download it manually from {url}, unzip it into {_MODELS_DIR}, "
+            "or set VOSK_MODEL_PATH to an unpacked model folder."
+        ) from exc
     finally:
         try:
             zip_path.unlink()
         except OSError:
             pass
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
 
     target = _MODELS_DIR / entry["dir"]
     if not target.is_dir():
@@ -230,14 +255,22 @@ def download_model(model_id: str) -> Dict[str, object]:
 
 
 def _get_model(model_id: Optional[str]):
-    """Load (and cache) the Vosk model for ``model_id``."""
-    path = _resolve_dir(model_id)
-    key = str(path)
-    if key not in _models:
-        from vosk import Model
+    """Load (and cache) the Vosk model for ``model_id``.
 
-        _models[key] = Model(key)
-    return _models[key]
+    Keyed on the resolved path so a relative VOSK_MODEL_PATH and its catalog
+    equivalent don't load the same 1.8 GB model twice, and guarded by a lock
+    because continuous mode can fire overlapping transcriptions on a cold cache.
+    """
+    key = str(_resolve_dir(model_id).resolve())
+    cached = _models.get(key)
+    if cached is not None:
+        return cached
+    with _models_lock:
+        if key not in _models:
+            from vosk import Model
+
+            _models[key] = Model(key)
+        return _models[key]
 
 
 # ---------------------------------------------------------------------------

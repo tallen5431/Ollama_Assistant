@@ -59,10 +59,16 @@ def _parse(resp: requests.Response, url: str) -> Dict[str, Any]:
             f"Ollama returned HTTP {resp.status_code}: {resp.text[:256]}"
         )
     try:
-        return resp.json()
+        data = resp.json()
     except ValueError as exc:
         logger.error("Invalid JSON from Ollama at %s: %s", url, resp.text[:512])
         raise ValueError("Invalid JSON from Ollama") from exc
+    # Callers index this like an object; a bare array or string would raise
+    # AttributeError past the ValueError handlers and become a bare 500.
+    if not isinstance(data, dict):
+        logger.error("Unexpected JSON shape from Ollama at %s: %s", url, type(data).__name__)
+        raise ValueError("Unexpected JSON from Ollama (expected an object)")
+    return data
 
 
 def list_models() -> List[Dict[str, Any]]:
@@ -82,8 +88,9 @@ def chat(
     if options:
         payload["options"] = options
     data = post_ollama("/api/chat", payload)
-    message = data.get("message") or {}
-    return message.get("content") or data.get("response") or ""
+    message = data.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return content or data.get("response") or ""
 
 
 def chat_stream(

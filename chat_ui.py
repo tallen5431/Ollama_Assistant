@@ -25,6 +25,9 @@ _PAGE = """<!doctype html>
         --user:#2563eb; --assistant:#1e293b; --danger:#ef4444; --ok:#22c55e;
       }
       * { box-sizing:border-box; }
+      /* Author display rules outrank the UA [hidden] rule, so every
+         flex element here would ignore .hidden without this. */
+      [hidden] { display:none !important; }
       html, body { height:100%; margin:0; }
       body {
         background:var(--bg); color:var(--text);
@@ -73,7 +76,7 @@ _PAGE = """<!doctype html>
       .sources { font-size:0.72rem; color:var(--muted); margin:0.3rem 0.3rem 0; }
       .sources a { color:var(--muted); text-decoration:underline; }
       .sources a:hover { color:var(--text); }
-      .status { font-size:0.75rem; color:var(--muted); font-style:italic;
+      .webstatus { font-size:0.75rem; color:var(--muted); font-style:italic;
         margin:0 0.3rem 0.3rem; }
       details.think {
         margin:0 0 0.4rem; background:var(--panel2); border:1px solid var(--border);
@@ -116,6 +119,27 @@ _PAGE = """<!doctype html>
       #voiceModel { flex:0 1 auto; min-width:0; max-width:16rem; font-size:0.82rem; padding:0.45rem 0.4rem; }
       @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.55;} }
       .hint { color:var(--muted); font-size:0.72rem; margin:0.35rem 0.2rem 0; min-height:1rem; }
+
+      /* Phones: reclaim vertical space and stop the header wrapping. */
+      @media (max-width: 640px) {
+        header { gap:0.5rem; padding:0.5rem 0.7rem; flex-wrap:nowrap; }
+        header h1 { font-size:0.95rem; overflow:hidden; text-overflow:ellipsis; }
+        .model-label { display:none; }          /* the dropdown speaks for itself */
+        #statusText { display:none; }           /* the coloured dot already says it */
+        #model { max-width:9rem; font-size:0.8rem; padding:0.35rem 0.4rem; }
+        #newChat { font-size:0.8rem; padding:0.35rem 0.5rem; }
+        #chat { padding:0.9rem 0.7rem; }
+        footer { padding:0.5rem 0.7rem; }
+        .col { max-width:92%; }
+        textarea { font-size:1rem; }            /* < 1rem makes iOS zoom on focus */
+        .composer { gap:0.35rem; }
+        .composer button { padding:0.5rem 0.45rem; }
+        button.primary { padding:0.5rem 0.7rem; }
+        .voicebar { gap:0.4rem 0.6rem; }
+        #webnote { display:none; }   /* the tooltip covers it */
+      }
+      .insecure { margin:0 0.2rem 0.5rem; }
+      .insecure a { color:var(--accent); word-break:break-all; }
     </style>
   </head>
   <body>
@@ -123,7 +147,7 @@ _PAGE = """<!doctype html>
       <h1>__TITLE__</h1>
       <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
       <div class="spacer"></div>
-      <label class="status" for="model">Model</label>
+      <label class="status model-label" for="model">Model</label>
       <select id="model" title="Choose which local model answers"></select>
       <button id="newChat" title="Clear the conversation">New chat</button>
     </header>
@@ -149,6 +173,7 @@ _PAGE = """<!doctype html>
             <input type="checkbox" id="continuous"> 🔁 Continuous
           </label>
         </div>
+        <p class="hint insecure" id="insecureNote" hidden></p>
         <div class="voicebar" id="webbar" hidden>
           <label class="voicebar-check" title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
             <input type="checkbox" id="web"> 🌐 Web access
@@ -157,7 +182,7 @@ _PAGE = """<!doctype html>
         </div>
         <div class="thumbs" id="thumbs" hidden></div>
         <div class="composer">
-          <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
+          <textarea id="input" rows="1" placeholder="Type a message…"></textarea>
           <button id="attach" title="Attach an image (needs a vision model)">📎</button>
           <button id="shot" title="Capture a screenshot to analyse" hidden>📸</button>
           <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
@@ -171,7 +196,6 @@ _PAGE = """<!doctype html>
 
     <script>
       const chatEl   = document.getElementById("chat");
-      const emptyEl  = document.getElementById("empty");
       const inputEl  = document.getElementById("input");
       const sendBtn  = document.getElementById("send");
       const stopBtn  = document.getElementById("stop");
@@ -184,6 +208,7 @@ _PAGE = """<!doctype html>
       const continuousEl = document.getElementById("continuous");
       const webEl    = document.getElementById("web");
       const webBar   = document.getElementById("webbar");
+      const insecureNote = document.getElementById("insecureNote");
       const attachBtn = document.getElementById("attach");
       const shotBtn  = document.getElementById("shot");
       const fileEl   = document.getElementById("file");
@@ -197,6 +222,7 @@ _PAGE = """<!doctype html>
       let busy = false;
       let controller = null;   // AbortController for the in-flight stream
       let pendingImages = [];  // [{ b64, url }] attached but not yet sent
+      let pendingAutoSend = false;  // an utterance arrived while busy
 
       function setStatus(state, text) {
         dotEl.className = "dot" + (state ? " " + state : "");
@@ -206,7 +232,15 @@ _PAGE = """<!doctype html>
         inputEl.style.height = "auto";
         inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.4) + "px";
       }
-      function scrollDown() { chatEl.scrollTop = chatEl.scrollHeight; }
+      // Coalesce to one layout per frame. Writing the bubble then reading
+      // scrollHeight on every token forces a synchronous re-wrap of the whole
+      // reply, which is quadratic in its length.
+      let scrollPending = false;
+      function scrollDown() {
+        if (scrollPending) return;
+        scrollPending = true;
+        requestAnimationFrame(() => { scrollPending = false; chatEl.scrollTop = chatEl.scrollHeight; });
+      }
 
       // Split assistant text into visible content + inline <think> reasoning.
       function splitThink(raw) {
@@ -230,8 +264,15 @@ _PAGE = """<!doctype html>
         return parts.join("  ·  ");
       }
 
+      // Look the placeholder up each time: newChat() replaces the node, so a
+      // reference cached at load goes stale after the first conversation.
+      function clearPlaceholder() {
+        const el = document.getElementById("empty");
+        if (el) el.remove();
+      }
+
       function addUser(text, images) {
-        if (emptyEl) emptyEl.remove();
+        clearPlaceholder();
         const wrap = document.createElement("div");
         wrap.className = "wrap";
         wrap.innerHTML = '<div class="msg user"><div class="col"><div class="role">You</div>' +
@@ -371,13 +412,13 @@ _PAGE = """<!doctype html>
       // Build an assistant message with a (hidden until used) thinking panel,
       // the bubble, and a usage meta line. Returns handles to update live.
       function addAssistant() {
-        if (emptyEl) emptyEl.remove();
+        clearPlaceholder();
         const wrap = document.createElement("div");
         wrap.className = "wrap";
         wrap.innerHTML =
           '<div class="msg assistant"><div class="col">' +
             '<div class="role"></div>' +
-            '<div class="status" hidden></div>' +
+            '<div class="webstatus" hidden></div>' +
             '<details class="think" hidden><summary>Show thinking</summary>' +
               '<div class="think-body"></div></details>' +
             '<div class="bubble">…</div>' +
@@ -390,7 +431,7 @@ _PAGE = """<!doctype html>
         return {
           root: wrap,
           bubble: wrap.querySelector(".bubble"),
-          status: wrap.querySelector(".status"),
+          status: wrap.querySelector(".webstatus"),
           think: wrap.querySelector("details.think"),
           thinkBody: wrap.querySelector(".think-body"),
           meta: wrap.querySelector(".meta"),
@@ -455,7 +496,22 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
-          if (data.voice) { micBtn.hidden = false; await loadVoiceModels(); }
+          if (!data.voice) return;
+          if (window.isSecureContext) {
+            micBtn.hidden = false;
+            await loadVoiceModels();
+            return;
+          }
+          // The mic API simply does not exist off a secure origin, so show the
+          // exact URL that works rather than a button that can only fail.
+          const secureUrl = "https://" + location.hostname + location.pathname;
+          insecureNote.innerHTML = "";
+          insecureNote.appendChild(document.createTextNode("🎤 Voice needs a secure page. Open "));
+          const link = document.createElement("a");
+          link.href = secureUrl; link.textContent = secureUrl;
+          insecureNote.appendChild(link);
+          insecureNote.appendChild(document.createTextNode(" (no port) — this page is plain HTTP."));
+          insecureNote.hidden = false;
         } catch (e) { /* leave mic hidden */ }
       }
 
@@ -515,6 +571,9 @@ _PAGE = """<!doctype html>
         inputEl.value = ""; autosize();
 
         const view = addAssistant();
+        // Abort handling runs after newChat() may have swapped `messages`;
+        // hold the identity so a cancelled reply can't land in a fresh chat.
+        const thread = messages;
         controller = new AbortController();
         let rawContent = "", thinkingField = "", started = false, usage = null;
 
@@ -570,22 +629,41 @@ _PAGE = """<!doctype html>
           const finalContent = splitThink(rawContent).content;
           view.status.hidden = true;
           view.bubble.textContent = finalContent || "(empty response)";
-          if (finalContent) messages.push({ role: "assistant", content: finalContent });
+          if (finalContent && messages === thread) messages.push({ role: "assistant", content: finalContent });
           if (usage) view.meta.textContent = fmtUsage(usage);
           setStatus("ok", "connected");
         } catch (err) {
           if (err.name === "AbortError") {
             const partial = splitThink(rawContent).content;
             view.bubble.textContent = (partial || "") + "  ⏹ stopped";
-            if (partial) messages.push({ role: "assistant", content: partial });
+            if (partial && messages === thread) messages.push({ role: "assistant", content: partial });
           } else {
-            view.root.remove();
-            markError(err.message || String(err));
+            // An error can arrive mid-stream, after text is already on screen.
+            // Discarding the view would throw away a partial answer; keep it and
+            // report alongside. With nothing rendered, drop the user turn too,
+            // or the next send posts two user messages in a row.
+            const partial = splitThink(rawContent).content;
+            if (partial) {
+              view.bubble.textContent = partial;
+              view.status.textContent = "Interrupted: " + (err.message || err);
+              view.status.hidden = false;
+              if (messages === thread) messages.push({ role: "assistant", content: partial });
+            } else {
+              view.root.remove();
+              if (messages === thread && messages.length &&
+                  messages[messages.length - 1].role === "user") messages.pop();
+              markError(err.message || String(err));
+            }
             setStatus("bad", "error");
           }
         } finally {
           busy = false; sendBtn.disabled = false; stopBtn.hidden = true;
-          controller = null; inputEl.focus();
+          controller = null;
+          if (pendingAutoSend) {
+            pendingAutoSend = false;
+            if (inputEl.value.trim()) { setTimeout(send, 0); return; }
+          }
+          inputEl.focus();
         }
       }
 
@@ -602,7 +680,10 @@ _PAGE = """<!doctype html>
 
       // ---- Voice input (offline, via /api/transcribe) ----
       let recording = false, mediaStream = null, audioCtx = null, srcNode = null, procNode = null, buffers = [];
-      let micRate = 16000;
+      let micRate = 16000, bufferedSamples = 0, micStarting = false;
+      // ~10 minutes at 16 kHz; a 16-bit mono WAV of that is ~19 MB, inside the
+      // server's 25 MB body cap with room for the header.
+      const MAX_SAMPLES = 16000 * 600;
 
       // Silence detection, so a pause ends an utterance and the mic can stay on
       // for a whole conversation instead of being tapped once per sentence.
@@ -642,7 +723,7 @@ _PAGE = """<!doctype html>
       // to be transcribed, without tearing down the mic.
       function flushUtterance() {
         const captured = buffers;
-        buffers = [];
+        buffers = []; bufferedSamples = 0;
         vadSpeechMs = 0; vadSilenceMs = 0; vadHasSpeech = false;
         const wav = encodeWav(mergeBuffers(captured), micRate, 16000);
         if (wav) transcribeBlob(wav);
@@ -650,6 +731,12 @@ _PAGE = """<!doctype html>
 
       async function toggleMic() {
         if (recording) { await stopMic(); return; }
+        if (micStarting) return;   // a second tap while permission is pending
+        micStarting = true;
+        try { await startMic(); } finally { micStarting = false; }
+      }
+
+      async function startMic() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           hintEl.textContent = "Microphone needs HTTPS. Serve the app over https (e.g. tailscale serve / Funnel).";
           return;
@@ -687,11 +774,18 @@ _PAGE = """<!doctype html>
         micRate = audioCtx.sampleRate;
         srcNode = audioCtx.createMediaStreamSource(mediaStream);
         procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-        buffers = []; vadReset();
+        buffers = []; bufferedSamples = 0; vadReset();
         procNode.onaudioprocess = (e) => {
           const chunk = new Float32Array(e.inputBuffer.getChannelData(0));
           buffers.push(chunk);
-          if (continuousEl.checked) vadStep(chunk);
+          bufferedSamples += chunk.length;
+          if (continuousEl.checked) { vadStep(chunk); return; }
+          // Push-to-talk: no VAD runs, so the idle stop and the length cap have
+          // to be enforced here or a mic left on records until the upload 413s.
+          if (bufferedSamples >= MAX_SAMPLES) {
+            hintEl.textContent = "Reached the maximum recording length — transcribing.";
+            setTimeout(stopMic, 0);
+          }
         };
         srcNode.connect(procNode); procNode.connect(audioCtx.destination);
         recording = true; micBtn.classList.add("rec"); micBtn.textContent = "⏹";
@@ -706,7 +800,7 @@ _PAGE = """<!doctype html>
         try { procNode.disconnect(); srcNode.disconnect(); } catch (e) {}
         if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
         const captured = buffers;
-        buffers = []; vadReset();
+        buffers = []; bufferedSamples = 0; vadReset();
         try { await audioCtx.close(); } catch (e) {}
         const wav = encodeWav(mergeBuffers(captured), micRate, 16000);
         if (!wav) { hintEl.textContent = ""; return; }
@@ -716,7 +810,16 @@ _PAGE = """<!doctype html>
       // Post one utterance for transcription. Runs both for a whole push-to-talk
       // recording and for each pause-delimited chunk while continuous is on, so
       // it must never assume the mic has stopped.
-      async function transcribeBlob(wav) {
+      let transcribeQueue = Promise.resolve();
+
+      function transcribeBlob(wav) {
+        // Chain rather than fire-and-forget: two utterances in flight can
+        // otherwise resolve out of order and swap words in the box.
+        transcribeQueue = transcribeQueue.then(() => sendForTranscription(wav));
+        return transcribeQueue;
+      }
+
+      async function sendForTranscription(wav) {
         hintEl.textContent = "Transcribing…";
         try {
           const mq = voiceSel.value ? ("?model=" + encodeURIComponent(voiceSel.value)) : "";
@@ -733,7 +836,11 @@ _PAGE = """<!doctype html>
           // While a reply is still streaming, hold the text in the box instead of
           // dropping it — send() would refuse it and the words would be lost.
           if (autoSendEl.checked && !busy) { send(); return; }
-          if (autoSendEl.checked && busy) hintEl.textContent = "Waiting for the reply to finish…";
+          if (autoSendEl.checked && busy) {
+            // Re-checked in send()'s finally, so the utterance is not stranded.
+            pendingAutoSend = true;
+            hintEl.textContent = "Waiting for the reply to finish…";
+          }
           if (!recording) inputEl.focus();
         } catch (e) { hintEl.textContent = "Transcription failed: " + e; }
       }
@@ -811,8 +918,18 @@ _PAGE = """<!doctype html>
       micBtn.addEventListener("click", toggleMic);
       inputEl.addEventListener("input", autosize);
       inputEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+        // isComposing / keyCode 229: Enter is accepting an IME candidate, not
+        // submitting. Sending here would post the raw romaji.
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+          e.preventDefault(); send();
+        }
       });
+
+      // Keyboard advice only where there is a keyboard; on a phone it wrapped
+      // to four lines and pushed the composer off the screen.
+      if (window.matchMedia("(min-width: 641px)").matches) {
+        inputEl.placeholder = "Type a message…  (Enter to send, Shift+Enter for a new line)";
+      }
 
       loadModels();
       checkVoice();

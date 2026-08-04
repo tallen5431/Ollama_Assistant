@@ -23,13 +23,16 @@ WEB_MAX_BYTES — see config.py.
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 import socket
+import time
 from html.parser import HTMLParser
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
+from urllib3.util import parse_url as _parse_url  # the parser requests dials with
 
 from config import (
     get_planner_model,
@@ -52,9 +55,29 @@ _OK_TYPES = ("text/html", "text/plain", "application/xhtml", "application/json")
 
 _MAX_REDIRECTS = 4
 
+# One pooled session: a turn makes several requests, often to the same host
+# (three DuckDuckGo queries, then the pages), and a fresh TCP+TLS handshake per
+# request is the dominant cost on short fetches.
+_SESSION = requests.Session()
+
 
 class WebError(ValueError):
     """A retrieval failed in a way worth showing the user."""
+
+
+class _Deadline:
+    """A wall-clock budget for one retrieval, spanning redirects and body read."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = max(1.0, float(seconds))
+        self.started = time.monotonic()
+
+    def remaining(self) -> float:
+        left = self.seconds - (time.monotonic() - self.started)
+        return max(0.5, left)   # always leave enough to fail cleanly
+
+    def expired(self) -> bool:
+        return (time.monotonic() - self.started) >= self.seconds
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +109,43 @@ def _is_public(host: str) -> bool:
 
 
 def check_url(url: str) -> str:
-    """Validate a URL for outbound fetching, returning it normalised.
+    """Validate a URL for outbound fetching, returning what should be dialled.
+
+    Parsed with urllib3's parser — the one ``requests`` itself uses to decide
+    where to connect. Validating with ``urllib.parse.urlparse`` instead leaves a
+    gap: the two disagree on an authority containing a backslash, so
+    ``http://127.0.0.1:11434\\@example.com/`` reads as host ``example.com`` to
+    one and ``127.0.0.1`` to the other, and a guard on the first is checking a
+    host that is never contacted.
 
     Raises WebError for anything not plainly a public http(s) document.
     """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise WebError(f"Only http(s) URLs can be fetched, not {parsed.scheme or 'that'!r}")
-    if not parsed.hostname:
+    url = (url or "").strip()
+    if not url:
+        raise WebError("That URL is empty")
+    # Anything that could be read differently by two parsers is simply refused;
+    # no legitimate link needs these.
+    if any(ch in url for ch in "\\\r\n\t") or any(ord(ch) < 0x20 for ch in url):
+        raise WebError("That URL contains characters that can't be trusted to parse safely")
+
+    try:
+        parsed = _parse_url(url)
+    except Exception as exc:  # noqa: BLE001 - LocationParseError and friends
+        raise WebError(f"Could not parse that URL: {exc}") from exc
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise WebError(f"Only http(s) URLs can be fetched, not {scheme or 'that'!r}")
+    if parsed.auth:
+        # user:pass@host is the classic way to make a URL look like it points
+        # somewhere it doesn't, and nothing here needs it.
+        raise WebError("URLs with embedded credentials are not fetched")
+    host = (parsed.host or "").strip("[]")
+    if not host:
         raise WebError("That URL has no host")
-    if not _is_public(parsed.hostname):
+    if not _is_public(host):
         raise WebError(
-            f"Refusing to fetch {parsed.hostname} — it resolves to a private or "
+            f"Refusing to fetch {host} — it resolves to a private or "
             "local address, which is not something this app will reach on a "
             "model's or a page's say-so."
         )
@@ -195,12 +243,15 @@ def _get(
     Unlike the Ollama client this deliberately does *not* bypass a configured
     proxy: Ollama is on the local network, but this traffic is going out.
     """
-    timeout = get_web_timeout()
+    budget = _Deadline(get_web_timeout())
+    # `trusted` covers the configured endpoint itself, never where it sends us:
+    # a redirect target is chosen by the server, so every hop after the first is
+    # checked like any other URL.
     current = url if trusted else check_url(url)
     for _ in range(_MAX_REDIRECTS):
-        resp = requests.get(
+        resp = _SESSION.get(
             current,
-            timeout=timeout,
+            timeout=budget.remaining(),
             allow_redirects=False,
             stream=True,
             headers={"User-Agent": _UA, "Accept-Language": "en", **(headers or {})},
@@ -210,22 +261,30 @@ def _get(
             resp.close()
             if not location:
                 raise WebError("Got a redirect with nowhere to go")
-            nxt = urljoin(current, location)
-            current = nxt if trusted else check_url(nxt)
+            current = check_url(urljoin(current, location))
             continue
+        resp._deadline = budget   # _read_capped enforces the overall budget
         return resp
     raise WebError("Too many redirects")
 
 
 def _read_capped(resp: requests.Response) -> str:
-    """Read a response body up to the byte cap, decoded as text."""
+    """Read a response body up to the byte cap, decoded as text.
+
+    Also honours the request's overall deadline: ``timeout=`` is per socket
+    read, so a server dripping a byte at a time would otherwise hold a worker
+    forever and a handful of those would wedge the whole thread pool.
+    """
     limit = get_web_max_bytes()
+    budget = getattr(resp, "_deadline", None)
     chunks, total = [], 0
     for chunk in resp.iter_content(64 * 1024):
         chunks.append(chunk)
         total += len(chunk)
         if total >= limit:
             break
+        if budget is not None and budget.expired():
+            raise WebError("Timed out while reading the page")
     raw = b"".join(chunks)
     encoding = resp.encoding or "utf-8"
     try:
@@ -239,20 +298,22 @@ def fetch(url: str) -> Dict[str, str]:
     if not web_enabled():
         raise WebError("Web access is disabled on this server (WEB_ENABLED=0)")
 
+    # The body read must sit inside the guard too: a connection that dies
+    # mid-download raises ChunkedEncodingError, which is not a WebError, and
+    # callers only catch WebError — so it would abort the whole chat turn.
     try:
         resp = _get(url)
+        with resp:
+            if not resp.ok:
+                raise WebError(f"{url} returned HTTP {resp.status_code}")
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype and not any(ctype.startswith(t) for t in _OK_TYPES):
+                raise WebError(f"{url} is {ctype}, which has no text to read")
+            body = _read_capped(resp)
     except WebError:
         raise
     except requests.RequestException as exc:
         raise WebError(f"Could not fetch {url}: {exc}") from exc
-
-    with resp:
-        if not resp.ok:
-            raise WebError(f"{url} returned HTTP {resp.status_code}")
-        ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        if ctype and not any(ctype.startswith(t) for t in _OK_TYPES):
-            raise WebError(f"{url} is {ctype}, which has no text to read")
-        body = _read_capped(resp)
 
     if ctype.startswith("text/plain") or ctype.startswith("application/json"):
         title, text = url, body.strip()
@@ -344,7 +405,14 @@ def _search_searxng(base: str, query: str, limit: int) -> List[Dict[str, str]]:
     with resp:
         if not resp.ok:
             raise WebError(f"SearXNG returned HTTP {resp.status_code}")
-        data = resp.json()
+        # Read through the cap rather than resp.json(), which would happily
+        # buffer an unbounded reply.
+        try:
+            data = json.loads(_read_capped(resp))
+        except ValueError as exc:
+            raise WebError("SearXNG returned something that isn't JSON") from exc
+    if not isinstance(data, dict):
+        raise WebError("SearXNG returned an unexpected payload")
     out = []
     for item in (data.get("results") or [])[:limit]:
         if item.get("url"):

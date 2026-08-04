@@ -432,11 +432,14 @@ class TestSearchParsing:
         def fake_get(url, **kwargs):
             captured["url"] = url
             captured["trusted"] = kwargs.get("trusted")
+            payload = json.dumps({"results": [{"url": "https://a.example/", "title": "A"}]})
 
             class R:
                 ok = True
-                def json(self):
-                    return {"results": [{"url": "https://a.example/", "title": "A"}]}
+                encoding = "utf-8"
+                headers = {"Content-Type": "application/json"}
+                def iter_content(self, size):
+                    yield payload.encode()
                 def __enter__(self):
                     return self
                 def __exit__(self, *a):
@@ -452,3 +455,65 @@ class TestSearchParsing:
 
     def test_blank_query_returns_nothing(self):
         assert web.search("   ") == []
+
+
+class TestReviewRegressions:
+    """Cases found by the code review — each failed before its fix."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:11434\\@example.com/",   # urlparse vs urllib3 split
+            "http://example.com@127.0.0.1/",           # userinfo confusion
+            "http://user:pw@example.com/",             # embedded credentials
+            "http://exa\rmple.com/",                   # control character
+            "http://exa\nmple.com/",
+            "  ",
+        ],
+    )
+    def test_parser_differential_urls_are_refused(self, url):
+        """The guard must check the host requests will actually dial."""
+        with pytest.raises(web.WebError):
+            web.check_url(url)
+
+    def test_fetch_only_ever_raises_weberror(self, monkeypatch):
+        """Callers catch WebError alone; a raw requests error kills the turn."""
+        import requests
+
+        def dying_get(*a, **k):
+            raise requests.exceptions.ChunkedEncodingError("connection died mid-body")
+
+        monkeypatch.setattr(web, "_is_public", lambda h: True)
+        monkeypatch.setattr(web._SESSION, "get", dying_get)
+        with pytest.raises(web.WebError):
+            web.fetch("http://example.com/")
+
+    def test_a_redirect_is_rechecked_even_from_a_trusted_start(self, monkeypatch):
+        """trusted covers the configured endpoint, never where it sends us."""
+        calls = []
+
+        class Redirect:
+            status_code = 302
+            headers = {"Location": "http://127.0.0.1:11434/api/tags"}
+            def close(self):
+                pass
+
+        monkeypatch.setattr(web._SESSION, "get", lambda url, **k: (calls.append(url), Redirect())[1])
+        with pytest.raises(web.WebError, match="private or local"):
+            web._get("http://127.0.0.1:8888/search", trusted=True)
+        assert len(calls) == 1, "must not follow the redirect"
+
+    def test_deadline_expires(self):
+        """A wall-clock budget, so a slow-drip server can't hold a worker."""
+        import time as _t
+
+        budget = web._Deadline(5)
+        assert not budget.expired()
+        budget.started -= 6          # pretend six seconds passed
+        assert budget.expired()
+        # Still returns a positive timeout so the next call fails rather than hangs.
+        assert budget.remaining() == 0.5
+
+    def test_deadline_has_a_floor(self):
+        """An absurdly small WEB_TIMEOUT must not make every fetch impossible."""
+        assert web._Deadline(0.01).seconds == 1.0

@@ -52,7 +52,10 @@ def credentials_match(
     if not (user and pw):
         return False
     # Compare both fields in constant time; AND the results so timing can't
-    # reveal which of the two was wrong.
-    user_ok = hmac.compare_digest(username or "", user)
-    pw_ok = hmac.compare_digest(password or "", pw)
+    # reveal which of the two was wrong. Encode first: compare_digest rejects
+    # non-ASCII *str* with a TypeError, so a username like "üser" — or a
+    # configured password like "café" — would otherwise raise straight out of
+    # the auth hook as a 500, and in the configured case lock everyone out.
+    user_ok = hmac.compare_digest((username or "").encode("utf-8"), user.encode("utf-8"))
+    pw_ok = hmac.compare_digest((password or "").encode("utf-8"), pw.encode("utf-8"))
     return user_ok and pw_ok
