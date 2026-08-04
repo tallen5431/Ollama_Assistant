@@ -469,24 +469,60 @@ _PAGE = """<!doctype html>
         });
       }
 
-      // Downscale before sending: vision models work from a few hundred pixels,
-      // and a full-size photo or screen grab would blow past the body limit.
-      function drawScaled(source, w, h, maxDim) {
+      // Cap on the long edge. Only genuinely large sources are reduced; a
+      // 1920x1080 screenshot passes through untouched, because halving it is
+      // what makes small text unreadable to a vision model.
+      const IMG_MAX_DIM = 1920;
+      // Above this, the image is a photograph rather than a screen grab, and
+      // lossless encoding buys nothing worth the bytes.
+      const PNG_BUDGET = 1500000;
+
+      function toCanvas(source, w, h, maxDim) {
         const scale = Math.min(1, maxDim / Math.max(w, h));
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.round(w * scale));
         canvas.height = Math.max(1, Math.round(h * scale));
         canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
-        const url = canvas.toDataURL("image/jpeg", 0.9);
-        return { url, b64: url.slice(url.indexOf(",") + 1) };
+        return canvas;
       }
 
-      async function toAttachment(file, maxDim = 1024) {
+      function approxBytes(dataUrl) {
+        return Math.floor((dataUrl.length - dataUrl.indexOf(",") - 1) * 0.75);
+      }
+
+      function asAttachment(dataUrl) {
+        return { url: dataUrl, b64: dataUrl.slice(dataUrl.indexOf(",") + 1) };
+      }
+
+      // PNG first. A screenshot is flat colour and sharp text: it compresses
+      // better as PNG than JPEG *and* stays legible, where JPEG rings around
+      // every glyph — which is exactly what a vision model then has to read.
+      // Photographs blow the budget and fall back to JPEG, where lossy is fine.
+      function encodeAttachment(canvas) {
+        const png = canvas.toDataURL("image/png");
+        if (approxBytes(png) <= PNG_BUDGET) return asAttachment(png);
+        // JPEG has no alpha and renders transparency black, so flatten onto
+        // white before encoding.
+        const flat = document.createElement("canvas");
+        flat.width = canvas.width; flat.height = canvas.height;
+        const ctx = flat.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, flat.width, flat.height);
+        ctx.drawImage(canvas, 0, 0);
+        let jpeg = flat.toDataURL("image/jpeg", 0.9);
+        // A very large or very noisy photograph can still encode huge. Step the
+        // quality down once rather than putting megabytes into every turn of
+        // the conversation, which is re-sent in full each time.
+        if (approxBytes(jpeg) > 900000) jpeg = flat.toDataURL("image/jpeg", 0.75);
+        return asAttachment(jpeg);
+      }
+
+      async function toAttachment(file, maxDim = IMG_MAX_DIM) {
         const bmp = await loadBitmap(file);
-        const out = drawScaled(bmp, bmp.width || bmp.naturalWidth,
-                                    bmp.height || bmp.naturalHeight, maxDim);
+        const canvas = toCanvas(bmp, bmp.width || bmp.naturalWidth,
+                                     bmp.height || bmp.naturalHeight, maxDim);
         if (bmp.close) bmp.close();
-        return out;
+        return encodeAttachment(canvas);
       }
 
       function addAttachment(att) {
@@ -528,7 +564,8 @@ _PAGE = """<!doctype html>
           // One extra frame: the first can still be blank on some compositors.
           await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
           if (!video.videoWidth) { hintEl.textContent = "Screen capture produced no frame."; return; }
-          addAttachment(drawScaled(video, video.videoWidth, video.videoHeight, 1600));
+          addAttachment(encodeAttachment(
+            toCanvas(video, video.videoWidth, video.videoHeight, IMG_MAX_DIM)));
           hintEl.textContent = "Screenshot attached — describe what you want to know about it.";
           inputEl.focus();
         } catch (e) {
@@ -547,7 +584,7 @@ _PAGE = """<!doctype html>
 
       // Paste an image straight in — usually the quickest route for a screenshot
       // taken with the OS shortcut.
-      inputEl.addEventListener("paste", async (e) => {
+      document.addEventListener("paste", async (e) => {
         const files = Array.from((e.clipboardData && e.clipboardData.items) || [])
           .filter((it) => it.type && it.type.startsWith("image/"))
           .map((it) => it.getAsFile())

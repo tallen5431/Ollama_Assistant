@@ -288,8 +288,8 @@ There are three ways to attach an image, up to four per message:
   picker decides what is shared; a single frame is taken and the capture stream
   is dropped immediately, so nothing is recorded. Desktop only — the button is
   hidden where `getDisplayMedia` isn't supported, which includes mobile browsers.
-- **Paste** — paste an image straight into the message box, usually the quickest
-  route for a screenshot taken with the OS shortcut.
+- **Paste** — paste an image anywhere on the page, usually the quickest route
+  for a screenshot taken with the OS shortcut.
 
 The app picks the model for you: attach an image while a text-only model is
 selected and it switches to an installed one that can see, saying so in the hint
@@ -304,11 +304,15 @@ and folded into the queries. Without that, a screenshot with "what's this?"
 plans nothing worth running. `WEB_VISION_MODEL` pins which model does that pass;
 unset picks the smallest installed one, since it only needs to describe.
 
-Images are resized in the browser and re-encoded as JPEG before upload: vision
-models work from a few hundred pixels, and a full-size photo would otherwise hit
-`CHAT_MAX_BODY_MB`. Picked and pasted images are capped at 1024 px; screenshots
-get 1600 px, since they are mostly text and text is what downscaling destroys
-first. EXIF orientation is honoured so photos aren't sent sideways.
+All three paths handle the image identically. Anything up to 1920 px on the long
+edge is kept at its original size and encoded as **PNG** — losslessly, so the
+small text in a screenshot stays legible, which is usually the entire reason for
+sending one. A 1920×1080 screenshot costs about 60 KB that way.
+
+Only when PNG exceeds ~1.5 MB is the image treated as a photograph: downscaled to
+1920 px and encoded as JPEG (dropping a quality step if it is still very large),
+with transparency flattened onto white since JPEG has no alpha. EXIF orientation
+is honoured throughout, so photos aren't sent sideways.
 
 They travel as base64 in the message, exactly as Ollama's native API expects:
 
