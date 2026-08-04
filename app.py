@@ -154,6 +154,9 @@ def api_models() -> Any:
         # Smallest general vision model: loading 19 GB because someone pasted a
         # screenshot is a poor surprise, and the user can still pick another.
         "vision_default": next(iter(vision_models(include_ocr=False)), None),
+        # A transcriber, if installed: lets a text-only model handle an image
+        # instead of the UI taking the conversation away from it.
+        "ocr_default": get_vision_model() or next(iter(ocr_models()), None),
     })
 
 
@@ -269,12 +272,27 @@ def api_chat() -> Any:
             # load options mid-conversation makes Ollama reload the runner and
             # throw away the KV cache.
             convo, options = messages, {"num_ctx": get_num_ctx()}
+
+            # An image attached to a model that cannot see used to force a
+            # switch, which meant giving up your best model exactly when you
+            # were debugging with a screenshot. Transcribe it instead and hand
+            # the text over, so a coder model keeps the question.
+            transcript = None
+            images = web.last_user_images(messages)
+            if images and not _model_has_vision(model):
+                reader, is_ocr_reader = _image_reader(model)
+                if reader:
+                    yield _line({"status": f"Reading the image with {reader}…"})
+                    transcript = web.describe_images(images, reader, ocr=is_ocr_reader)
+                    convo = web.with_context(messages, web.image_context(transcript))
+
             if use_web:
                 documents: List[Dict[str, str]] = []
-                for line in _gather_web(model, messages, documents):
+                for line in _gather_web(model, messages, documents, transcript):
                     yield line
                 if documents:
-                    convo = web.with_context(messages, web.build_context(documents))
+                    # Layer the page context on whatever the image already added.
+                    convo = web.with_context(convo, web.build_context(documents))
                     yield _line(
                         {"sources": [{"url": d["url"], "title": d["title"]} for d in documents]}
                     )
@@ -304,6 +322,7 @@ def _gather_web(
     model: str,
     messages: List[Dict[str, str]],
     documents: List[Dict[str, str]],
+    transcript: Optional[str] = None,
 ) -> Any:
     """Collect web documents for this turn, yielding progress lines as it goes.
 
@@ -325,9 +344,11 @@ def _gather_web(
     # An attached image usually carries the specifics worth searching for — the
     # exact error text, a version number — while the typed message is often just
     # "what's this?". Read it first so the planner has something to work with.
-    image_note = None
+    # Reuse the transcription the chat path already made, if any — one OCR pass
+    # per turn, serving both the answer and the search.
+    image_note = transcript
     images = web.last_user_images(messages)
-    if images:
+    if images and image_note is None:
         reader, is_reader_ocr = _image_reader(model)
         if reader:
             yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
@@ -363,6 +384,18 @@ def _gather_web(
 
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
+
+
+def _model_has_vision(name: str) -> bool:
+    """Whether the answering model can read an image itself.
+
+    OCR models are excluded: they can technically take an image, but they
+    transcribe rather than answer, so a conversation should not be handed to one.
+    """
+    try:
+        return name in vision_models(include_ocr=False)
+    except Exception:  # noqa: BLE001 - Ollama unreachable; assume it cannot
+        return False
 
 
 def _image_reader(answering_model: str) -> Any:

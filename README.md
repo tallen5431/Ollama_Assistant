@@ -293,11 +293,19 @@ There are three ways to attach an image, up to four per message:
 
 Two different jobs, deliberately given to different models:
 
-**Answering about an image.** Attach one while a text-only model is selected and
-the app switches to an installed model that can see, saying so in the hint line.
-It picks the *smallest* general vision model — silently loading a 19 GB model
-because you pasted a screenshot is a poor surprise — and you can change the
-dropdown afterwards.
+**Answering about an image.** If the selected model can see, it just answers.
+
+If it can't, and an OCR model is installed, the image is transcribed and the text
+is handed to the model you're already on — so a screenshot of a stack trace
+doesn't cost you `qwen3-coder:30b` in favour of a 3B generalist at exactly the
+moment you're debugging. The hint line says which model is doing the reading.
+
+Only when there's no transcriber installed does the app switch models, picking
+the *smallest* general vision model — silently loading a 19 GB model because you
+pasted a screenshot is a poor surprise. You can always change the dropdown.
+
+If an image has no readable text and the model can't see it, the reply says so
+and suggests picking a vision model, rather than inventing an answer.
 
 **Reading text out of an image**, when **Web access** is on. Before the search is
 planned, the image is transcribed so the exact error text, product names and

@@ -667,6 +667,29 @@ def describe_images(images: List[str], model: str, ocr: bool = False) -> Optiona
     return text[:600] or None
 
 
+_OCR_PREAMBLE = (
+    "Text transcribed from the image the user attached. The model answering "
+    "cannot see images, so this transcription is all there is of it. Treat it as "
+    "a faithful reading of the image, not as something the user typed, and answer "
+    "their question using it. Say so plainly if it does not contain what they are "
+    "asking about."
+)
+
+_OCR_NOTHING = (
+    "An image was attached, but no readable text was found in it and the model "
+    "answering cannot see images. Tell the user that, and suggest they pick a "
+    "vision model from the dropdown if the image is not text."
+)
+
+
+def image_context(transcript: Optional[str]) -> str:
+    """Render an OCR transcription as a system turn for a text-only model."""
+    text = (transcript or "").strip()
+    if not text:
+        return _OCR_NOTHING
+    return f"{_OCR_PREAMBLE}\n\n----- BEGIN IMAGE TEXT -----\n{text}\n----- END IMAGE TEXT -----"
+
+
 def last_user_images(messages: List[Dict[str, Any]]) -> List[str]:
     """Images attached to the most recent user turn."""
     for msg in reversed(messages or []):
