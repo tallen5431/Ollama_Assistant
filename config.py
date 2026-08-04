@@ -72,6 +72,56 @@ def get_max_body_bytes() -> int:
     return int(mb * 1024 * 1024)
 
 
+def _flag(name: str, default: str = "1") -> bool:
+    """Read a boolean-ish environment variable."""
+    return os.getenv(name, default).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _number(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def web_enabled() -> bool:
+    """Whether the app may reach the public web at all (operator kill switch)."""
+    return _flag("WEB_ENABLED")
+
+
+def get_search_url() -> str:
+    """Base URL of a SearXNG instance, e.g. ``http://127.0.0.1:8888``.
+
+    When unset, search falls back to DuckDuckGo's HTML endpoint, which needs no
+    key but is best-effort — self-hosting SearXNG is the sturdier option.
+    """
+    return os.getenv("SEARXNG_URL", "").strip().rstrip("/")
+
+
+def get_web_timeout() -> float:
+    """Per-request timeout when fetching a page or running a search."""
+    return _number("WEB_TIMEOUT", 15.0)
+
+
+def get_web_max_chars() -> int:
+    """How much extracted text to keep from a single page."""
+    return int(_number("WEB_MAX_CHARS", 6000))
+
+
+def get_web_max_bytes() -> int:
+    """Hard cap on a downloaded document, before extraction."""
+    return int(_number("WEB_MAX_BYTES", 2 * 1024 * 1024))
+
+
+def get_num_ctx() -> int:
+    """Context window to request when web context is attached.
+
+    Ollama defaults to a modest window (commonly 4096) whatever the model
+    supports, and a fetched page will silently push the conversation out of it.
+    """
+    return int(_number("OLLAMA_NUM_CTX", 8192))
+
+
 def get_app_title() -> str:
     """Human-friendly title shown in the browser tab and header."""
     return os.getenv("CHAT_TITLE", "Ollama Chat")

@@ -72,15 +72,25 @@ def list_models() -> List[Dict[str, Any]]:
     return models if isinstance(models, list) else []
 
 
-def chat(model: str, messages: List[Dict[str, str]]) -> str:
+def chat(
+    model: str,
+    messages: List[Dict[str, str]],
+    options: Dict[str, Any] | None = None,
+) -> str:
     """Send a chat completion (non-streaming) and return the reply text."""
-    payload = {"model": model, "messages": messages, "stream": False}
+    payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+    if options:
+        payload["options"] = options
     data = post_ollama("/api/chat", payload)
     message = data.get("message") or {}
     return message.get("content") or data.get("response") or ""
 
 
-def chat_stream(model: str, messages: List[Dict[str, str]]) -> Iterator[str]:
+def chat_stream(
+    model: str,
+    messages: List[Dict[str, str]],
+    options: Dict[str, Any] | None = None,
+) -> Iterator[str]:
     """Stream a chat completion, yielding raw NDJSON lines from Ollama.
 
     Each line is a JSON object: incremental ``{"message": {"content": "..."}}``
@@ -89,7 +99,11 @@ def chat_stream(model: str, messages: List[Dict[str, str]]) -> Iterator[str]:
     carries the token-usage stats.
     """
     url = get_ollama_base() + "/api/chat"
-    payload = {"model": model, "messages": messages, "stream": True}
+    payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+    if options:
+        # e.g. {"num_ctx": 8192} — Ollama's default window is small, and an
+        # attached web page will silently push the conversation out of it.
+        payload["options"] = options
 
     try:
         resp = requests.post(

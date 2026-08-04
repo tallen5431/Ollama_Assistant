@@ -70,6 +70,11 @@ _PAGE = """<!doctype html>
       .role { font-size:0.68rem; text-transform:uppercase; letter-spacing:0.04em;
               color:var(--muted); margin:0 0.3rem 0.2rem; }
       .meta { font-size:0.7rem; color:var(--muted); margin:0.25rem 0.3rem 0; }
+      .sources { font-size:0.72rem; color:var(--muted); margin:0.3rem 0.3rem 0; }
+      .sources a { color:var(--muted); text-decoration:underline; }
+      .sources a:hover { color:var(--text); }
+      .status { font-size:0.75rem; color:var(--muted); font-style:italic;
+        margin:0 0.3rem 0.3rem; }
       details.think {
         margin:0 0 0.4rem; background:var(--panel2); border:1px solid var(--border);
         border-radius:0.6rem; padding:0.2rem 0.55rem;
@@ -144,6 +149,12 @@ _PAGE = """<!doctype html>
             <input type="checkbox" id="continuous"> 🔁 Continuous
           </label>
         </div>
+        <div class="voicebar" id="webbar" hidden>
+          <label class="voicebar-check" title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
+            <input type="checkbox" id="web"> 🌐 Web access
+          </label>
+          <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
+        </div>
         <div class="thumbs" id="thumbs" hidden></div>
         <div class="composer">
           <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
@@ -171,6 +182,8 @@ _PAGE = """<!doctype html>
       const headsetEl = document.getElementById("headset");
       const autoSendEl = document.getElementById("autosend");
       const continuousEl = document.getElementById("continuous");
+      const webEl    = document.getElementById("web");
+      const webBar   = document.getElementById("webbar");
       const attachBtn = document.getElementById("attach");
       const shotBtn  = document.getElementById("shot");
       const fileEl   = document.getElementById("file");
@@ -364,10 +377,12 @@ _PAGE = """<!doctype html>
         wrap.innerHTML =
           '<div class="msg assistant"><div class="col">' +
             '<div class="role"></div>' +
+            '<div class="status" hidden></div>' +
             '<details class="think" hidden><summary>Show thinking</summary>' +
               '<div class="think-body"></div></details>' +
             '<div class="bubble">…</div>' +
             '<div class="meta"></div>' +
+            '<div class="sources" hidden></div>' +
           '</div></div>';
         // Model names come from the Ollama server — set as text, never markup.
         wrap.querySelector(".role").textContent = modelEl.value || "Assistant";
@@ -375,10 +390,29 @@ _PAGE = """<!doctype html>
         return {
           root: wrap,
           bubble: wrap.querySelector(".bubble"),
+          status: wrap.querySelector(".status"),
           think: wrap.querySelector("details.think"),
           thinkBody: wrap.querySelector(".think-body"),
           meta: wrap.querySelector(".meta"),
+          sources: wrap.querySelector(".sources"),
         };
+      }
+
+      // Render the pages a reply was grounded in, numbered to match the [n]
+      // citations the model is asked to use.
+      function showSources(view, list) {
+        view.sources.innerHTML = "";
+        if (!list || !list.length) { view.sources.hidden = true; return; }
+        view.sources.appendChild(document.createTextNode("Sources: "));
+        list.forEach((s, i) => {
+          if (i) view.sources.appendChild(document.createTextNode(" · "));
+          const a = document.createElement("a");
+          a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+          a.textContent = "[" + (i + 1) + "] " + (s.title || s.url);
+          a.title = s.url;
+          view.sources.appendChild(a);
+        });
+        view.sources.hidden = false;
       }
 
       function markError(msg) {
@@ -420,6 +454,7 @@ _PAGE = """<!doctype html>
       async function checkVoice() {
         try {
           const data = await (await fetch("api/health")).json();
+          if (data.web) webBar.hidden = false;
           if (data.voice) { micBtn.hidden = false; await loadVoiceModels(); }
         } catch (e) { /* leave mic hidden */ }
       }
@@ -487,7 +522,11 @@ _PAGE = """<!doctype html>
           const resp = await fetch("api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: modelEl.value || undefined, messages }),
+            body: JSON.stringify({
+              model: modelEl.value || undefined,
+              messages,
+              web: webEl.checked || undefined,
+            }),
             signal: controller.signal,
           });
           if (!resp.ok) {
@@ -508,6 +547,14 @@ _PAGE = """<!doctype html>
               if (!line) continue;
               const obj = JSON.parse(line);
               if (obj.error) throw new Error(obj.error);
+              // Web-grounding progress, emitted before the model starts.
+              if (obj.status !== undefined) {
+                view.status.textContent = obj.status;
+                view.status.hidden = !obj.status;
+                scrollDown();
+                continue;
+              }
+              if (obj.sources) { showSources(view, obj.sources); scrollDown(); continue; }
               if (obj.thinking) thinkingField += obj.thinking;
               const piece = (obj.message && obj.message.content) || obj.content || "";
               if (piece) rawContent += piece;
@@ -521,6 +568,7 @@ _PAGE = """<!doctype html>
             }
           }
           const finalContent = splitThink(rawContent).content;
+          view.status.hidden = true;
           view.bubble.textContent = finalContent || "(empty response)";
           if (finalContent) messages.push({ role: "assistant", content: finalContent });
           if (usage) view.meta.textContent = fmtUsage(usage);
@@ -755,6 +803,7 @@ _PAGE = """<!doctype html>
       rememberToggle(headsetEl, "chatHeadset", true);
       rememberToggle(autoSendEl, "chatAutoSend", false);
       rememberToggle(continuousEl, "chatContinuous", false);
+      rememberToggle(webEl, "chatWeb", false);
 
       sendBtn.addEventListener("click", send);
       stopBtn.addEventListener("click", stop);

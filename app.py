@@ -21,6 +21,7 @@ import json
 import os
 import socket
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 from werkzeug.exceptions import RequestEntityTooLarge
@@ -28,14 +29,17 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 import authz
 import voice
+import web
 from chat_ui import render_page
 from config import (
     get_app_title,
     get_default_model,
     get_host_port,
     get_max_body_bytes,
+    get_num_ctx,
     get_ollama_base,
     logger,
+    web_enabled,
 )
 from ollama_client import chat as ollama_chat
 from ollama_client import chat_stream, list_models
@@ -119,6 +123,7 @@ def health() -> Any:
             "default_model": get_default_model(),
             "auth": AUTH_ENABLED,
             "voice": voice.voice_available(),
+            "web": web_enabled(),
         }
     )
 
@@ -161,13 +166,28 @@ def api_chat() -> Any:
             return jsonify({"error": str(exc)}), 502
         return jsonify({"model": model, "reply": reply})
 
-    # Streaming path — pass Ollama's NDJSON lines straight through. Any failure
-    # (including one raised mid-stream while iterating) is turned into a final
-    # JSON error line rather than a bare HTTP 500, so the UI can show why.
+    use_web = bool(body.get("web")) and web_enabled()
+
+    # Streaming path — pass Ollama's NDJSON lines straight through, preceded by
+    # any web-grounding progress. Any failure (including one raised mid-stream
+    # while iterating) is turned into a final JSON error line rather than a bare
+    # HTTP 500, so the UI can show why.
     @stream_with_context
     def generate() -> Any:
         try:
-            for line in chat_stream(model, messages):
+            convo, options = messages, None
+            if use_web:
+                documents: List[Dict[str, str]] = []
+                for line in _gather_web(model, messages, documents):
+                    yield line
+                if documents:
+                    convo = web.with_context(messages, web.build_context(documents))
+                    # Only widen the window when there is extra material to hold.
+                    options = {"num_ctx": get_num_ctx()}
+                    yield _line(
+                        {"sources": [{"url": d["url"], "title": d["title"]} for d in documents]}
+                    )
+            for line in chat_stream(model, convo, options=options):
                 yield line + "\n"
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
@@ -175,6 +195,67 @@ def api_chat() -> Any:
             yield json.dumps({"error": message}) + "\n"
 
     return Response(generate(), mimetype="application/x-ndjson")
+
+
+def _line(obj: Dict[str, Any]) -> str:
+    """One NDJSON line for the client."""
+    return json.dumps(obj) + "\n"
+
+
+def _host_of(url: str) -> str:
+    try:
+        return urlparse(url).hostname or url
+    except ValueError:
+        return url
+
+
+def _gather_web(
+    model: str,
+    messages: List[Dict[str, str]],
+    documents: List[Dict[str, str]],
+) -> Any:
+    """Collect web documents for this turn, yielding progress lines as it goes.
+
+    Appends what it retrieves to ``documents``. A URL in the message is taken as
+    an explicit instruction to read that page; otherwise the model is asked
+    whether a search is warranted. Retrieval problems are reported and skipped —
+    never fatal, since answering without the web beats not answering.
+    """
+    urls = web.find_urls(web.last_user_text(messages))
+    if urls:
+        for url in urls[:2]:
+            yield _line({"status": f"Reading {_host_of(url)}…"})
+            try:
+                documents.append(web.fetch(url))
+            except web.WebError as exc:
+                yield _line({"status": str(exc)})
+        return
+
+    yield _line({"status": "Considering a search…"})
+    query = web.decide_query(model, messages)
+    if not query:
+        yield _line({"status": ""})
+        return
+
+    yield _line({"status": f"Searching for “{query}”…"})
+    try:
+        results = web.search(query, limit=4)
+    except web.WebError as exc:
+        yield _line({"status": str(exc)})
+        return
+
+    if not results:
+        yield _line({"status": "No search results found."})
+        return
+
+    for result in results:
+        if len(documents) >= 2:   # two good sources is plenty for a small model
+            break
+        yield _line({"status": f"Reading {_host_of(result['url'])}…"})
+        try:
+            documents.append(web.fetch(result["url"]))
+        except web.WebError as exc:
+            logger.info("Skipping %s: %s", result["url"], exc)
 
 
 @app.route("/api/voice/models", methods=["GET"])

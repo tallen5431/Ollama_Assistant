@@ -30,6 +30,9 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   in, then ask a vision model about it (`llava`, `*-vision`, `minicpm-v`,
   `qwen2.5vl`, `moondream`, …). Images are downscaled in the browser before
   upload. See "Vision models" below.
+- 🌐 **Web access (optional)** — reads a link you paste, or lets the model decide
+  when a search would help, and cites what it used. Only public addresses are
+  ever fetched. Off by default. See "Web access" below.
 - 🧠 **Pick your model** — a dropdown lists every model installed on your Ollama
   server; the configured default is pre-selected.
 - 🟢 **Connection status** — a dot shows whether the model server is reachable.
@@ -83,6 +86,12 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_TIMEOUT`    | `300`                       | Per-request timeout, in seconds |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
+| `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
+| `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Unset falls back to DuckDuckGo HTML |
+| `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
+| `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
+| `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
+| `OLLAMA_NUM_CTX`    | `8192`                      | Context window requested when web context is attached |
 | `CHAT_AUTH_USER` / `CHAT_AUTH_PASSWORD` | *(unset)* | Enable HTTP Basic Auth (or use `CHAT_AUTH=user:password`) |
 | `VOSK_MODEL`        | `en-us`                     | Default Vosk language id (e.g. `es`, `fr`, `de`) |
 | `VOSK_MODEL_PATH`   | *(unset)*                   | Path to an unpacked Vosk model. Used as the default when set (no download). |
@@ -160,6 +169,61 @@ one that isn't downloaded yet and it's fetched once (into `models/`), then used
 for transcription. Set `VOSK_MODEL` to change the default language, or
 `VOSK_MODEL_PATH` to use your own model directory.
 
+## Web access
+
+🌐 **Web access** (off by default) lets the app read the web on the model's
+behalf. The model itself never gets a network connection — the app does the
+fetching and hands over text.
+
+Two paths:
+
+- **A link in your message is read.** Paste a URL and ask about it. This is the
+  best case for a local model: one clean document beats a pile of search
+  snippets, and it's far better than screenshotting a page for a vision model,
+  since the model gets real text instead of OCR'd pixels.
+- **Otherwise the model is asked whether to search.** A short, cheap call
+  returns `SEARCH: <query>` or `NONE`; on `SEARCH` the app runs the query, reads
+  the top two results, and grounds the answer in them. Using a plain call rather
+  than tool calling means this works with *every* model, including vision and
+  reasoning ones that expose no tool support.
+
+Progress appears live above the reply ("Searching for…", "Reading example.com…")
+and the pages used are listed underneath, numbered to match the `[n]` citations
+the model is asked to use.
+
+### Search backend
+
+With no configuration, search uses DuckDuckGo's HTML endpoint — no key, but
+best-effort and rate-limited. For something sturdier, self-host
+[SearXNG](https://docs.searxng.org/) and set `SEARXNG_URL=http://127.0.0.1:8888`.
+That endpoint is allowed to be on localhost precisely because *you* configured
+it; see below.
+
+### What it will and won't reach
+
+Every URL is resolved and checked before it is fetched, and **only public
+addresses are allowed**. Loopback, LAN, link-local, cloud metadata and the
+Tailscale `100.64/10` range are all refused, so a link in a message — or a
+redirect chosen by a remote server, which is re-checked at every hop — can't
+turn this into a probe for your own network. The single exception is
+`SEARXNG_URL`, which is operator configuration rather than something a model or
+a page chose.
+
+Retrieved text is fenced and labelled as reference material, with an explicit
+instruction to ignore any directions inside it. That reduces prompt injection
+but does not eliminate it — so nothing here can *act*. There are no tools with
+side effects; the only thing a page can do is be read. Treat answers grounded in
+a web page with the same suspicion you'd treat the page itself.
+
+`WEB_ENABLED=0` disables the whole feature server-side, whatever the UI says.
+
+### Context window
+
+An attached page is large, so a wider window is requested (`OLLAMA_NUM_CTX`,
+default 8192) whenever web context is present. Ollama otherwise defaults to a
+modest window regardless of what the model supports, and the conversation would
+be silently pushed out of it.
+
 ## Vision models
 
 There are three ways to attach an image, up to four per message:
@@ -228,5 +292,6 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `chat_ui.py`      | Single-page chat UI (inline HTML/CSS/JS) |
 | `authz.py`        | Optional HTTP Basic Auth |
 | `voice.py`        | Offline speech-to-text with Vosk |
+| `web.py`          | Optional web fetching/search used to ground answers |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |
