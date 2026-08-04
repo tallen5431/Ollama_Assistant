@@ -390,12 +390,30 @@ _PAGE = """<!doctype html>
           return;
         }
         try {
-          mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          // Ask for the cleanup filters explicitly: they are on by default in
+          // some browsers only, and they are what keeps speaker audio (music,
+          // a video call) from bleeding into the recording.
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
         } catch (e) {
           hintEl.textContent = "Mic blocked. Allow microphone access, and note it only works over HTTPS or localhost.";
           return;
         }
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // Ask for a 16 kHz context so the browser resamples the mic itself,
+        // with a real anti-alias filter. Falling back to the device rate means
+        // resampling by hand below, which is cruder.
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        try {
+          audioCtx = new Ctx({ sampleRate: 16000 });
+        } catch (e) {
+          audioCtx = new Ctx();
+        }
         srcNode = audioCtx.createMediaStreamSource(mediaStream);
         procNode = audioCtx.createScriptProcessor(4096, 1, 1);
         buffers = [];
@@ -435,14 +453,34 @@ _PAGE = """<!doctype html>
         return out;
       }
 
-      // Downsample Float32 samples to 16 kHz 16-bit mono and wrap in a WAV blob.
-      function encodeWav(samples, inRate, outRate) {
-        if (!samples.length) return null;
+      // Reduce the sample rate, averaging each source window rather than
+      // picking one sample from it. Plain decimation folds everything above the
+      // new Nyquist (8 kHz) back down into the speech band — a 12 kHz cymbal
+      // lands at 4 kHz — which is why background music wrecked recognition.
+      // Averaging is a crude low-pass that takes most of that out. Usually a
+      // no-op: the capture context above is already 16 kHz where supported.
+      function resample(samples, inRate, outRate) {
+        if (inRate === outRate) return samples;
         const ratio = inRate / outRate;
         const outLen = Math.floor(samples.length / ratio);
-        const pcm = new Int16Array(outLen);
+        const out = new Float32Array(outLen);
         for (let i = 0; i < outLen; i++) {
-          const s = Math.max(-1, Math.min(1, samples[Math.floor(i * ratio)] || 0));
+          const start = Math.floor(i * ratio);
+          const end = Math.min(Math.floor((i + 1) * ratio), samples.length);
+          let sum = 0, n = 0;
+          for (let j = start; j < end; j++) { sum += samples[j]; n++; }
+          out[i] = n ? sum / n : 0;
+        }
+        return out;
+      }
+
+      // Convert Float32 samples to 16 kHz 16-bit mono and wrap in a WAV blob.
+      function encodeWav(samples, inRate, outRate) {
+        if (!samples.length) return null;
+        const src = resample(samples, inRate, outRate);
+        const pcm = new Int16Array(src.length);
+        for (let i = 0; i < src.length; i++) {
+          const s = Math.max(-1, Math.min(1, src[i] || 0));
           pcm[i] = s * 0x7fff;
         }
         const buf = new ArrayBuffer(44 + pcm.length * 2);
