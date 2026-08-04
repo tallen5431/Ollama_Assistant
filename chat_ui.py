@@ -89,14 +89,14 @@ _PAGE = """<!doctype html>
       .composer button { flex:0 0 auto; white-space:nowrap; }
       #mic { font-size:1.1rem; line-height:1; padding:0.5rem 0.6rem; }
       #mic.rec { background:var(--danger); border-color:var(--danger); animation:pulse 1.2s infinite; }
-      .voicebar { display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem; }
+      .voicebar { display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem; flex-wrap:wrap; }
       .voicebar-label { font-size:0.75rem; color:var(--muted); white-space:nowrap; }
       .voicebar-check {
         display:flex; align-items:center; gap:0.3rem; cursor:pointer;
         font-size:0.75rem; color:var(--muted); white-space:nowrap;
       }
       .voicebar-check input { accent-color:var(--accent); margin:0; }
-      #attach { font-size:1.05rem; line-height:1; padding:0.5rem 0.6rem; }
+      #attach, #shot { font-size:1.05rem; line-height:1; padding:0.5rem 0.6rem; }
       .thumbs { display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.5rem; }
       .thumb { position:relative; width:3.5rem; height:3.5rem; border-radius:0.5rem;
         overflow:hidden; border:1px solid var(--border); }
@@ -140,11 +140,15 @@ _PAGE = """<!doctype html>
           <label class="voicebar-check" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
             <input type="checkbox" id="autosend"> ⚡ Auto-send
           </label>
+          <label class="voicebar-check" title="Keep the mic open and treat a pause in speech as the end of a message. With Auto-send on, this runs a whole conversation from one tap.">
+            <input type="checkbox" id="continuous"> 🔁 Continuous
+          </label>
         </div>
         <div class="thumbs" id="thumbs" hidden></div>
         <div class="composer">
           <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
           <button id="attach" title="Attach an image (needs a vision model)">📎</button>
+          <button id="shot" title="Capture a screenshot to analyse" hidden>📸</button>
           <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
           <button class="primary" id="send">Send</button>
           <button class="danger" id="stop" hidden>Stop</button>
@@ -166,7 +170,9 @@ _PAGE = """<!doctype html>
       const voiceSel = document.getElementById("voiceModel");
       const headsetEl = document.getElementById("headset");
       const autoSendEl = document.getElementById("autosend");
+      const continuousEl = document.getElementById("continuous");
       const attachBtn = document.getElementById("attach");
+      const shotBtn  = document.getElementById("shot");
       const fileEl   = document.getElementById("file");
       const thumbsEl = document.getElementById("thumbs");
       const modelEl  = document.getElementById("model");
@@ -260,30 +266,93 @@ _PAGE = """<!doctype html>
       }
 
       // Downscale before sending: vision models work from a few hundred pixels,
-      // and a full-size phone photo would blow past the request body limit.
-      async function toAttachment(file, maxDim = 1024) {
-        const bmp = await loadBitmap(file);
-        const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+      // and a full-size photo or screen grab would blow past the body limit.
+      function drawScaled(source, w, h, maxDim) {
         const scale = Math.min(1, maxDim / Math.max(w, h));
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.round(w * scale));
         canvas.height = Math.max(1, Math.round(h * scale));
-        canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
-        if (bmp.close) bmp.close();
-        const url = canvas.toDataURL("image/jpeg", 0.85);
+        canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+        const url = canvas.toDataURL("image/jpeg", 0.9);
         return { url, b64: url.slice(url.indexOf(",") + 1) };
+      }
+
+      async function toAttachment(file, maxDim = 1024) {
+        const bmp = await loadBitmap(file);
+        const out = drawScaled(bmp, bmp.width || bmp.naturalWidth,
+                                    bmp.height || bmp.naturalHeight, maxDim);
+        if (bmp.close) bmp.close();
+        return out;
+      }
+
+      function addAttachment(att) {
+        if (pendingImages.length >= 4) { hintEl.textContent = "Up to 4 images per message."; return false; }
+        pendingImages.push(att); renderThumbs();
+        return true;
       }
 
       attachBtn.addEventListener("click", () => fileEl.click());
 
       fileEl.addEventListener("change", async () => {
         for (const file of Array.from(fileEl.files)) {
-          if (pendingImages.length >= 4) { hintEl.textContent = "Up to 4 images per message."; break; }
-          try { pendingImages.push(await toAttachment(file)); }
+          try { if (!addAttachment(await toAttachment(file))) break; }
           catch (e) { hintEl.textContent = "Could not read " + file.name; }
         }
         fileEl.value = "";   // so re-picking the same file fires change again
-        renderThumbs();
+      });
+
+      // Screenshots: grab a single frame from a display-capture stream, then
+      // drop the stream immediately — nothing is recorded, and the browser's own
+      // picker decides what is shared. Kept at a higher resolution than photos
+      // because screenshots are mostly text, which does not survive downscaling.
+      async function grabScreenshot() {
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        } catch (e) {
+          hintEl.textContent = "Screen capture cancelled.";
+          return;
+        }
+        try {
+          const video = document.createElement("video");
+          video.srcObject = stream; video.muted = true; video.playsInline = true;
+          await video.play();
+          if (video.readyState < 2) {
+            await new Promise((res) => { video.onloadeddata = res; });
+          }
+          // One extra frame: the first can still be blank on some compositors.
+          await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+          if (!video.videoWidth) { hintEl.textContent = "Screen capture produced no frame."; return; }
+          addAttachment(drawScaled(video, video.videoWidth, video.videoHeight, 1600));
+          hintEl.textContent = "Screenshot attached — describe what you want to know about it.";
+          inputEl.focus();
+        } catch (e) {
+          hintEl.textContent = "Screen capture failed: " + e;
+        } finally {
+          stream.getTracks().forEach((t) => t.stop());
+        }
+      }
+
+      // getDisplayMedia is desktop-only; hide the button rather than offer a
+      // control that always fails (mobile browsers do not implement it).
+      if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+        shotBtn.hidden = false;
+        shotBtn.addEventListener("click", grabScreenshot);
+      }
+
+      // Paste an image straight in — usually the quickest route for a screenshot
+      // taken with the OS shortcut.
+      inputEl.addEventListener("paste", async (e) => {
+        const files = Array.from((e.clipboardData && e.clipboardData.items) || [])
+          .filter((it) => it.type && it.type.startsWith("image/"))
+          .map((it) => it.getAsFile())
+          .filter(Boolean);
+        if (!files.length) return;
+        e.preventDefault();
+        for (const file of files) {
+          try { if (!addAttachment(await toAttachment(file))) break; }
+          catch (err) { hintEl.textContent = "Could not read the pasted image."; }
+        }
       });
 
       // Build an assistant message with a (hidden until used) thinking panel,
@@ -485,6 +554,51 @@ _PAGE = """<!doctype html>
 
       // ---- Voice input (offline, via /api/transcribe) ----
       let recording = false, mediaStream = null, audioCtx = null, srcNode = null, procNode = null, buffers = [];
+      let micRate = 16000;
+
+      // Silence detection, so a pause ends an utterance and the mic can stay on
+      // for a whole conversation instead of being tapped once per sentence.
+      const VAD_SILENCE_MS = 900;      // pause length that closes an utterance
+      const VAD_MIN_SPEECH_MS = 300;   // shorter than this is a noise blip
+      const VAD_IDLE_STOP_MS = 60000;  // close a mic that was left on by accident
+      let vadFloor = 0, vadSpeechMs = 0, vadSilenceMs = 0, vadIdleMs = 0, vadHasSpeech = false;
+
+      function vadReset() {
+        vadFloor = 0; vadSpeechMs = 0; vadSilenceMs = 0; vadIdleMs = 0; vadHasSpeech = false;
+      }
+
+      // Decide speech vs silence for one buffer, and close the utterance on a
+      // long enough pause. The threshold rides on a noise floor that falls fast
+      // and rises slowly, so it adapts to the room rather than to a constant.
+      function vadStep(chunk) {
+        let sum = 0;
+        for (let i = 0; i < chunk.length; i++) sum += chunk[i] * chunk[i];
+        const rms = Math.sqrt(sum / chunk.length);
+        const ms = (chunk.length / micRate) * 1000;
+
+        if (vadFloor === 0) vadFloor = rms;
+        else vadFloor = rms < vadFloor ? vadFloor * 0.9 + rms * 0.1
+                                       : vadFloor * 0.995 + rms * 0.005;
+
+        if (rms > Math.max(vadFloor * 3, 0.006)) {
+          vadSpeechMs += ms; vadSilenceMs = 0; vadIdleMs = 0;
+          if (vadSpeechMs >= VAD_MIN_SPEECH_MS) vadHasSpeech = true;
+        } else {
+          vadSilenceMs += ms; vadIdleMs += ms;
+          if (vadHasSpeech && vadSilenceMs >= VAD_SILENCE_MS) flushUtterance();
+          else if (!vadHasSpeech && vadIdleMs >= VAD_IDLE_STOP_MS) setTimeout(stopMic, 0);
+        }
+      }
+
+      // Cut what has been captured so far into its own utterance and send it off
+      // to be transcribed, without tearing down the mic.
+      function flushUtterance() {
+        const captured = buffers;
+        buffers = [];
+        vadSpeechMs = 0; vadSilenceMs = 0; vadHasSpeech = false;
+        const wav = encodeWav(mergeBuffers(captured), micRate, 16000);
+        if (wav) transcribeBlob(wav);
+      }
 
       async function toggleMic() {
         if (recording) { await stopMic(); return; }
@@ -522,24 +636,39 @@ _PAGE = """<!doctype html>
         } catch (e) {
           audioCtx = new Ctx();
         }
+        micRate = audioCtx.sampleRate;
         srcNode = audioCtx.createMediaStreamSource(mediaStream);
         procNode = audioCtx.createScriptProcessor(4096, 1, 1);
-        buffers = [];
-        procNode.onaudioprocess = (e) => buffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        buffers = []; vadReset();
+        procNode.onaudioprocess = (e) => {
+          const chunk = new Float32Array(e.inputBuffer.getChannelData(0));
+          buffers.push(chunk);
+          if (continuousEl.checked) vadStep(chunk);
+        };
         srcNode.connect(procNode); procNode.connect(audioCtx.destination);
         recording = true; micBtn.classList.add("rec"); micBtn.textContent = "⏹";
-        hintEl.textContent = "Listening… tap the mic to stop.";
+        hintEl.textContent = continuousEl.checked
+          ? "Listening… pause to send an utterance. Tap the mic to stop."
+          : "Listening… tap the mic to stop.";
       }
 
       async function stopMic() {
+        if (!recording) return;
         recording = false; micBtn.classList.remove("rec"); micBtn.textContent = "🎤";
         try { procNode.disconnect(); srcNode.disconnect(); } catch (e) {}
         if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-        const inRate = audioCtx.sampleRate;
+        const captured = buffers;
+        buffers = []; vadReset();
         try { await audioCtx.close(); } catch (e) {}
-        const wav = encodeWav(mergeBuffers(buffers), inRate, 16000);
-        buffers = [];
-        if (!wav) { hintEl.textContent = "No audio captured."; return; }
+        const wav = encodeWav(mergeBuffers(captured), micRate, 16000);
+        if (!wav) { hintEl.textContent = ""; return; }
+        await transcribeBlob(wav);
+      }
+
+      // Post one utterance for transcription. Runs both for a whole push-to-talk
+      // recording and for each pause-delimited chunk while continuous is on, so
+      // it must never assume the mic has stopped.
+      async function transcribeBlob(wav) {
         hintEl.textContent = "Transcribing…";
         try {
           const mq = voiceSel.value ? ("?model=" + encodeURIComponent(voiceSel.value)) : "";
@@ -548,12 +677,16 @@ _PAGE = """<!doctype html>
           const j = await resp.json();
           if (j.error) { hintEl.textContent = j.error; return; }
           const t = (j.text || "").trim();
-          if (!t) { hintEl.textContent = "No speech detected."; inputEl.focus(); return; }
+          if (!t) { hintEl.textContent = recording ? "Listening…" : "No speech detected."; return; }
           inputEl.value = (inputEl.value ? inputEl.value.trim() + " " : "") + t;
-          autosize(); hintEl.textContent = "";
+          autosize();
+          hintEl.textContent = recording ? "Listening…" : "";
           // Auto-send skips the Send button so speaking alone drives the chat.
-          if (autoSendEl.checked) { send(); return; }
-          inputEl.focus();
+          // While a reply is still streaming, hold the text in the box instead of
+          // dropping it — send() would refuse it and the words would be lost.
+          if (autoSendEl.checked && !busy) { send(); return; }
+          if (autoSendEl.checked && busy) hintEl.textContent = "Waiting for the reply to finish…";
+          if (!recording) inputEl.focus();
         } catch (e) { hintEl.textContent = "Transcription failed: " + e; }
       }
 
@@ -621,6 +754,7 @@ _PAGE = """<!doctype html>
       }
       rememberToggle(headsetEl, "chatHeadset", true);
       rememberToggle(autoSendEl, "chatAutoSend", false);
+      rememberToggle(continuousEl, "chatContinuous", false);
 
       sendBtn.addEventListener("click", send);
       stopBtn.addEventListener("click", stop);

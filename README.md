@@ -26,9 +26,10 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   with [Vosk](https://alphacephei.com/vosk/) — nothing is sent to the cloud.
   *(Needs the app served over HTTPS; browsers only allow the mic on a secure
   origin. See "Voice input" below.)*
-- 🖼️ **Image input** — attach images with 📎 and ask a vision model about them
-  (`llava`, `*-vision`, `minicpm-v`, `qwen2.5vl`, `moondream`, …). Images are
-  downscaled in the browser before upload. See "Vision models" below.
+- 🖼️ **Image input** — attach files with 📎, grab a 📸 screenshot, or paste one
+  in, then ask a vision model about it (`llava`, `*-vision`, `minicpm-v`,
+  `qwen2.5vl`, `moondream`, …). Images are downscaled in the browser before
+  upload. See "Vision models" below.
 - 🧠 **Pick your model** — a dropdown lists every model installed on your Ollama
   server; the configured default is pre-selected.
 - 🟢 **Connection status** — a dot shows whether the model server is reachable.
@@ -136,9 +137,20 @@ loud, so leaving it on makes you go silent over music. Untick it on laptop
 speakers, where the leak is real and cancelling it helps.
 
 **Auto-send.** ⚡ **Auto-send** sends the message as soon as speech is
-transcribed, instead of waiting for the Send button, so a conversation can be
-driven entirely by voice. Off by default. Both toggles are remembered per
-browser.
+transcribed, instead of waiting for the Send button. Off by default.
+
+**Continuous.** 🔁 **Continuous** keeps the mic open and treats a pause in
+speech as the end of a message, so you don't tap the mic once per sentence.
+Tick it together with **Auto-send** and one tap runs a whole conversation:
+speak, pause, it sends, and it is already listening for your next turn. Tap the
+mic again to stop. A mic left open with nothing said closes itself after a
+minute. Off by default; all three toggles are remembered per browser.
+
+Silence detection is energy-based, with the threshold riding on a noise floor
+that adapts to the room. A pause of 900 ms ends an utterance and anything
+shorter than 300 ms is treated as a noise blip rather than speech. If a reply is
+still streaming when you finish talking, the text waits in the box rather than
+being dropped.
 
 **Choosing a language.** Next to the mic is a small language picker. It lists the
 models already on the server first, then the rest of a built-in catalog (English,
@@ -150,15 +162,25 @@ for transcription. Set `VOSK_MODEL` to change the default language, or
 
 ## Vision models
 
-The 📎 button attaches images to a message. Pick a model that can actually see
-them — `llava`, `llama3.2-vision`, `minicpm-v`, `qwen2.5vl`, `moondream` and
-similar. A text-only model will either ignore the image or return an error,
-which the chat window shows as-is.
+There are three ways to attach an image, up to four per message:
 
-Images are resized in the browser to fit within 1024 px and re-encoded as JPEG
-before upload: vision models work from a few hundred pixels, and a full-size
-phone photo would otherwise hit `CHAT_MAX_BODY_MB`. EXIF orientation is honoured
-so photos aren't sent sideways. Up to four images per message.
+- **📎 Attach** — pick image files.
+- **📸 Screenshot** — capture a window, tab, or whole screen. The browser's own
+  picker decides what is shared; a single frame is taken and the capture stream
+  is dropped immediately, so nothing is recorded. Desktop only — the button is
+  hidden where `getDisplayMedia` isn't supported, which includes mobile browsers.
+- **Paste** — paste an image straight into the message box, usually the quickest
+  route for a screenshot taken with the OS shortcut.
+
+Pick a model that can actually see them — `llava`, `llama3.2-vision`,
+`minicpm-v`, `qwen2.5vl`, `moondream` and similar. A text-only model will either
+ignore the image or return an error, which the chat window shows as-is.
+
+Images are resized in the browser and re-encoded as JPEG before upload: vision
+models work from a few hundred pixels, and a full-size photo would otherwise hit
+`CHAT_MAX_BODY_MB`. Picked and pasted images are capped at 1024 px; screenshots
+get 1600 px, since they are mostly text and text is what downscaling destroys
+first. EXIF orientation is honoured so photos aren't sent sideways.
 
 They travel as base64 in the message, exactly as Ollama's native API expects:
 
