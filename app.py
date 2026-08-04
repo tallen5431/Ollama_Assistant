@@ -156,7 +156,7 @@ def api_models() -> Any:
         "vision_default": next(iter(vision_models(include_ocr=False)), None),
         # A transcriber, if installed: lets a text-only model handle an image
         # instead of the UI taking the conversation away from it.
-        "ocr_default": get_vision_model() or next(iter(ocr_models()), None),
+        "ocr_default": next(iter(ocr_models()), None),
     })
 
 
@@ -177,7 +177,9 @@ def api_conversation_create() -> Any:
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         body = {}
-    return jsonify(store.create(str(body.get("title") or ""), body.get("model")))
+    model = body.get("model")
+    return jsonify(store.create(str(body.get("title") or ""),
+                                str(model) if model is not None else None))
 
 
 @app.route("/api/conversations/<convo_id>", methods=["GET"])
@@ -284,7 +286,8 @@ def api_chat() -> Any:
                 if reader:
                     yield _line({"status": f"Reading the image with {reader}…"})
                     transcript = web.describe_images(images, reader, ocr=is_ocr_reader)
-                    convo = web.with_context(messages, web.image_context(transcript))
+                    convo = web.with_context(
+                        messages, web.image_context(transcript, ocr=is_ocr_reader))
 
             if use_web:
                 documents: List[Dict[str, str]] = []
@@ -408,7 +411,16 @@ def _image_reader(answering_model: str) -> Any:
     """
     pinned = get_vision_model()
     if pinned:
-        return pinned, "ocr" in pinned.lower()
+        # Only honour a pin that is actually installed — otherwise every image
+        # read 404s and the user is told "no readable text was found", which is
+        # simply false.
+        try:
+            installed = set(vision_models())
+        except Exception:  # noqa: BLE001
+            installed = set()
+        if not installed or pinned in installed:
+            return pinned, "ocr" in pinned.lower()
+        logger.warning("WEB_VISION_MODEL=%r is not installed; ignoring it", pinned)
     try:
         ocr = next(iter(ocr_models()), "")
         if ocr:

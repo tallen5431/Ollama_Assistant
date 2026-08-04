@@ -139,7 +139,10 @@ def chat_stream(
 # Markers Ollama reports for models that accept images. "clip" covers the llava
 # family, "mllama" covers llama3.2-vision; the name check catches builds whose
 # details block is sparse, which varies by Ollama version.
-_VISION_FAMILIES = {"clip", "mllama", "qwen2vl", "qwen2_5_vl", "gemma3", "siglip"}
+# Deliberately no "gemma3": Ollama reports that family for the text-only
+# gemma3:270m and :1b as well as the vision-capable sizes, so the family
+# alone cannot tell them apart. The capability list below does.
+_VISION_FAMILIES = {"clip", "mllama", "qwen2vl", "qwen2_5_vl", "siglip"}
 _VISION_NAMES = ("llava", "vision", "minicpm-v", "moondream", "vl", "bakllava", "ocr")
 
 # Models built to transcribe an image rather than reason about one. They are the
@@ -164,6 +167,14 @@ def has_vision(model: Dict[str, Any]) -> bool:
     """Whether an /api/tags entry describes a model that can read images."""
     if not isinstance(model, dict):
         return False
+    # Ollama's explicit capability list is authoritative wherever it is present,
+    # so it is checked FIRST. Deciding on the family instead declares
+    # gemma3:270m vision-capable, and being smallest it would then win both the
+    # auto-switch and the reader role — sending a screenshot to a blind model.
+    caps = model.get("capabilities")
+    if isinstance(caps, list) and caps:
+        return any(str(c).lower() == "vision" for c in caps)
+
     details = model.get("details")
     if isinstance(details, dict):
         families = details.get("families") or []
@@ -172,12 +183,7 @@ def has_vision(model: Dict[str, Any]) -> bool:
                 return True
         if str(details.get("family") or "").lower() in _VISION_FAMILIES:
             return True
-    # Ollama also exposes an explicit capability list on newer versions.
-    caps = model.get("capabilities")
-    if isinstance(caps, list) and any(str(c).lower() == "vision" for c in caps):
-        return True
-    name = str(model.get("name") or model.get("model") or "").lower()
-    return any(marker in name for marker in _VISION_NAMES)
+    return any(marker in model_name(model).lower() for marker in _VISION_NAMES)
 
 
 def vision_models(include_ocr: bool = True) -> List[str]:

@@ -136,3 +136,37 @@ class TestConcurrency:
 
         assert not errors, errors
         assert len(store.get(convo["id"])["messages"]) == 40
+
+
+class TestUnusableDatabase:
+    """A bad CHAT_DB must degrade to history-off, not break /api/health."""
+
+    def test_a_file_where_the_directory_should_be(self, tmp_path, monkeypatch):
+        blocker = tmp_path / "afile"
+        blocker.write_text("not a directory")
+        monkeypatch.setenv("CHAT_DB", str(blocker / "chat.db"))
+        # mkdir raises OSError, not sqlite3.Error — the case that returned a 500.
+        assert store.available() is False
+
+    def test_a_path_that_cannot_exist(self, monkeypatch):
+        monkeypatch.setenv("CHAT_DB", "/proc/nope/deeper/chat.db")
+        assert store.available() is False
+
+    def test_a_non_database_file(self, tmp_path, monkeypatch):
+        junk = tmp_path / "junk.db"
+        junk.write_bytes(b"this is definitely not sqlite")
+        monkeypatch.setenv("CHAT_DB", str(junk))
+        assert store.available() is False
+
+    def test_health_stays_json_when_history_is_unusable(self, tmp_path, monkeypatch):
+        """/api/health is what the whole UI bootstraps from."""
+        import importlib
+        import app as app_module
+
+        blocker = tmp_path / "afile"
+        blocker.write_text("x")
+        monkeypatch.setenv("CHAT_DB", str(blocker / "chat.db"))
+        mod = importlib.reload(app_module)
+        resp = mod.app.test_client().get("/api/health")
+        assert resp.status_code == 200
+        assert resp.get_json()["history"] is False

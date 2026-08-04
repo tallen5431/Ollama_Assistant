@@ -682,12 +682,26 @@ _OCR_NOTHING = (
 )
 
 
-def image_context(transcript: Optional[str]) -> str:
-    """Render an OCR transcription as a system turn for a text-only model."""
+# A general vision model was asked to *describe*, briefly. Saying that is a
+# complete reading of the image would have the model assert there is nothing
+# else in a screenshot it only summarised in two sentences.
+_DESC_PREAMBLE = (
+    "A short description of the image the user attached, written by another "
+    "model. The model answering cannot see images, so this is all there is of "
+    "it — and it is a summary, not a full transcription, so it may omit detail. "
+    "Treat it as a reading of the image, not as something the user typed. Say so "
+    "if it does not cover what they are asking about."
+)
+
+
+def image_context(transcript: Optional[str], ocr: bool = True) -> str:
+    """Render an image reading as a system turn for a text-only model."""
     text = (transcript or "").strip()
     if not text:
         return _OCR_NOTHING
-    return f"{_OCR_PREAMBLE}\n\n----- BEGIN IMAGE TEXT -----\n{text}\n----- END IMAGE TEXT -----"
+    preamble = _OCR_PREAMBLE if ocr else _DESC_PREAMBLE
+    label = "IMAGE TEXT" if ocr else "IMAGE DESCRIPTION"
+    return f"{preamble}\n\n----- BEGIN {label} -----\n{text}\n----- END {label} -----"
 
 
 def last_user_images(messages: List[Dict[str, Any]]) -> List[str]:

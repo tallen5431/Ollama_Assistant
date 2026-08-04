@@ -256,3 +256,59 @@ class TestOcrInjection:
             "messages": [{"role": "user", "content": "what's wrong?", "images": ["aW1n"]}],
         }).get_data()
         assert len(calls) == 1, f"expected one OCR pass, got {len(calls)}"
+
+
+class TestCapabilityPrecedence:
+    """Ollama's capability list beats a family name where both are present."""
+
+    def test_text_only_gemma3_is_not_treated_as_vision(self):
+        """families says gemma3 for the text-only sizes too — capabilities knows."""
+        model = {"name": "gemma3:270m", "details": {"families": ["gemma3"]},
+                 "capabilities": ["completion"]}
+        assert oc.has_vision(model) is False
+
+    def test_vision_capable_gemma3_still_detected(self):
+        model = {"name": "gemma3:4b", "details": {"families": ["gemma3"]},
+                 "capabilities": ["completion", "vision"]}
+        assert oc.has_vision(model) is True
+
+    def test_capabilities_can_veto_a_vision_family(self):
+        model = {"name": "odd:1b", "details": {"families": ["clip"]},
+                 "capabilities": ["completion"]}
+        assert oc.has_vision(model) is False
+
+    def test_an_absent_capability_list_falls_back_to_family_and_name(self):
+        assert oc.has_vision({"name": "llava:13b", "details": {"families": ["clip"]}}) is True
+        assert oc.has_vision({"name": "glm-ocr:latest"}) is True
+        assert oc.has_vision({"name": "llama3.1:8b", "details": {"families": ["llama"]}}) is False
+
+    def test_an_empty_capability_list_is_not_treated_as_authoritative(self):
+        model = {"name": "llava:13b", "details": {"families": ["clip"]}, "capabilities": []}
+        assert oc.has_vision(model) is True
+
+
+class TestPinnedReaderValidation:
+    def test_an_uninstalled_pin_is_ignored(self, monkeypatch):
+        """A stale pin used to 404 every read and report 'no text found'."""
+        import app
+        monkeypatch.setenv("WEB_VISION_MODEL", "not-installed:latest")
+        monkeypatch.setattr(app, "vision_models", lambda include_ocr=True: ["qwen2.5vl:3b"])
+        monkeypatch.setattr(app, "ocr_models", lambda: [])
+        assert app._image_reader("llama3.1:8b") == ("qwen2.5vl:3b", False)
+
+    def test_an_installed_pin_is_honoured(self, monkeypatch):
+        import app
+        monkeypatch.setenv("WEB_VISION_MODEL", "glm-ocr:latest")
+        monkeypatch.setattr(app, "vision_models", lambda include_ocr=True: ["glm-ocr:latest"])
+        assert app._image_reader("llama3.1:8b") == ("glm-ocr:latest", True)
+
+
+class TestDescribeModeFraming:
+    def test_a_description_is_not_labelled_a_full_transcription(self):
+        """_DESCRIBE is two sentences; calling it complete makes the model lie."""
+        import web
+        ocr_ctx = web.image_context("some text", ocr=True)
+        desc_ctx = web.image_context("a screenshot of a terminal", ocr=False)
+        assert "BEGIN IMAGE TEXT" in ocr_ctx
+        assert "BEGIN IMAGE DESCRIPTION" in desc_ctx
+        assert "summary, not a full transcription" in desc_ctx

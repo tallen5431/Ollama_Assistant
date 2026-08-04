@@ -314,18 +314,41 @@ _PAGE = """<!doctype html>
       // CDN. Everything is escaped BEFORE any markup is produced, so model
       // output can never introduce a tag — the transforms below only add
       // structure to already-inert text.
+      const MD_SENTINEL_RE = new RegExp(String.fromCharCode(1), "g");
+
       function esc(t) {
-        return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        return String(t).replace(MD_SENTINEL_RE, "")
+                        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
                         .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
       }
 
+      // A placeholder character that cannot appear in model output: esc()
+      // strips it, and it is built here rather than written literally.
+      const MD_SENTINEL = String.fromCharCode(1);
+      const MD_SLOT = new RegExp(MD_SENTINEL + "(\\\\d+)" + MD_SENTINEL, "g");
+
       function inlineMd(t) {
-        return t
-          .replace(/`([^`\\n]+)`/g, function (_, c) { return "<code>" + c + "</code>"; })
-          .replace(/\\*\\*([^*\\n]+)\\*\\*/g, "<strong>$1</strong>")
-          .replace(/(^|[^*])\\*([^*\\n]+)\\*/g, "$1<em>$2</em>")
+        // Lift code spans out before anything else runs. Applying the emphasis
+        // and link rules to inlineMd's own output means markdown *inside* a code
+        // span gets eaten: `*args` rendered as an italic "args", and two spans
+        // each containing `*` mis-nested tags across both of them.
+        const spans = [];
+        let out = t.replace(/`([^`\\n]+)`/g, function (_, code) {
+          spans.push(code);
+          return MD_SENTINEL + (spans.length - 1) + MD_SENTINEL;
+        });
+        // Emphasis needs a non-space character inside both delimiters, as
+        // CommonMark requires. Without that, prose like "SELECT * FROM a …
+        // SELECT * FROM b" turns everything between two unrelated asterisks
+        // into <em> and deletes both asterisks from the page.
+        out = out
+          .replace(/\\*\\*([^\\s*][^*\\n]*[^\\s*]|[^\\s*])\\*\\*/g, "<strong>$1</strong>")
+          .replace(/(^|[^*\\w])\\*([^\\s*][^*\\n]*[^\\s*]|[^\\s*])\\*/g, "$1<em>$2</em>")
           .replace(/\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,
                    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+        return out.replace(MD_SLOT, function (_, i) {
+          return "<code>" + spans[Number(i)] + "</code>";
+        });
       }
 
       function renderMarkdown(raw) {
@@ -768,13 +791,29 @@ _PAGE = """<!doctype html>
         if (images.length) userMsg.images = images.map(img => img.b64);
         messages.push(userMsg);
         inputEl.value = ""; autosize();
-        await ensureConversation(text);
-        saveMessage("user", text, userMsg.images || null, null);
+        // Deliberately not saved yet: a failed turn is rolled back on screen and
+        // in messages[], and writing first would leave the store holding a turn
+        // the UI discarded — which a retry then duplicates. Committed by
+        // commitTurn() once the turn has actually produced something.
 
         const view = addAssistant();
         // Abort handling runs after newChat() may have swapped `messages`;
         // hold the identity so a cancelled reply can't land in a fresh chat.
         const thread = messages;
+
+        // Write the pair together, whatever the outcome: a completed reply, a
+        // Stop press, or an error that still produced text. Never one without
+        // the other, so the stored thread always alternates the way the live one
+        // does. No-ops if this thread was abandoned meanwhile.
+        let turnSaved = false;
+        async function commitTurn(reply, sources) {
+          if (turnSaved || messages !== thread) return;
+          turnSaved = true;
+          await ensureConversation(text);
+          await saveMessage("user", text, userMsg.images || null, null);
+          if (reply) await saveMessage("assistant", reply, null, sources || null);
+          refreshConversations();
+        }
         controller = new AbortController();
         let rawContent = "", thinkingField = "", started = false, usage = null, lastSources = null;
 
@@ -832,14 +871,17 @@ _PAGE = """<!doctype html>
           if (finalContent) paintMarkdown(view.bubble, finalContent);
           else view.bubble.textContent = "(empty response)";
           if (finalContent && messages === thread) messages.push({ role: "assistant", content: finalContent });
-          if (finalContent) { saveMessage("assistant", finalContent, null, lastSources); refreshConversations(); }
+          if (finalContent) commitTurn(finalContent, lastSources);
           if (usage) view.meta.textContent = fmtUsage(usage);
           setStatus("ok", "connected");
         } catch (err) {
           if (err.name === "AbortError") {
             const partial = splitThink(rawContent).content;
             view.bubble.textContent = (partial || "") + "  ⏹ stopped";
-            if (partial && messages === thread) messages.push({ role: "assistant", content: partial });
+            if (partial && messages === thread) {
+              messages.push({ role: "assistant", content: partial });
+              commitTurn(partial, lastSources);   // Stop still produced an answer
+            }
           } else {
             // An error can arrive mid-stream, after text is already on screen.
             // Discarding the view would throw away a partial answer; keep it and
@@ -851,6 +893,7 @@ _PAGE = """<!doctype html>
               view.status.textContent = "Interrupted: " + (err.message || err);
               view.status.hidden = false;
               if (messages === thread) messages.push({ role: "assistant", content: partial });
+              commitTurn(partial, lastSources);
             } else {
               view.root.remove();
               if (messages === thread && messages.length &&

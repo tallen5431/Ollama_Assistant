@@ -88,7 +88,11 @@ def available() -> bool:
     try:
         with _connect():
             return True
-    except sqlite3.Error as exc:
+    # OSError too, not just sqlite3.Error: _connect() creates the parent
+    # directory first, so an unwritable or nonsensical CHAT_DB raises
+    # PermissionError/FileExistsError/EROFS before sqlite is ever reached — and
+    # this is called from /api/health, which the whole UI bootstraps from.
+    except (sqlite3.Error, OSError) as exc:
         logger.warning("Conversation history unavailable (%s): %s", db_path(), exc)
         return False
 
@@ -181,19 +185,24 @@ def add_message(
             "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages WHERE conversation_id = ?",
             (convo_id,),
         ).fetchone()
-        conn.execute(
-            "INSERT INTO messages (conversation_id, seq, role, content, images, sources, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                convo_id,
-                seq_row["next"],
-                role,
-                content or "",
-                json.dumps(images) if images else None,
-                json.dumps(sources) if sources else None,
-                now,
-            ),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO messages (conversation_id, seq, role, content, images, sources, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    convo_id,
+                    seq_row["next"],
+                    role,
+                    content or "",
+                    json.dumps(images) if images else None,
+                    json.dumps(sources) if sources else None,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # The conversation was deleted between the check above and here —
+            # another device, most likely. Same answer as "never existed".
+            return False
         if role == "user" and exists["title"] in ("", "New chat"):
             conn.execute(
                 "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
