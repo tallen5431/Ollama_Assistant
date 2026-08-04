@@ -105,7 +105,11 @@ def chat_stream(model: str, messages: List[Dict[str, str]]) -> Iterator[str]:
         logger.error("Ollama error (%s): %s", resp.status_code, text)
         raise ValueError(f"Ollama returned HTTP {resp.status_code}: {text}")
 
+    # Decode explicitly rather than via iter_lines(decode_unicode=True): that
+    # flag is a silent no-op when the response has no inferable encoding, and
+    # Ollama streams "application/x-ndjson" with no charset, so requests would
+    # hand back raw bytes. Always yield str so callers can treat it as text.
     with resp:
-        for line in resp.iter_lines(decode_unicode=True):
-            if line:
-                yield line
+        for raw in resp.iter_lines():
+            if raw:
+                yield raw.decode("utf-8", errors="replace")
