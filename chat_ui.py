@@ -96,6 +96,18 @@ _PAGE = """<!doctype html>
         font-size:0.75rem; color:var(--muted); white-space:nowrap;
       }
       .voicebar-check input { accent-color:var(--accent); margin:0; }
+      #attach { font-size:1.05rem; line-height:1; padding:0.5rem 0.6rem; }
+      .thumbs { display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.5rem; }
+      .thumb { position:relative; width:3.5rem; height:3.5rem; border-radius:0.5rem;
+        overflow:hidden; border:1px solid var(--border); }
+      .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+      .thumb button {
+        position:absolute; top:0; right:0; padding:0 0.28rem; font-size:0.7rem;
+        line-height:1.3; border:0; border-radius:0 0 0 0.4rem;
+        background:rgba(0,0,0,0.65); color:#fff;
+      }
+      .bubble img { max-width:min(320px,100%); border-radius:0.5rem;
+        margin-bottom:0.35rem; display:block; }
       #voiceModel { flex:0 1 auto; min-width:0; max-width:16rem; font-size:0.82rem; padding:0.45rem 0.4rem; }
       @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.55;} }
       .hint { color:var(--muted); font-size:0.72rem; margin:0.35rem 0.2rem 0; min-height:1rem; }
@@ -122,16 +134,22 @@ _PAGE = """<!doctype html>
         <div class="voicebar" id="voicebar" hidden>
           <span class="voicebar-label">🎙 Voice</span>
           <select id="voiceModel" title="Speech recognition language"></select>
-          <label class="voicebar-check" title="Tick this when you are wearing headphones. It turns off echo cancellation, which otherwise mutes your voice while audio is playing.">
-            <input type="checkbox" id="headset"> 🎧 Headphones
+          <label class="voicebar-check" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
+            <input type="checkbox" id="headset" checked> 🎧 Headphones
+          </label>
+          <label class="voicebar-check" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
+            <input type="checkbox" id="autosend"> ⚡ Auto-send
           </label>
         </div>
+        <div class="thumbs" id="thumbs" hidden></div>
         <div class="composer">
           <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
+          <button id="attach" title="Attach an image (needs a vision model)">📎</button>
           <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
           <button class="primary" id="send">Send</button>
           <button class="danger" id="stop" hidden>Stop</button>
         </div>
+        <input type="file" id="file" accept="image/*" multiple hidden>
         <p class="hint" id="hint"></p>
       </div>
     </footer>
@@ -147,6 +165,10 @@ _PAGE = """<!doctype html>
       const voiceBar = document.getElementById("voicebar");
       const voiceSel = document.getElementById("voiceModel");
       const headsetEl = document.getElementById("headset");
+      const autoSendEl = document.getElementById("autosend");
+      const attachBtn = document.getElementById("attach");
+      const fileEl   = document.getElementById("file");
+      const thumbsEl = document.getElementById("thumbs");
       const modelEl  = document.getElementById("model");
       const dotEl    = document.getElementById("dot");
       const statusEl = document.getElementById("statusText");
@@ -155,6 +177,7 @@ _PAGE = """<!doctype html>
       let messages = [];       // conversation sent to /api/chat for context
       let busy = false;
       let controller = null;   // AbortController for the in-flight stream
+      let pendingImages = [];  // [{ b64, url }] attached but not yet sent
 
       function setStatus(state, text) {
         dotEl.className = "dot" + (state ? " " + state : "");
@@ -188,15 +211,80 @@ _PAGE = """<!doctype html>
         return parts.join("  ·  ");
       }
 
-      function addUser(text) {
+      function addUser(text, images) {
         if (emptyEl) emptyEl.remove();
         const wrap = document.createElement("div");
         wrap.className = "wrap";
         wrap.innerHTML = '<div class="msg user"><div class="col"><div class="role">You</div>' +
                          '<div class="bubble"></div></div></div>';
-        wrap.querySelector(".bubble").textContent = text;
+        const bubble = wrap.querySelector(".bubble");
+        for (const img of images || []) {
+          const el = document.createElement("img");
+          el.src = img.url; el.alt = "attached image";
+          bubble.appendChild(el);
+        }
+        if (text) bubble.appendChild(document.createTextNode(text));
         chatEl.appendChild(wrap); scrollDown();
       }
+
+      // ---- Image attachments (for vision models: llava, *-vision, moondream…) ----
+
+      function renderThumbs() {
+        thumbsEl.innerHTML = "";
+        thumbsEl.hidden = pendingImages.length === 0;
+        pendingImages.forEach((img, i) => {
+          const cell = document.createElement("div");
+          cell.className = "thumb";
+          const el = document.createElement("img");
+          el.src = img.url; el.alt = "attachment";
+          const rm = document.createElement("button");
+          rm.textContent = "✕"; rm.title = "Remove";
+          rm.addEventListener("click", () => { pendingImages.splice(i, 1); renderThumbs(); });
+          cell.appendChild(el); cell.appendChild(rm);
+          thumbsEl.appendChild(cell);
+        });
+      }
+
+      function loadBitmap(file) {
+        // imageOrientation honours EXIF so phone photos aren't sent sideways.
+        if (window.createImageBitmap) {
+          return createImageBitmap(file, { imageOrientation: "from-image" })
+            .catch(() => createImageBitmap(file));
+        }
+        return new Promise((resolve, reject) => {
+          const el = new Image(), url = URL.createObjectURL(file);
+          el.onload = () => { URL.revokeObjectURL(url); resolve(el); };
+          el.onerror = () => { URL.revokeObjectURL(url); reject(new Error("unreadable image")); };
+          el.src = url;
+        });
+      }
+
+      // Downscale before sending: vision models work from a few hundred pixels,
+      // and a full-size phone photo would blow past the request body limit.
+      async function toAttachment(file, maxDim = 1024) {
+        const bmp = await loadBitmap(file);
+        const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+        const scale = Math.min(1, maxDim / Math.max(w, h));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(w * scale));
+        canvas.height = Math.max(1, Math.round(h * scale));
+        canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+        if (bmp.close) bmp.close();
+        const url = canvas.toDataURL("image/jpeg", 0.85);
+        return { url, b64: url.slice(url.indexOf(",") + 1) };
+      }
+
+      attachBtn.addEventListener("click", () => fileEl.click());
+
+      fileEl.addEventListener("change", async () => {
+        for (const file of Array.from(fileEl.files)) {
+          if (pendingImages.length >= 4) { hintEl.textContent = "Up to 4 images per message."; break; }
+          try { pendingImages.push(await toAttachment(file)); }
+          catch (e) { hintEl.textContent = "Could not read " + file.name; }
+        }
+        fileEl.value = "";   // so re-picking the same file fires change again
+        renderThumbs();
+      });
 
       // Build an assistant message with a (hidden until used) thinking panel,
       // the bubble, and a usage meta line. Returns handles to update live.
@@ -311,10 +399,15 @@ _PAGE = """<!doctype html>
 
       async function send() {
         const text = inputEl.value.trim();
-        if (!text || busy) return;
+        const images = pendingImages.slice();
+        if ((!text && !images.length) || busy) return;
         busy = true; sendBtn.disabled = true; stopBtn.hidden = false;
-        addUser(text);
-        messages.push({ role: "user", content: text });
+        pendingImages = []; renderThumbs();
+        addUser(text, images);
+        // Ollama takes images as bare base64 alongside the text, not as a data URL.
+        const userMsg = { role: "user", content: text };
+        if (images.length) userMsg.images = images.map(img => img.b64);
+        messages.push(userMsg);
         inputEl.value = ""; autosize();
 
         const view = addAssistant();
@@ -384,6 +477,7 @@ _PAGE = """<!doctype html>
       function newChat() {
         if (controller) controller.abort();
         messages = [];
+        pendingImages = []; renderThumbs();
         chatEl.innerHTML = '<div class="wrap"><div class="empty" id="empty">' +
           'Send a message to start chatting with your local model.</div></div>';
         inputEl.focus();
@@ -454,8 +548,11 @@ _PAGE = """<!doctype html>
           const j = await resp.json();
           if (j.error) { hintEl.textContent = j.error; return; }
           const t = (j.text || "").trim();
-          if (t) { inputEl.value = (inputEl.value ? inputEl.value.trim() + " " : "") + t; autosize(); hintEl.textContent = ""; }
-          else { hintEl.textContent = "No speech detected."; }
+          if (!t) { hintEl.textContent = "No speech detected."; inputEl.focus(); return; }
+          inputEl.value = (inputEl.value ? inputEl.value.trim() + " " : "") + t;
+          autosize(); hintEl.textContent = "";
+          // Auto-send skips the Send button so speaking alone drives the chat.
+          if (autoSendEl.checked) { send(); return; }
           inputEl.focus();
         } catch (e) { hintEl.textContent = "Transcription failed: " + e; }
       }
@@ -509,12 +606,21 @@ _PAGE = """<!doctype html>
         return new Blob([buf], { type: "audio/wav" });
       }
 
-      // Remember the headphones choice — it is a property of your hardware, not
-      // of this visit. Storage can throw in a locked-down browser; ignore it.
-      try { headsetEl.checked = localStorage.getItem("chatHeadset") === "1"; } catch (e) {}
-      headsetEl.addEventListener("change", () => {
-        try { localStorage.setItem("chatHeadset", headsetEl.checked ? "1" : "0"); } catch (e) {}
-      });
+      // Remember the voice toggles — they describe your hardware and habits, not
+      // this visit. Headphones defaults ON (see the checkbox in the markup);
+      // only an explicit stored choice overrides it. Storage can throw in a
+      // locked-down browser, so every access is guarded.
+      function rememberToggle(el, key, dflt) {
+        try {
+          const saved = localStorage.getItem(key);
+          el.checked = saved === null ? dflt : saved === "1";
+        } catch (e) { el.checked = dflt; }
+        el.addEventListener("change", () => {
+          try { localStorage.setItem(key, el.checked ? "1" : "0"); } catch (e) {}
+        });
+      }
+      rememberToggle(headsetEl, "chatHeadset", true);
+      rememberToggle(autoSendEl, "chatAutoSend", false);
 
       sendBtn.addEventListener("click", send);
       stopBtn.addEventListener("click", stop);

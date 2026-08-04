@@ -30,7 +30,8 @@ CHUNKS = [
 
 class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.last_request = json.loads(body or b"{}")
         self.send_response(200)
         # Exactly what Ollama sends: no charset, so requests infers no encoding.
         self.send_header("Content-Type", "application/x-ndjson")
@@ -110,3 +111,49 @@ class TestChatEndpointStreaming:
 class TestListModels:
     def test_models_are_returned(self, fake_ollama):
         assert ollama_client.list_models() == [{"name": "codellama:7b"}]
+
+
+class TestVisionPassthrough:
+    """Images ride along on the message; the app must not strip or reshape them."""
+
+    def test_images_reach_ollama_unchanged(self, fake_ollama):
+        mod = importlib.reload(app_module)
+        b64 = "iVBORw0KGgoAAAANSUhEUg=="  # stand-in for a real encoded image
+        resp = mod.app.test_client().post(
+            "/api/chat",
+            json={
+                "model": "llava:13b",
+                "messages": [{"role": "user", "content": "what is this?", "images": [b64]}],
+            },
+        )
+        assert resp.status_code == 200
+
+        sent = fake_ollama.last_request
+        assert sent["model"] == "llava:13b"
+        assert sent["messages"][0]["images"] == [b64]
+        assert sent["messages"][0]["content"] == "what is this?"
+
+    def test_multiple_images_are_preserved_in_order(self, fake_ollama):
+        mod = importlib.reload(app_module)
+        imgs = ["aaa", "bbb", "ccc"]
+        mod.app.test_client().post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "", "images": imgs}]},
+        )
+        assert fake_ollama.last_request["messages"][0]["images"] == imgs
+
+    def test_history_with_a_past_image_still_streams(self, fake_ollama):
+        """A follow-up turn re-sends the earlier image; that must not break."""
+        mod = importlib.reload(app_module)
+        resp = mod.app.test_client().post(
+            "/api/chat",
+            json={
+                "messages": [
+                    {"role": "user", "content": "what is this?", "images": ["zzz"]},
+                    {"role": "assistant", "content": "a cat"},
+                    {"role": "user", "content": "what colour?"},
+                ]
+            },
+        )
+        assert resp.status_code == 200
+        assert len(fake_ollama.last_request["messages"]) == 3

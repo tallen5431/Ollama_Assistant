@@ -26,6 +26,9 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   with [Vosk](https://alphacephei.com/vosk/) — nothing is sent to the cloud.
   *(Needs the app served over HTTPS; browsers only allow the mic on a secure
   origin. See "Voice input" below.)*
+- 🖼️ **Image input** — attach images with 📎 and ask a vision model about them
+  (`llava`, `*-vision`, `minicpm-v`, `qwen2.5vl`, `moondream`, …). Images are
+  downscaled in the browser before upload. See "Vision models" below.
 - 🧠 **Pick your model** — a dropdown lists every model installed on your Ollama
   server; the configured default is pre-selected.
 - 🟢 **Connection status** — a dot shows whether the model server is reachable.
@@ -125,12 +128,17 @@ The mic button only shows when the `vosk` package is installed; without it the
 app runs exactly as before. Audio is captured in the browser, downsampled to
 16 kHz mono, and posted to `/api/transcribe` — it never leaves your network.
 
-**Headphones.** Next to the language picker is a 🎧 **Headphones** tickbox. Tick
-it when you're wearing headphones or a headset: it turns off browser echo
-cancellation, which exists to stop speaker output leaking into the mic and has
-nothing to cancel on headphones. Its residual suppressor ducks the mic whenever
-playback is loud, so with it on you go silent over music. Leave it unticked on
-laptop speakers, where the leak is real. The choice is remembered per browser.
+**Headphones (on by default).** Next to the language picker is a 🎧 **Headphones**
+tickbox, ticked out of the box. It turns off browser echo cancellation, which
+exists to stop speaker output leaking into the mic and has nothing to cancel on
+headphones — while its residual suppressor ducks the mic whenever playback is
+loud, so leaving it on makes you go silent over music. Untick it on laptop
+speakers, where the leak is real and cancelling it helps.
+
+**Auto-send.** ⚡ **Auto-send** sends the message as soon as speech is
+transcribed, instead of waiting for the Send button, so a conversation can be
+driven entirely by voice. Off by default. Both toggles are remembered per
+browser.
 
 **Choosing a language.** Next to the mic is a small language picker. It lists the
 models already on the server first, then the rest of a built-in catalog (English,
@@ -140,6 +148,27 @@ one that isn't downloaded yet and it's fetched once (into `models/`), then used
 for transcription. Set `VOSK_MODEL` to change the default language, or
 `VOSK_MODEL_PATH` to use your own model directory.
 
+## Vision models
+
+The 📎 button attaches images to a message. Pick a model that can actually see
+them — `llava`, `llama3.2-vision`, `minicpm-v`, `qwen2.5vl`, `moondream` and
+similar. A text-only model will either ignore the image or return an error,
+which the chat window shows as-is.
+
+Images are resized in the browser to fit within 1024 px and re-encoded as JPEG
+before upload: vision models work from a few hundred pixels, and a full-size
+phone photo would otherwise hit `CHAT_MAX_BODY_MB`. EXIF orientation is honoured
+so photos aren't sent sideways. Up to four images per message.
+
+They travel as base64 in the message, exactly as Ollama's native API expects:
+
+```json
+{ "role": "user", "content": "what is this?", "images": ["<base64>"] }
+```
+
+Note the whole conversation is re-sent on every turn, so an image stays in the
+context for the rest of the chat — **New chat** clears it.
+
 ## API endpoints
 
 | Method & path        | Purpose |
@@ -148,7 +177,7 @@ for transcription. Set `VOSK_MODEL` to change the default language, or
 | `GET /healthz`       | Plain `ok` health probe (stays open even when auth is on) |
 | `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
-| `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...] }` or `{ "prompt": "..." }` |
+| `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...] }` or `{ "prompt": "..." }`. Messages may carry `"images": ["<base64>"]` for vision models. |
 | `GET /api/voice/models` | Available + downloadable Vosk speech models |
 | `POST /api/voice/download` | Download a catalog model — body `{ "id": "fr" }` |
 | `POST /api/transcribe` | Speech-to-text: POST WAV audio (`?model=<id>` optional), returns `{ "text": ... }` |
