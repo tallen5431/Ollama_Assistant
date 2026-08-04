@@ -109,6 +109,15 @@ def get_planner_model() -> str:
     return os.getenv("WEB_PLANNER_MODEL", "").strip()
 
 
+def get_vision_model() -> str:
+    """Model used to read an attached image when planning a web search.
+
+    Empty means "pick an installed model that can see". Set WEB_VISION_MODEL to
+    pin a specific one (e.g. ``minicpm-v``).
+    """
+    return os.getenv("WEB_VISION_MODEL", "").strip()
+
+
 def get_web_max_docs() -> int:
     """How many fetched pages to put in front of the model at once."""
     return max(1, int(_number("WEB_MAX_DOCS", 3)))

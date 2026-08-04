@@ -29,6 +29,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import authz
+import store
 import voice
 import web
 from chat_ui import render_page
@@ -39,12 +40,13 @@ from config import (
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
+    get_vision_model,
     get_web_max_docs,
     logger,
     web_enabled,
 )
 from ollama_client import chat as ollama_chat
-from ollama_client import chat_stream, list_models
+from ollama_client import chat_stream, has_vision, list_models, vision_models
 
 # -------------------------------------------------------------------
 # Flask app
@@ -127,6 +129,7 @@ def health() -> Any:
             "auth": AUTH_ENABLED,
             "voice": voice.voice_available(),
             "web": web_enabled(),
+            "history": store.available(),
         }
     )
 
@@ -138,7 +141,79 @@ def api_models() -> Any:
         models = list_models()
     except ValueError as exc:
         return jsonify({"error": str(exc), "models": [], "default": get_default_model()}), 502
+    # Tag each model with whether it can read images, so the UI can switch to
+    # one automatically when an image is attached.
+    for model in models:
+        if isinstance(model, dict):
+            model["vision"] = has_vision(model)
     return jsonify({"models": models, "default": get_default_model()})
+
+
+# -------------------------------------------------------------------
+# Conversation history
+# -------------------------------------------------------------------
+
+
+@app.route("/api/conversations", methods=["GET"])
+def api_conversations() -> Any:
+    """Every stored conversation, most recently updated first."""
+    return jsonify({"conversations": store.list_conversations()})
+
+
+@app.route("/api/conversations", methods=["POST"])
+def api_conversation_create() -> Any:
+    """Start a conversation and return its record."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    return jsonify(store.create(str(body.get("title") or ""), body.get("model")))
+
+
+@app.route("/api/conversations/<convo_id>", methods=["GET"])
+def api_conversation_get(convo_id: str) -> Any:
+    """One conversation with its full message list."""
+    convo = store.get(convo_id)
+    if convo is None:
+        return jsonify({"error": "No such conversation"}), 404
+    return jsonify(convo)
+
+
+@app.route("/api/conversations/<convo_id>", methods=["PATCH"])
+def api_conversation_rename(convo_id: str) -> Any:
+    """Rename a conversation."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    title = str(body.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "Missing 'title'"}), 400
+    if not store.rename(convo_id, title):
+        return jsonify({"error": "No such conversation"}), 404
+    return jsonify({"ok": True, "title": title})
+
+
+@app.route("/api/conversations/<convo_id>", methods=["DELETE"])
+def api_conversation_delete(convo_id: str) -> Any:
+    """Delete a conversation and its messages."""
+    if not store.delete(convo_id):
+        return jsonify({"error": "No such conversation"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/conversations/<convo_id>/messages", methods=["POST"])
+def api_conversation_add_message(convo_id: str) -> Any:
+    """Append one message to a conversation."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    role = str(body.get("role") or "")
+    if role not in ("user", "assistant"):
+        return jsonify({"error": "'role' must be 'user' or 'assistant'"}), 400
+    images = body.get("images") if isinstance(body.get("images"), list) else None
+    sources = body.get("sources") if isinstance(body.get("sources"), list) else None
+    if not store.add_message(convo_id, role, str(body.get("content") or ""), images, sources):
+        return jsonify({"error": "No such conversation"}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -239,8 +314,21 @@ def _gather_web(
                 yield _line({"status": str(exc)})
         return
 
+    # An attached image usually carries the specifics worth searching for — the
+    # exact error text, a version number — while the typed message is often just
+    # "what's this?". Read it first so the planner has something to work with.
+    image_note = None
+    images = web.last_user_images(messages)
+    if images:
+        vision_model = get_vision_model() or (
+            model if _model_has_vision(model) else next(iter(vision_models()), "")
+        )
+        if vision_model:
+            yield _line({"status": "Looking at the image…"})
+            image_note = web.describe_images(images, vision_model)
+
     yield _line({"status": "Working out what to search for…"})
-    queries = web.plan_searches(messages, model)
+    queries = web.plan_searches(messages, model, image_note=image_note)
     if queries is None:
         yield _line({"status": "Could not plan a search; answering without one."})
         return
@@ -269,6 +357,14 @@ def _gather_web(
 
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
+
+
+def _model_has_vision(name: str) -> bool:
+    """Whether the named model appears in the installed vision-capable set."""
+    try:
+        return name in vision_models()
+    except Exception:  # noqa: BLE001 - Ollama unreachable; assume it cannot
+        return False
 
 
 def _run_all(func: Any, items: List[Any]) -> Any:

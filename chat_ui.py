@@ -116,9 +116,60 @@ _PAGE = """<!doctype html>
       }
       .bubble img { max-width:min(320px,100%); border-radius:0.5rem;
         margin-bottom:0.35rem; display:block; }
+      /* Rendered markdown. white-space:normal because the renderer supplies the
+         structure; pre-wrap would double every blank line. */
+      .bubble.md { white-space:normal; }
+      .bubble.md > *:first-child { margin-top:0; }
+      .bubble.md > *:last-child { margin-bottom:0; }
+      .bubble.md p { margin:0.5rem 0; }
+      .bubble.md h3, .bubble.md h4, .bubble.md h5, .bubble.md h6 {
+        margin:0.7rem 0 0.35rem; font-size:1rem; }
+      .bubble.md ul, .bubble.md ol { margin:0.5rem 0; padding-left:1.2rem; }
+      .bubble.md li { margin:0.15rem 0; }
+      .bubble.md blockquote { margin:0.5rem 0; padding-left:0.7rem;
+        border-left:2px solid var(--border); color:var(--muted); }
+      .bubble.md a { color:#93c5fd; }
+      .bubble.md code { background:rgba(0,0,0,0.35); padding:0.1rem 0.3rem;
+        border-radius:0.3rem; font-size:0.88em;
+        font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+      .code { position:relative; margin:0.6rem 0; }
+      .code pre { margin:0; padding:0.7rem 0.8rem; overflow-x:auto;
+        background:#0b1222; border:1px solid var(--border); border-radius:0.6rem; }
+      .code pre code { background:none; padding:0; font-size:0.85em; line-height:1.45; }
+      .code pre[data-lang]::before { content:attr(data-lang); position:absolute;
+        top:0.35rem; left:0.7rem; font-size:0.65rem; color:var(--muted);
+        text-transform:uppercase; letter-spacing:0.06em; }
+      .code pre[data-lang] { padding-top:1.4rem; }
+      .code .copy { position:absolute; top:0.3rem; right:0.35rem; font-size:0.68rem;
+        padding:0.15rem 0.4rem; background:var(--panel2); color:var(--muted);
+        border:1px solid var(--border); border-radius:0.35rem; opacity:0.75; }
+      .code .copy:hover { opacity:1; color:var(--text); }
       #voiceModel { flex:0 1 auto; min-width:0; max-width:16rem; font-size:0.82rem; padding:0.45rem 0.4rem; }
       @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.55;} }
       .hint { color:var(--muted); font-size:0.72rem; margin:0.35rem 0.2rem 0; min-height:1rem; }
+      #menu { font-size:1rem; line-height:1; padding:0.35rem 0.55rem; }
+      .backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:20; }
+      .drawer {
+        position:fixed; top:0; left:0; bottom:0; z-index:21; width:min(20rem,86vw);
+        background:var(--panel); border-right:1px solid var(--border);
+        display:flex; flex-direction:column; padding:0.75rem;
+      }
+      .drawer-head { display:flex; align-items:center; justify-content:space-between;
+        margin-bottom:0.6rem; font-size:0.95rem; }
+      .drawer-head button { padding:0.2rem 0.45rem; font-size:0.8rem; }
+      .drawer-new { width:100%; margin-bottom:0.6rem; font-weight:600; }
+      #convoList { overflow-y:auto; display:flex; flex-direction:column; gap:0.3rem; }
+      .convo { display:flex; align-items:stretch; gap:0.2rem; }
+      .convo-open {
+        flex:1 1 auto; min-width:0; text-align:left; display:flex; flex-direction:column;
+        gap:0.1rem; padding:0.4rem 0.5rem; background:var(--panel2);
+      }
+      .convo.active .convo-open { border-color:var(--accent); }
+      .convo-title { font-size:0.82rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .convo-meta { font-size:0.68rem; color:var(--muted); }
+      .convo-act { flex:0 0 auto; padding:0 0.4rem; font-size:0.75rem; color:var(--muted); }
+      .convo-act:hover { color:var(--text); }
+      .convo-empty { color:var(--muted); font-size:0.8rem; margin:0.4rem 0.2rem; }
 
       /* Phones: reclaim vertical space and stop the header wrapping. */
       @media (max-width: 640px) {
@@ -143,7 +194,18 @@ _PAGE = """<!doctype html>
     </style>
   </head>
   <body>
+    <div class="backdrop" id="backdrop" hidden></div>
+    <aside class="drawer" id="drawer" hidden>
+      <div class="drawer-head">
+        <strong>Conversations</strong>
+        <button id="drawerClose" title="Close">✕</button>
+      </div>
+      <button class="drawer-new" id="drawerNew" type="button">＋ New chat</button>
+      <div id="convoList"></div>
+    </aside>
+
     <header>
+      <button id="menu" title="Saved conversations" hidden>☰</button>
       <h1>__TITLE__</h1>
       <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
       <div class="spacer"></div>
@@ -209,6 +271,10 @@ _PAGE = """<!doctype html>
       const webEl    = document.getElementById("web");
       const webBar   = document.getElementById("webbar");
       const insecureNote = document.getElementById("insecureNote");
+      const drawerEl = document.getElementById("drawer");
+      const backdropEl = document.getElementById("backdrop");
+      const convoListEl = document.getElementById("convoList");
+      const menuBtn  = document.getElementById("menu");
       const attachBtn = document.getElementById("attach");
       const shotBtn  = document.getElementById("shot");
       const fileEl   = document.getElementById("file");
@@ -240,6 +306,90 @@ _PAGE = """<!doctype html>
         if (scrollPending) return;
         scrollPending = true;
         requestAnimationFrame(() => { scrollPending = false; chatEl.scrollTop = chatEl.scrollHeight; });
+      }
+
+
+      // ---- Markdown ----
+      // A small renderer rather than a library: the page ships inline with no
+      // CDN. Everything is escaped BEFORE any markup is produced, so model
+      // output can never introduce a tag — the transforms below only add
+      // structure to already-inert text.
+      function esc(t) {
+        return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      }
+
+      function inlineMd(t) {
+        return t
+          .replace(/`([^`\\n]+)`/g, function (_, c) { return "<code>" + c + "</code>"; })
+          .replace(/\\*\\*([^*\\n]+)\\*\\*/g, "<strong>$1</strong>")
+          .replace(/(^|[^*])\\*([^*\\n]+)\\*/g, "$1<em>$2</em>")
+          .replace(/\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,
+                   '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      }
+
+      function renderMarkdown(raw) {
+        const out = [];
+        // Split on fences first, so code contents are never treated as markup.
+        const parts = esc(raw).split(/```/);
+        parts.forEach(function (part, i) {
+          if (i % 2 === 1) {
+            const nl = part.indexOf("\\n");
+            const lang = nl >= 0 ? part.slice(0, nl).trim() : "";
+            const code = nl >= 0 ? part.slice(nl + 1) : part;
+            out.push('<div class="code"><button class="copy" type="button">Copy</button>' +
+                     "<pre" + (lang ? ' data-lang="' + lang + '"' : "") + "><code>" +
+                     code.replace(/\\n$/, "") + "</code></pre></div>");
+            return;
+          }
+          part.split(/\\n{2,}/).forEach(function (block) {
+            const text = block.trim();
+            if (!text) return;
+            const heading = text.match(/^(#{1,4})\\s+(.*)$/);
+            if (heading) {
+              const level = Math.min(6, heading[1].length + 2);
+              out.push("<h" + level + ">" + inlineMd(heading[2]) + "</h" + level + ">");
+              return;
+            }
+            const lines = text.split("\\n");
+            if (lines.every(function (l) { return /^\\s*[-*]\\s+/.test(l); })) {
+              out.push("<ul>" + lines.map(function (l) {
+                return "<li>" + inlineMd(l.replace(/^\\s*[-*]\\s+/, "")) + "</li>"; }).join("") + "</ul>");
+              return;
+            }
+            if (lines.every(function (l) { return /^\\s*\\d+[.)]\\s+/.test(l); })) {
+              out.push("<ol>" + lines.map(function (l) {
+                return "<li>" + inlineMd(l.replace(/^\\s*\\d+[.)]\\s+/, "")) + "</li>"; }).join("") + "</ol>");
+              return;
+            }
+            if (lines.every(function (l) { return /^\\s*&gt;\\s?/.test(l); })) {
+              out.push("<blockquote>" + inlineMd(lines.map(function (l) {
+                return l.replace(/^\\s*&gt;\\s?/, ""); }).join("<br>")) + "</blockquote>");
+              return;
+            }
+            out.push("<p>" + inlineMd(lines.join("<br>")) + "</p>");
+          });
+        });
+        return out.join("");
+      }
+
+      // Painted once the reply completes, not per token: a half-arrived fence
+      // renders as garbage, and re-parsing every chunk is wasted work.
+      function paintMarkdown(el, raw) {
+        el.innerHTML = renderMarkdown(raw);
+        el.classList.add("md");
+        el.querySelectorAll("button.copy").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            const code = btn.parentElement.querySelector("code");
+            navigator.clipboard.writeText(code.textContent).then(
+              function () {
+                btn.textContent = "Copied";
+                setTimeout(function () { btn.textContent = "Copy"; }, 1200);
+              },
+              function () { btn.textContent = "Press Ctrl+C"; }
+            );
+          });
+        });
       }
 
       // Split assistant text into visible content + inline <think> reasoning.
@@ -342,6 +492,7 @@ _PAGE = """<!doctype html>
       function addAttachment(att) {
         if (pendingImages.length >= 4) { hintEl.textContent = "Up to 4 images per message."; return false; }
         pendingImages.push(att); renderThumbs();
+        switchToVisionModel();
         return true;
       }
 
@@ -469,6 +620,10 @@ _PAGE = """<!doctype html>
         try {
           const resp = await fetch("api/models");
           const data = await resp.json();
+          modelVision = {};
+          for (const m of (data.models || [])) {
+            if (m && typeof m === "object") modelVision[m.name || m.model] = !!m.vision;
+          }
           const list = (data.models || [])
             .map(m => (typeof m === "string" ? m : (m.name || m.model))).filter(Boolean);
           modelEl.innerHTML = "";
@@ -496,6 +651,7 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
+          if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
           if (!data.voice) return;
           if (window.isSecureContext) {
             micBtn.hidden = false;
@@ -569,13 +725,15 @@ _PAGE = """<!doctype html>
         if (images.length) userMsg.images = images.map(img => img.b64);
         messages.push(userMsg);
         inputEl.value = ""; autosize();
+        await ensureConversation(text);
+        saveMessage("user", text, userMsg.images || null, null);
 
         const view = addAssistant();
         // Abort handling runs after newChat() may have swapped `messages`;
         // hold the identity so a cancelled reply can't land in a fresh chat.
         const thread = messages;
         controller = new AbortController();
-        let rawContent = "", thinkingField = "", started = false, usage = null;
+        let rawContent = "", thinkingField = "", started = false, usage = null, lastSources = null;
 
         try {
           const resp = await fetch("api/chat", {
@@ -613,7 +771,7 @@ _PAGE = """<!doctype html>
                 scrollDown();
                 continue;
               }
-              if (obj.sources) { showSources(view, obj.sources); scrollDown(); continue; }
+              if (obj.sources) { lastSources = obj.sources; showSources(view, obj.sources); scrollDown(); continue; }
               if (obj.thinking) thinkingField += obj.thinking;
               const piece = (obj.message && obj.message.content) || obj.content || "";
               if (piece) rawContent += piece;
@@ -628,8 +786,10 @@ _PAGE = """<!doctype html>
           }
           const finalContent = splitThink(rawContent).content;
           view.status.hidden = true;
-          view.bubble.textContent = finalContent || "(empty response)";
+          if (finalContent) paintMarkdown(view.bubble, finalContent);
+          else view.bubble.textContent = "(empty response)";
           if (finalContent && messages === thread) messages.push({ role: "assistant", content: finalContent });
+          if (finalContent) { saveMessage("assistant", finalContent, null, lastSources); refreshConversations(); }
           if (usage) view.meta.textContent = fmtUsage(usage);
           setStatus("ok", "connected");
         } catch (err) {
@@ -671,11 +831,171 @@ _PAGE = """<!doctype html>
 
       function newChat() {
         if (controller) controller.abort();
+        currentConvoId = null;
         messages = [];
         pendingImages = []; renderThumbs();
         chatEl.innerHTML = '<div class="wrap"><div class="empty" id="empty">' +
           'Send a message to start chatting with your local model.</div></div>';
         inputEl.focus();
+      }
+
+
+      // ---- Conversation history ----
+      // The server owns storage so a thread started on one device continues on
+      // another; this side just mirrors each completed message into it.
+      let currentConvoId = null;
+      let historyOn = false;
+      let modelVision = {};   // model name -> can it read images
+
+      function when(ts) {
+        const secs = Math.max(0, Date.now() / 1000 - ts);
+        if (secs < 60) return "just now";
+        if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+        if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
+        if (secs < 604800) return Math.floor(secs / 86400) + "d ago";
+        return new Date(ts * 1000).toLocaleDateString();
+      }
+
+      async function refreshConversations() {
+        if (!historyOn) return;
+        let list = [];
+        try {
+          list = (await (await fetch("api/conversations")).json()).conversations || [];
+        } catch (e) { return; }
+
+        convoListEl.innerHTML = "";
+        if (!list.length) {
+          const p = document.createElement("p");
+          p.className = "convo-empty";
+          p.textContent = "No saved conversations yet.";
+          convoListEl.appendChild(p);
+          return;
+        }
+        for (const convo of list) {
+          const row = document.createElement("div");
+          row.className = "convo" + (convo.id === currentConvoId ? " active" : "");
+
+          const open = document.createElement("button");
+          open.className = "convo-open";
+          open.type = "button";
+          const title = document.createElement("span");
+          title.className = "convo-title";
+          title.textContent = convo.title;
+          const meta = document.createElement("span");
+          meta.className = "convo-meta";
+          meta.textContent = when(convo.updated_at) + " · " + convo.message_count + " msg";
+          open.appendChild(title); open.appendChild(meta);
+          open.addEventListener("click", function () { loadConversation(convo.id); });
+
+          const ren = document.createElement("button");
+          ren.className = "convo-act"; ren.type = "button";
+          ren.textContent = "✎"; ren.title = "Rename";
+          ren.addEventListener("click", async function (e) {
+            e.stopPropagation();
+            const name = prompt("Rename conversation", convo.title);
+            if (!name) return;
+            await fetch("api/conversations/" + convo.id, {
+              method: "PATCH", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ title: name }) });
+            refreshConversations();
+          });
+
+          const del = document.createElement("button");
+          del.className = "convo-act"; del.type = "button";
+          del.textContent = "✕"; del.title = "Delete";
+          del.addEventListener("click", async function (e) {
+            e.stopPropagation();
+            if (!confirm("Delete \\"" + convo.title + "\\"?")) return;
+            await fetch("api/conversations/" + convo.id, { method: "DELETE" });
+            if (convo.id === currentConvoId) newChat();
+            refreshConversations();
+          });
+
+          row.appendChild(open); row.appendChild(ren); row.appendChild(del);
+          convoListEl.appendChild(row);
+        }
+      }
+
+      // Create on first use rather than on page load, so idly opening the app
+      // does not litter the list with empty conversations.
+      async function ensureConversation(firstMessage) {
+        if (!historyOn || currentConvoId) return currentConvoId;
+        try {
+          const resp = await fetch("api/conversations", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: firstMessage || "", model: modelEl.value || null }) });
+          currentConvoId = (await resp.json()).id;
+        } catch (e) { currentConvoId = null; }
+        return currentConvoId;
+      }
+
+      async function saveMessage(role, content, images, sources) {
+        if (!historyOn || !currentConvoId) return;
+        try {
+          await fetch("api/conversations/" + currentConvoId + "/messages", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ role: role, content: content,
+                                   images: images || null, sources: sources || null }) });
+        } catch (e) { /* history is a convenience; never block the chat on it */ }
+      }
+
+      async function loadConversation(id) {
+        let convo;
+        try {
+          const resp = await fetch("api/conversations/" + id);
+          if (!resp.ok) return;
+          convo = await resp.json();
+        } catch (e) { return; }
+
+        if (controller) controller.abort();
+        currentConvoId = convo.id;
+        messages = [];
+        chatEl.innerHTML = "";
+        pendingImages = []; renderThumbs();
+
+        for (const msg of convo.messages || []) {
+          const imgs = (msg.images || []).map(function (b64) {
+            return { b64: b64, url: "data:image/jpeg;base64," + b64 };
+          });
+          if (msg.role === "user") {
+            addUser(msg.content, imgs);
+            const entry = { role: "user", content: msg.content };
+            if (imgs.length) entry.images = imgs.map(function (i) { return i.b64; });
+            messages.push(entry);
+          } else {
+            const view = addAssistant();
+            if (msg.content) paintMarkdown(view.bubble, msg.content);
+            if (msg.sources) showSources(view, msg.sources);
+            messages.push({ role: "assistant", content: msg.content });
+          }
+        }
+        if (convo.model && modelEl.querySelector('option[value="' + convo.model + '"]')) {
+          modelEl.value = convo.model;
+        }
+        closeDrawer();
+        refreshConversations();
+        scrollDown();
+      }
+
+      function openDrawer() { drawerEl.hidden = false; backdropEl.hidden = false; refreshConversations(); }
+      function closeDrawer() { drawerEl.hidden = true; backdropEl.hidden = true; }
+
+      // ---- Vision routing ----
+      // Attaching an image to a text-only model gets you a refusal or an
+      // invention, and remembering to switch by hand every time is a papercut.
+      function switchToVisionModel() {
+        if (!pendingImages.length) return;
+        if (modelVision[modelEl.value]) return;
+        const candidate = Array.from(modelEl.options)
+          .map(function (o) { return o.value; })
+          .find(function (name) { return modelVision[name]; });
+        if (!candidate) {
+          hintEl.textContent = "No installed model can read images — pull one (e.g. minicpm-v).";
+          return;
+        }
+        const previous = modelEl.value;
+        modelEl.value = candidate;
+        hintEl.textContent = "Switched to " + candidate + " to read the image (was " + previous + ").";
       }
 
       // ---- Voice input (offline, via /api/transcribe) ----
@@ -911,6 +1231,13 @@ _PAGE = """<!doctype html>
       rememberToggle(autoSendEl, "chatAutoSend", false);
       rememberToggle(continuousEl, "chatContinuous", false);
       rememberToggle(webEl, "chatWeb", false);
+
+      menuBtn.addEventListener("click", openDrawer);
+      document.getElementById("drawerClose").addEventListener("click", closeDrawer);
+      backdropEl.addEventListener("click", closeDrawer);
+      document.getElementById("drawerNew").addEventListener("click", function () {
+        newChat(); closeDrawer();
+      });
 
       sendBtn.addEventListener("click", send);
       stopBtn.addEventListener("click", stop);

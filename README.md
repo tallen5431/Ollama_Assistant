@@ -30,6 +30,13 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   in, then ask a vision model about it (`llava`, `*-vision`, `minicpm-v`,
   `qwen2.5vl`, `moondream`, …). Images are downscaled in the browser before
   upload. See "Vision models" below.
+- 💾 **Conversation history** — threads are stored server-side, so one started
+  on your desktop continues on your phone. ☰ opens the list; rename, delete,
+  reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
+- ✍️ **Formatted replies** — markdown is rendered, with labelled code blocks and
+  a copy button. Matters most with the coder models.
+- 👁️ **Vision routing** — attach an image while a text-only model is selected
+  and the app switches to one that can actually see it.
 - 🌐 **Web access (optional)** — reads a link you paste, or has a small model
   turn your message into search queries, then grounds the answer in the pages it
   finds and cites them. Only public addresses are ever fetched. Off by default.
@@ -86,6 +93,8 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_MODEL`      | `llama3.1:8b`               | Default model shown/selected in the UI |
 | `OLLAMA_TIMEOUT`    | `300`                       | Per-request timeout, in seconds |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
+| `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
+| `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
 | `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Unset falls back to DuckDuckGo HTML |
@@ -246,6 +255,30 @@ default 8192) whenever web context is present. Ollama otherwise defaults to a
 modest window regardless of what the model supports, and the conversation would
 be silently pushed out of it.
 
+## Conversation history
+
+Threads are stored in SQLite (`CHAT_DB`, default `./chat.db`) rather than in the
+browser, so one started on a desktop can be picked up on a phone. The ☰ button
+opens the list; conversations are named from their first message and can be
+renamed or deleted. **New chat** starts a fresh thread.
+
+A conversation is only created once you send something, so idly opening the app
+doesn't litter the list.
+
+> ⚠️ **Anything stored here is readable by anyone who can reach the app.** Until
+> now there was nothing to steal; with history on, your past conversations are
+> on disk and served to whoever asks. If you keep history, turn Basic Auth on:
+> ```
+> CHAT_AUTH=you:a-long-random-passphrase
+> ```
+> `WEB_ENABLED=0` and an unset `CHAT_DB` are unrelated — history has no separate
+> kill switch, so auth is the control.
+
+Attached images are stored with their message so a reopened thread still makes
+sense, which means an image-heavy history grows the database. Delete old
+conversations to reclaim it; the file is plain SQLite if you'd rather prune it
+yourself.
+
 ## Vision models
 
 There are three ways to attach an image, up to four per message:
@@ -258,9 +291,18 @@ There are three ways to attach an image, up to four per message:
 - **Paste** — paste an image straight into the message box, usually the quickest
   route for a screenshot taken with the OS shortcut.
 
-Pick a model that can actually see them — `llava`, `llama3.2-vision`,
-`minicpm-v`, `qwen2.5vl`, `moondream` and similar. A text-only model will either
-ignore the image or return an error, which the chat window shows as-is.
+The app picks the model for you: attach an image while a text-only model is
+selected and it switches to an installed one that can see, saying so in the hint
+line. Capability comes from what Ollama reports in `/api/tags` (the `clip` and
+`mllama` families, an explicit `vision` capability) with a name-based fallback
+for builds whose details block is sparse. Change the dropdown back if you'd
+rather it didn't.
+
+With **Web access** on, an attached image is also read *before* the search is
+planned — the exact error text, product names and versions are pulled out of it
+and folded into the queries. Without that, a screenshot with "what's this?"
+plans nothing worth running. `WEB_VISION_MODEL` pins which model does that pass;
+unset picks the smallest installed one, since it only needs to describe.
 
 Images are resized in the browser and re-encoded as JPEG before upload: vision
 models work from a few hundred pixels, and a full-size photo would otherwise hit
@@ -315,5 +357,6 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `authz.py`        | Optional HTTP Basic Auth |
 | `voice.py`        | Offline speech-to-text with Vosk |
 | `web.py`          | Optional web fetching/search used to ground answers |
+| `store.py`        | SQLite conversation history |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |

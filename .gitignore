@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 uploads/
 models/
+chat.db
+chat.db-wal
+chat.db-shm

@@ -28,7 +28,7 @@ import re
 import socket
 import time
 from html.parser import HTMLParser
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
@@ -505,6 +505,7 @@ def plan_searches(
     messages: List[Dict[str, str]],
     model: str,
     max_queries: int = 3,
+    image_note: Optional[str] = None,
 ) -> Optional[List[str]]:
     """Turn the latest turn into search queries.
 
@@ -523,12 +524,17 @@ def plan_searches(
         return []
 
     planner_model = get_planner_model() or model
+    prompt = planner_input(messages)
+    if image_note:
+        # The planner is text-only, so what the image showed has to be told to
+        # it — otherwise "what's this?" beside a screenshot plans nothing.
+        prompt = f"{prompt}\n\n[the user attached an image showing: {image_note}]"
     try:
         reply = chat(
             planner_model,
             [
                 {"role": "system", "content": _PLANNER},
-                {"role": "user", "content": planner_input(messages)},
+                {"role": "user", "content": prompt},
             ],
             # Deterministic and short: this is a routing decision, not prose.
             options={"temperature": 0, "num_predict": 96},
@@ -611,3 +617,52 @@ def build_context(documents: List[Dict[str, str]]) -> str:
         parts.append(doc.get("text") or "")
     parts.append("----- END WEB RESULTS -----")
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Reading an attached image well enough to search for it
+# ---------------------------------------------------------------------------
+
+_DESCRIBE = (
+    "Describe this image for someone who will type a web search about it. "
+    "Report exactly what is written: error messages verbatim, product and "
+    "library names, version numbers, file paths, menu labels. Two sentences at "
+    "most. State only what is visible — never guess at a cause or a fix."
+)
+
+
+def describe_images(images: List[str], model: str) -> Optional[str]:
+    """Summarise attached images into text a search planner can use.
+
+    Without this the planner only sees the words the user typed, and "what's
+    this?" next to a screenshot of a stack trace plans nothing worth running.
+    Returns None when there is no image, no model that can see, or the call
+    fails — every one of which means "carry on without it".
+    """
+    from ollama_client import chat  # local import keeps this module standalone
+
+    if not images or not model:
+        return None
+    try:
+        reply = chat(
+            model,
+            # Only the first image: this is a cheap orientation pass, and a
+            # second one rarely changes the query while doubling the wait.
+            [{"role": "user", "content": _DESCRIBE, "images": images[:1]}],
+            options={"temperature": 0, "num_predict": 160},
+        )
+    except Exception as exc:  # noqa: BLE001 - never let this break the chat
+        logger.warning("Image description (%s) failed: %s", model, exc)
+        return None
+
+    text = " ".join((reply or "").split())
+    return text[:600] or None
+
+
+def last_user_images(messages: List[Dict[str, Any]]) -> List[str]:
+    """Images attached to the most recent user turn."""
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            images = msg.get("images")
+            return [i for i in images if isinstance(i, str)] if isinstance(images, list) else []
+    return []

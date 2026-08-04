@@ -134,3 +134,48 @@ def chat_stream(
         for raw in resp.iter_lines():
             if raw:
                 yield raw.decode("utf-8", errors="replace")
+
+
+# Markers Ollama reports for models that accept images. "clip" covers the llava
+# family, "mllama" covers llama3.2-vision; the name check catches builds whose
+# details block is sparse, which varies by Ollama version.
+_VISION_FAMILIES = {"clip", "mllama", "qwen2vl", "qwen2_5_vl", "gemma3", "siglip"}
+_VISION_NAMES = ("llava", "vision", "minicpm-v", "moondream", "vl", "bakllava")
+
+
+def has_vision(model: Dict[str, Any]) -> bool:
+    """Whether an /api/tags entry describes a model that can read images."""
+    if not isinstance(model, dict):
+        return False
+    details = model.get("details")
+    if isinstance(details, dict):
+        families = details.get("families") or []
+        if isinstance(families, list):
+            if {str(f).lower() for f in families} & _VISION_FAMILIES:
+                return True
+        if str(details.get("family") or "").lower() in _VISION_FAMILIES:
+            return True
+    # Ollama also exposes an explicit capability list on newer versions.
+    caps = model.get("capabilities")
+    if isinstance(caps, list) and any(str(c).lower() == "vision" for c in caps):
+        return True
+    name = str(model.get("name") or model.get("model") or "").lower()
+    return any(marker in name for marker in _VISION_NAMES)
+
+
+def vision_models() -> List[str]:
+    """Names of installed models that can read images, smallest first.
+
+    Smallest first because the caller wants a cheap describe-this-image pass,
+    not the best possible answer.
+    """
+    try:
+        models = list_models()
+    except ValueError:
+        return []
+    seen = [
+        (m.get("size") or 0, str(m.get("name") or m.get("model") or ""))
+        for m in models
+        if has_vision(m)
+    ]
+    return [name for _, name in sorted(seen) if name]
