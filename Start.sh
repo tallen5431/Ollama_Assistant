@@ -50,6 +50,11 @@ if [[ -f "$APP_DIR/requirements-voice.txt" ]]; then
   fi
 fi
 
+# --- Stream output to the manager's log pane ---
+# Python block-buffers stdout when it isn't a terminal, so the startup banner
+# and any print() would otherwise show up late or not at all.
+export PYTHONUNBUFFERED=1
+
 # --- Network (Server Manager passes HOST/PORT in env) ---
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8070}"
@@ -60,5 +65,10 @@ export PORT="${PORT:-8070}"
 export OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
 export OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.1:8b}"
 
-echo "[RUN] Starting Ollama Chat on ${HOST}:${PORT}  (OLLAMA_HOST=${OLLAMA_HOST})"
+# Keep the bind address and OLLAMA_HOST on separate lines, bind address first.
+# The server manager infers a program's port by scanning its log output, and a
+# full http://host:port URL outranks a bare 0.0.0.0:port bind address — so with
+# both on one line it would show Ollama's port (11434) instead of ours.
+echo "[RUN] Starting Ollama Chat on ${HOST}:${PORT}"
+echo "[RUN] OLLAMA_HOST=${OLLAMA_HOST}  OLLAMA_MODEL=${OLLAMA_MODEL}"
 exec "$PY_CMD" "$APP_DIR/app.py"
