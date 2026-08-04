@@ -91,6 +91,11 @@ _PAGE = """<!doctype html>
       #mic.rec { background:var(--danger); border-color:var(--danger); animation:pulse 1.2s infinite; }
       .voicebar { display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem; }
       .voicebar-label { font-size:0.75rem; color:var(--muted); white-space:nowrap; }
+      .voicebar-check {
+        display:flex; align-items:center; gap:0.3rem; cursor:pointer;
+        font-size:0.75rem; color:var(--muted); white-space:nowrap;
+      }
+      .voicebar-check input { accent-color:var(--accent); margin:0; }
       #voiceModel { flex:0 1 auto; min-width:0; max-width:16rem; font-size:0.82rem; padding:0.45rem 0.4rem; }
       @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.55;} }
       .hint { color:var(--muted); font-size:0.72rem; margin:0.35rem 0.2rem 0; min-height:1rem; }
@@ -117,6 +122,9 @@ _PAGE = """<!doctype html>
         <div class="voicebar" id="voicebar" hidden>
           <span class="voicebar-label">🎙 Voice</span>
           <select id="voiceModel" title="Speech recognition language"></select>
+          <label class="voicebar-check" title="Tick this when you are wearing headphones. It turns off echo cancellation, which otherwise mutes your voice while audio is playing.">
+            <input type="checkbox" id="headset"> 🎧 Headphones
+          </label>
         </div>
         <div class="composer">
           <textarea id="input" rows="1" placeholder="Type a message…  (Enter to send, Shift+Enter for a new line)"></textarea>
@@ -138,6 +146,7 @@ _PAGE = """<!doctype html>
       const micBtn   = document.getElementById("mic");
       const voiceBar = document.getElementById("voicebar");
       const voiceSel = document.getElementById("voiceModel");
+      const headsetEl = document.getElementById("headset");
       const modelEl  = document.getElementById("model");
       const dotEl    = document.getElementById("dot");
       const statusEl = document.getElementById("statusText");
@@ -393,10 +402,15 @@ _PAGE = """<!doctype html>
           // Ask for the cleanup filters explicitly: they are on by default in
           // some browsers only, and they are what keeps speaker audio (music,
           // a video call) from bleeding into the recording.
+          // Echo cancellation exists to stop speaker output leaking back into
+          // the mic. On headphones there is no such leak, and its residual
+          // suppressor ducks the mic whenever playback is loud — so it silences
+          // you over music. Noise suppression and AGC act on the mic only, so
+          // they stay on either way.
           mediaStream = await navigator.mediaDevices.getUserMedia({
             audio: {
               channelCount: 1,
-              echoCancellation: true,
+              echoCancellation: !headsetEl.checked,
               noiseSuppression: true,
               autoGainControl: true,
             },
@@ -494,6 +508,13 @@ _PAGE = """<!doctype html>
         for (let i = 0; i < pcm.length; i++) dv.setInt16(44 + i * 2, pcm[i], true);
         return new Blob([buf], { type: "audio/wav" });
       }
+
+      // Remember the headphones choice — it is a property of your hardware, not
+      // of this visit. Storage can throw in a locked-down browser; ignore it.
+      try { headsetEl.checked = localStorage.getItem("chatHeadset") === "1"; } catch (e) {}
+      headsetEl.addEventListener("change", () => {
+        try { localStorage.setItem("chatHeadset", headsetEl.checked ? "1" : "0"); } catch (e) {}
+      });
 
       sendBtn.addEventListener("click", send);
       stopBtn.addEventListener("click", stop);

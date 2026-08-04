@@ -125,6 +125,13 @@ The mic button only shows when the `vosk` package is installed; without it the
 app runs exactly as before. Audio is captured in the browser, downsampled to
 16 kHz mono, and posted to `/api/transcribe` — it never leaves your network.
 
+**Headphones.** Next to the language picker is a 🎧 **Headphones** tickbox. Tick
+it when you're wearing headphones or a headset: it turns off browser echo
+cancellation, which exists to stop speaker output leaking into the mic and has
+nothing to cancel on headphones. Its residual suppressor ducks the mic whenever
+playback is loud, so with it on you go silent over music. Leave it unticked on
+laptop speakers, where the leak is real. The choice is remembered per browser.
+
 **Choosing a language.** Next to the mic is a small language picker. It lists the
 models already on the server first, then the rest of a built-in catalog (English,
 Spanish, French, German, Italian, Portuguese, Dutch, Russian, Chinese, Japanese,
