@@ -659,8 +659,13 @@ _PAGE = """<!doctype html>
           const data = await resp.json();
           modelVision = {};
           for (const m of (data.models || [])) {
-            if (m && typeof m === "object") modelVision[m.name || m.model] = !!m.vision;
+            if (m && typeof m === "object") {
+              // OCR models can see, but they transcribe rather than reason, so
+              // they must never be auto-selected to answer about an image.
+              modelVision[m.name || m.model] = !!m.vision && !m.ocr;
+            }
           }
+          visionDefault = data.vision_default || null;
           const list = (data.models || [])
             .map(m => (typeof m === "string" ? m : (m.name || m.model))).filter(Boolean);
           modelEl.innerHTML = "";
@@ -882,7 +887,8 @@ _PAGE = """<!doctype html>
       // another; this side just mirrors each completed message into it.
       let currentConvoId = null;
       let historyOn = false;
-      let modelVision = {};   // model name -> can it read images
+      let modelVision = {};   // model name -> can it answer about an image
+      let visionDefault = null;  // server's pick: smallest non-OCR vision model
 
       function when(ts) {
         const secs = Math.max(0, Date.now() / 1000 - ts);
@@ -1023,9 +1029,12 @@ _PAGE = """<!doctype html>
       function switchToVisionModel() {
         if (!pendingImages.length) return;
         if (modelVision[modelEl.value]) return;
-        const candidate = Array.from(modelEl.options)
-          .map(function (o) { return o.value; })
-          .find(function (name) { return modelVision[name]; });
+        // The server's pick is the smallest general vision model; fall back to
+        // dropdown order only if it isn't installed for some reason.
+        const options = Array.from(modelEl.options).map(function (o) { return o.value; });
+        const candidate = (visionDefault && options.indexOf(visionDefault) >= 0)
+          ? visionDefault
+          : options.find(function (name) { return modelVision[name]; });
         if (!candidate) {
           hintEl.textContent = "No installed model can read images — pull one (e.g. minicpm-v).";
           return;

@@ -140,7 +140,24 @@ def chat_stream(
 # family, "mllama" covers llama3.2-vision; the name check catches builds whose
 # details block is sparse, which varies by Ollama version.
 _VISION_FAMILIES = {"clip", "mllama", "qwen2vl", "qwen2_5_vl", "gemma3", "siglip"}
-_VISION_NAMES = ("llava", "vision", "minicpm-v", "moondream", "vl", "bakllava")
+_VISION_NAMES = ("llava", "vision", "minicpm-v", "moondream", "vl", "bakllava", "ocr")
+
+# Models built to transcribe an image rather than reason about one. They are the
+# best choice for pulling exact text out of a screenshot and a poor choice for
+# answering a question about it, so the two roles are kept apart.
+_OCR_NAMES = ("ocr", "got-ocr", "trocr", "donut")
+
+
+def model_name(model: Dict[str, Any]) -> str:
+    """The name Ollama would accept for this /api/tags entry."""
+    if not isinstance(model, dict):
+        return ""
+    return str(model.get("name") or model.get("model") or "")
+
+
+def is_ocr(model: Dict[str, Any]) -> bool:
+    """Whether the model is a text-extraction specialist rather than a VLM."""
+    return any(marker in model_name(model).lower() for marker in _OCR_NAMES)
 
 
 def has_vision(model: Dict[str, Any]) -> bool:
@@ -163,19 +180,33 @@ def has_vision(model: Dict[str, Any]) -> bool:
     return any(marker in name for marker in _VISION_NAMES)
 
 
-def vision_models() -> List[str]:
+def vision_models(include_ocr: bool = True) -> List[str]:
     """Names of installed models that can read images, smallest first.
 
-    Smallest first because the caller wants a cheap describe-this-image pass,
-    not the best possible answer.
+    Smallest first because both callers want a cheap pass rather than the best
+    possible one, and because silently loading a 19 GB model because someone
+    pasted a screenshot is a poor surprise.
+
+    ``include_ocr=False`` drops the transcription specialists, which is what you
+    want when choosing a model to *answer* a question about an image.
     """
     try:
         models = list_models()
     except ValueError:
         return []
-    seen = [
-        (m.get("size") or 0, str(m.get("name") or m.get("model") or ""))
+    picked = [
+        (m.get("size") or 0, model_name(m))
         for m in models
-        if has_vision(m)
+        if has_vision(m) and (include_ocr or not is_ocr(m))
     ]
-    return [name for _, name in sorted(seen) if name]
+    return [name for _, name in sorted(picked) if name]
+
+
+def ocr_models() -> List[str]:
+    """Installed text-extraction models, smallest first."""
+    try:
+        models = list_models()
+    except ValueError:
+        return []
+    picked = [(m.get("size") or 0, model_name(m)) for m in models if is_ocr(m)]
+    return [name for _, name in sorted(picked) if name]

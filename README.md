@@ -291,18 +291,29 @@ There are three ways to attach an image, up to four per message:
 - **Paste** — paste an image anywhere on the page, usually the quickest route
   for a screenshot taken with the OS shortcut.
 
-The app picks the model for you: attach an image while a text-only model is
-selected and it switches to an installed one that can see, saying so in the hint
-line. Capability comes from what Ollama reports in `/api/tags` (the `clip` and
-`mllama` families, an explicit `vision` capability) with a name-based fallback
-for builds whose details block is sparse. Change the dropdown back if you'd
-rather it didn't.
+Two different jobs, deliberately given to different models:
 
-With **Web access** on, an attached image is also read *before* the search is
-planned — the exact error text, product names and versions are pulled out of it
-and folded into the queries. Without that, a screenshot with "what's this?"
-plans nothing worth running. `WEB_VISION_MODEL` pins which model does that pass;
-unset picks the smallest installed one, since it only needs to describe.
+**Answering about an image.** Attach one while a text-only model is selected and
+the app switches to an installed model that can see, saying so in the hint line.
+It picks the *smallest* general vision model — silently loading a 19 GB model
+because you pasted a screenshot is a poor surprise — and you can change the
+dropdown afterwards.
+
+**Reading text out of an image**, when **Web access** is on. Before the search is
+planned, the image is transcribed so the exact error text, product names and
+version numbers reach the query. Without it, a screenshot plus "what's this?"
+plans nothing worth running.
+
+An **OCR model is preferred for that second job** if one is installed
+(`glm-ocr`, `got-ocr`, and similar are recognised by name). Transcription is
+precisely what makes a good search query, where a general vision model
+paraphrases the error away. OCR models are *excluded* from the first job for the
+same reason — they transcribe rather than reason, so they make poor
+conversationalists. `WEB_VISION_MODEL` pins the reader if you'd rather choose.
+
+Capability comes from what Ollama reports in `/api/tags` — the `clip` and
+`mllama` families, an explicit `vision` capability — with a name-based fallback
+for builds whose details block is sparse.
 
 All three paths handle the image identically. Anything up to 1920 px on the long
 edge is kept at its original size and encoded as **PNG** — losslessly, so the

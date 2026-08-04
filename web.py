@@ -630,8 +630,15 @@ _DESCRIBE = (
     "most. State only what is visible — never guess at a cause or a fix."
 )
 
+# An OCR model transcribes; asking it to "describe" fights what it was built to
+# do. Give it the instruction it expects and let the planner mine the text.
+_TRANSCRIBE = (
+    "Transcribe all text visible in this image exactly as it appears, "
+    "preserving error messages, identifiers and version numbers."
+)
 
-def describe_images(images: List[str], model: str) -> Optional[str]:
+
+def describe_images(images: List[str], model: str, ocr: bool = False) -> Optional[str]:
     """Summarise attached images into text a search planner can use.
 
     Without this the planner only sees the words the user typed, and "what's
@@ -648,7 +655,8 @@ def describe_images(images: List[str], model: str) -> Optional[str]:
             model,
             # Only the first image: this is a cheap orientation pass, and a
             # second one rarely changes the query while doubling the wait.
-            [{"role": "user", "content": _DESCRIBE, "images": images[:1]}],
+            [{"role": "user", "content": _TRANSCRIBE if ocr else _DESCRIBE,
+              "images": images[:1]}],
             options={"temperature": 0, "num_predict": 160},
         )
     except Exception as exc:  # noqa: BLE001 - never let this break the chat

@@ -46,7 +46,7 @@ from config import (
     web_enabled,
 )
 from ollama_client import chat as ollama_chat
-from ollama_client import chat_stream, has_vision, list_models, vision_models
+from ollama_client import chat_stream, has_vision, is_ocr, list_models, ocr_models, vision_models
 
 # -------------------------------------------------------------------
 # Flask app
@@ -141,12 +141,20 @@ def api_models() -> Any:
         models = list_models()
     except ValueError as exc:
         return jsonify({"error": str(exc), "models": [], "default": get_default_model()}), 502
-    # Tag each model with whether it can read images, so the UI can switch to
-    # one automatically when an image is attached.
+    # Tag each model so the UI can route an attached image to something that can
+    # actually see it — and away from the OCR specialists, which transcribe well
+    # and reason poorly.
     for model in models:
         if isinstance(model, dict):
             model["vision"] = has_vision(model)
-    return jsonify({"models": models, "default": get_default_model()})
+            model["ocr"] = is_ocr(model)
+    return jsonify({
+        "models": models,
+        "default": get_default_model(),
+        # Smallest general vision model: loading 19 GB because someone pasted a
+        # screenshot is a poor surprise, and the user can still pick another.
+        "vision_default": next(iter(vision_models(include_ocr=False)), None),
+    })
 
 
 # -------------------------------------------------------------------
@@ -320,12 +328,10 @@ def _gather_web(
     image_note = None
     images = web.last_user_images(messages)
     if images:
-        vision_model = get_vision_model() or (
-            model if _model_has_vision(model) else next(iter(vision_models()), "")
-        )
-        if vision_model:
-            yield _line({"status": "Looking at the image…"})
-            image_note = web.describe_images(images, vision_model)
+        reader, is_reader_ocr = _image_reader(model)
+        if reader:
+            yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
+            image_note = web.describe_images(images, reader, ocr=is_reader_ocr)
 
     yield _line({"status": "Working out what to search for…"})
     queries = web.plan_searches(messages, model, image_note=image_note)
@@ -359,12 +365,27 @@ def _gather_web(
         yield _line({"status": "Found results but couldn't read any of them."})
 
 
-def _model_has_vision(name: str) -> bool:
-    """Whether the named model appears in the installed vision-capable set."""
+def _image_reader(answering_model: str) -> Any:
+    """Pick the model that reads an attached image, and say whether it is OCR.
+
+    An OCR model is preferred: what makes a good search query out of a
+    screenshot is the exact error text, which transcription gets right and prose
+    description paraphrases away. Falls back to the answering model when it can
+    already see, then to the smallest general vision model.
+    """
+    pinned = get_vision_model()
+    if pinned:
+        return pinned, "ocr" in pinned.lower()
     try:
-        return name in vision_models()
-    except Exception:  # noqa: BLE001 - Ollama unreachable; assume it cannot
-        return False
+        ocr = next(iter(ocr_models()), "")
+        if ocr:
+            return ocr, True
+        vision = vision_models()
+        if answering_model in vision:
+            return answering_model, False
+        return next(iter(vision), ""), False
+    except Exception:  # noqa: BLE001 - Ollama unreachable; skip the pass
+        return "", False
 
 
 def _run_all(func: Any, items: List[Any]) -> Any:
