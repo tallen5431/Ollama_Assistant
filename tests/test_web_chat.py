@@ -102,8 +102,8 @@ class TestSearchGroundedTurn:
         out = lines(resp)
 
         statuses = [o["status"] for o in out if "status" in o]
-        assert any("Considering a search" in s for s in statuses)
-        assert any("Searching for" in s for s in statuses)
+        assert any("what to search for" in s for s in statuses)
+        assert any(s.startswith("Searching:") for s in statuses)
         assert any("Reading" in s for s in statuses)
 
         sources = [o["sources"] for o in out if "sources" in o]
@@ -133,6 +133,71 @@ class TestSearchGroundedTurn:
         resp.get_data()
         chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
         assert chat_call["options"]["num_ctx"] >= 8192
+
+
+class TestMultiQueryPlanning:
+    def test_every_planned_query_is_searched(self, rig, monkeypatch):
+        rig["ollama"].planner_reply = "Q: widget 5 release\nQ: widget 5 changelog\nQ: widget 5 review"
+        searched = []
+
+        def fake_search(query, limit=3):
+            searched.append(query)
+            return [{"url": rig["site_url"] + f"?q={len(searched)}", "title": query}]
+
+        monkeypatch.setattr(web, "search", fake_search)
+        resp = rig["client"].post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "widget 5?"}], "web": True}
+        )
+        out = lines(resp)
+        assert searched == ["widget 5 release", "widget 5 changelog", "widget 5 review"]
+        # Each query contributed a distinct source, up to the document cap.
+        sources = [o["sources"] for o in out if "sources" in o][0]
+        assert len(sources) == 3
+        assert len({s["url"] for s in sources}) == 3
+
+    def test_a_failing_query_does_not_sink_the_others(self, rig, monkeypatch):
+        rig["ollama"].planner_reply = "Q: good one\nQ: bad one"
+
+        def fake_search(query, limit=3):
+            if query == "bad one":
+                raise web.WebError("search backend unreachable")
+            return [{"url": rig["site_url"], "title": "Widget 5"}]
+
+        monkeypatch.setattr(web, "search", fake_search)
+        resp = rig["client"].post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "widget 5?"}], "web": True}
+        )
+        out = lines(resp)
+        assert [o["sources"] for o in out if "sources" in o], "the working query still grounded the answer"
+        assert "".join(o.get("message", {}).get("content", "") for o in out) == "Widget 5 is out."
+
+    def test_all_queries_failing_is_reported_not_silent(self, rig, monkeypatch):
+        rig["ollama"].planner_reply = "Q: anything"
+        monkeypatch.setattr(
+            web, "search", lambda q, limit=3: (_ for _ in ()).throw(web.WebError("backend down"))
+        )
+        resp = rig["client"].post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "widget 5?"}], "web": True}
+        )
+        assert any("backend down" in o.get("status", "") for o in lines(resp))
+
+    def test_planner_failure_is_surfaced(self, rig, monkeypatch):
+        monkeypatch.setattr(web, "plan_searches", lambda messages, model, **kw: None)
+        resp = rig["client"].post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "widget 5?"}], "web": True}
+        )
+        assert any("Could not plan" in o.get("status", "") for o in lines(resp))
+
+    def test_unreadable_results_are_reported(self, rig, monkeypatch):
+        rig["ollama"].planner_reply = "Q: anything"
+        monkeypatch.setattr(web, "fetch", lambda url: (_ for _ in ()).throw(web.WebError("403")))
+        resp = rig["client"].post(
+            "/api/chat", json={"messages": [{"role": "user", "content": "widget 5?"}], "web": True}
+        )
+        out = lines(resp)
+        assert any("couldn't read any" in o.get("status", "") for o in out)
+        # Still answers, ungrounded, rather than failing the turn.
+        assert "".join(o.get("message", {}).get("content", "") for o in out) == "Widget 5 is out."
 
 
 class TestUrlInMessage:

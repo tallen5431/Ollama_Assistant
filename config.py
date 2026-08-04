@@ -98,6 +98,22 @@ def get_search_url() -> str:
     return os.getenv("SEARXNG_URL", "").strip().rstrip("/")
 
 
+def get_planner_model() -> str:
+    """Model used to turn a message into search queries.
+
+    Empty means "use whichever model is answering". Pointing this at a small
+    model (``qwen2.5-coder:0.5b``, ``qwen3.5:4b``) makes planning quick and
+    keeps a big answering model from being invoked twice per turn — but only
+    if both fit in VRAM at once, otherwise Ollama swaps them and it is slower.
+    """
+    return os.getenv("WEB_PLANNER_MODEL", "").strip()
+
+
+def get_web_max_docs() -> int:
+    """How many fetched pages to put in front of the model at once."""
+    return max(1, int(_number("WEB_MAX_DOCS", 3)))
+
+
 def get_web_timeout() -> float:
     """Per-request timeout when fetching a page or running a search."""
     return _number("WEB_TIMEOUT", 15.0)

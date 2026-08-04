@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 import requests
 
 from config import (
+    get_planner_model,
     get_search_url,
     get_web_max_bytes,
     get_web_max_chars,
@@ -384,50 +385,134 @@ _PREAMBLE = (
 
 
 _PLANNER = (
-    "You decide whether answering the user's message needs a web lookup.\n"
-    "Reply with exactly one line and nothing else:\n"
-    "SEARCH: <short search query>\n"
-    "or\n"
+    "You write web search queries for someone else to run. You never answer the "
+    "question yourself and you never invent facts.\n\n"
+    "Reply in one of exactly two ways.\n\n"
+    "If the message can be answered without looking anything up — chit-chat, "
+    "opinions, arithmetic, writing, translation, rewording or summarising text "
+    "already provided, or code you can write from memory — reply with exactly:\n"
     "NONE\n\n"
-    "Choose SEARCH when the answer depends on current events, recent releases, "
-    "prices, versions, schedules, or specifics you cannot be confident are still "
-    "true. Choose NONE for chit-chat, opinions, arithmetic, writing, translation, "
-    "code you can write from memory, and anything settled by general knowledge."
+    "Otherwise reply with one to three search queries, one per line, each line "
+    "starting with 'Q: ' and nothing else. Write them the way you would type "
+    "into a search engine: keywords, not a question, no filler words. Keep the "
+    "distinguishing terms — product names, version numbers, exact error text. "
+    "Make each query come at the topic from a different angle instead of "
+    "rephrasing one query three times.\n\n"
+    "Example for \"what changed in the newest ollama, does it do tool calls "
+    "while streaming yet?\":\n"
+    "Q: ollama latest release notes\n"
+    "Q: ollama streaming tool calls support\n"
+    "Q: ollama changelog tool_calls stream"
 )
 
-_SEARCH_RE = re.compile(r"SEARCH\s*:\s*(.+)", re.I)
+# Accept the documented "Q:" form, and "SEARCH:" too — small models often
+# reach for it, and rejecting a usable query on formatting is a poor trade.
+_QUERY_RE = re.compile(r"^[^\S\n]*(?:Q|SEARCH|QUERY)\s*[:.\-]\s*(.+?)\s*$", re.I | re.M)
+
+_NOISE = re.compile(r"^(?:\d+[.)]\s*|[-*•]\s*)+")
 
 
-def decide_query(model: str, messages: List[Dict[str, str]]) -> Optional[str]:
-    """Ask the model whether the latest turn warrants a search.
+def planner_input(messages: List[Dict[str, str]], max_chars: int = 700) -> str:
+    """Recent conversation as plain text, so follow-ups plan sensibly.
 
-    A separate cheap non-streaming call rather than tool calling: it works with
-    every model, including the vision and reasoning ones that expose no tool
-    support, and a model that answers badly here costs a skipped search rather
-    than a broken reply. Any failure means "don't search".
+    "what about the 14b one?" is unanswerable in isolation; with the previous
+    turn attached it becomes a query worth running.
+    """
+    turns = [
+        m for m in (messages or [])
+        if isinstance(m, dict)
+        and m.get("role") in ("user", "assistant")
+        and str(m.get("content") or "").strip()
+    ]
+    if not turns:
+        return ""
+    lines = [
+        f"{m['role']}: {' '.join(str(m.get('content') or '').split())[:300]}"
+        for m in turns[-3:]
+    ]
+    return "\n".join(lines)[-max_chars:]
+
+
+def plan_searches(
+    messages: List[Dict[str, str]],
+    model: str,
+    max_queries: int = 3,
+) -> Optional[List[str]]:
+    """Turn the latest turn into search queries.
+
+    Returns a list of queries, ``[]`` when the planner judged that no lookup is
+    needed, or ``None`` when planning itself failed — the caller distinguishes
+    "decided not to search" from "couldn't decide" so a misconfigured planner
+    model is visible rather than silently never searching.
+
+    A plain call rather than tool calling: it works with every model, including
+    the vision and reasoning ones that expose no tool support, and a poor answer
+    here costs a skipped or scruffy search rather than a broken reply.
     """
     from ollama_client import chat  # local import keeps this module standalone
 
-    last = last_user_text(messages)[:400].strip()
-    if not last:
-        return None
+    if not last_user_text(messages).strip():
+        return []
+
+    planner_model = get_planner_model() or model
     try:
         reply = chat(
-            model,
-            [{"role": "system", "content": _PLANNER}, {"role": "user", "content": last}],
+            planner_model,
+            [
+                {"role": "system", "content": _PLANNER},
+                {"role": "user", "content": planner_input(messages)},
+            ],
+            # Deterministic and short: this is a routing decision, not prose.
+            options={"temperature": 0, "num_predict": 96},
         )
     except Exception as exc:  # noqa: BLE001 - never let planning break the chat
-        logger.warning("Search planner failed (%s); answering without a search", exc)
+        logger.warning("Search planner (%s) failed: %s", planner_model, exc)
         return None
 
-    match = _SEARCH_RE.search((reply or "")[:300])
-    if not match:
-        return None
-    query = match.group(1).strip().strip("\"'").strip()
-    # Guard against a small model echoing the instructions back at us.
-    if not query or query.upper().startswith("NONE") or len(query) > 200:
-        return None
-    return query
+    reply = (reply or "")[:800]
+    queries: List[str] = []
+    seen = set()
+    for match in _QUERY_RE.finditer(reply):
+        # Peel wrappers until stable: a single pass in a fixed order leaves the
+        # quote behind on `"a query".` and the stop behind on `"a query."`.
+        query = _NOISE.sub("", match.group(1))
+        previous = None
+        while previous != query:
+            previous = query
+            query = query.strip().strip("\"'`").rstrip(".,;:").strip()
+        # A small model that echoes the instructions back shouldn't become a search.
+        if not query or len(query) > 200 or query.upper() == "NONE":
+            continue
+        key = query.lower()
+        if key not in seen:
+            seen.add(key)
+            queries.append(query)
+        if len(queries) >= max_queries:
+            break
+    return queries
+
+
+def merge_results(groups: List[List[Dict[str, str]]], limit: int) -> List[Dict[str, str]]:
+    """Interleave per-query result lists, dropping duplicate URLs.
+
+    Round-robin rather than concatenation so every query contributes near the
+    top — otherwise one query returning ten hits would crowd the others out and
+    the extra angles would have been planned for nothing.
+    """
+    merged: List[Dict[str, str]] = []
+    seen = set()
+    for rank in range(max((len(g) for g in groups), default=0)):
+        for group in groups:
+            if rank >= len(group):
+                continue
+            url = group[rank].get("url")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            merged.append(group[rank])
+            if len(merged) >= limit:
+                return merged
+    return merged
 
 
 def last_user_text(messages: List[Dict[str, str]]) -> str:

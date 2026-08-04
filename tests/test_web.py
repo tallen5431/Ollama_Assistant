@@ -265,35 +265,150 @@ class TestRedirectGuard:
             server.server_close()
 
 
-class TestDecideQuery:
-    def test_parses_a_search_decision(self, monkeypatch):
-        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "SEARCH: ollama release notes")
-        assert web.decide_query("m", [{"role": "user", "content": "what's new?"}]) == "ollama release notes"
+def planner(reply):
+    """Stub the planner model with a fixed reply."""
+    return lambda *a, **k: reply
+
+
+ASK = [{"role": "user", "content": "what changed in the newest ollama?"}]
+
+
+class TestPlanSearches:
+    def test_parses_multiple_queries(self, monkeypatch):
+        monkeypatch.setattr(
+            "ollama_client.chat",
+            planner("Q: ollama latest release notes\nQ: ollama streaming tool calls"),
+        )
+        assert web.plan_searches(ASK, "m") == [
+            "ollama latest release notes",
+            "ollama streaming tool calls",
+        ]
 
     def test_none_means_no_search(self, monkeypatch):
-        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "NONE")
-        assert web.decide_query("m", [{"role": "user", "content": "hello"}]) is None
+        monkeypatch.setattr("ollama_client.chat", planner("NONE"))
+        assert web.plan_searches([{"role": "user", "content": "write a haiku"}], "m") == []
+
+    def test_planner_failure_is_distinguishable_from_no_search(self, monkeypatch):
+        """None means "couldn't plan"; [] means "decided not to" — not the same."""
+        def boom(*a, **k):
+            raise ValueError("model not found")
+        monkeypatch.setattr("ollama_client.chat", boom)
+        assert web.plan_searches(ASK, "m") is None
+
+    def test_legacy_search_prefix_still_parses(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("SEARCH: ollama release notes"))
+        assert web.plan_searches(ASK, "m") == ["ollama release notes"]
 
     def test_tolerates_a_chatty_model(self, monkeypatch):
-        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "Sure!\nSEARCH: weather in Boston\nHope that helps")
-        assert web.decide_query("m", [{"role": "user", "content": "weather?"}]) == "weather in Boston"
+        monkeypatch.setattr(
+            "ollama_client.chat",
+            planner("Sure, here are some queries!\nQ: weather boston\nHope that helps"),
+        )
+        assert web.plan_searches(ASK, "m") == ["weather boston"]
 
-    def test_strips_quotes(self, monkeypatch):
-        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: 'SEARCH: "python 3.13 release"')
-        assert web.decide_query("m", [{"role": "user", "content": "?"}]) == "python 3.13 release"
+    def test_strips_quotes_bullets_and_trailing_stops(self, monkeypatch):
+        monkeypatch.setattr(
+            "ollama_client.chat",
+            planner('Q: - "python 3.13 release date".\nQ: 1. python 3.13 changelog'),
+        )
+        assert web.plan_searches(ASK, "m") == [
+            "python 3.13 release date",
+            "python 3.13 changelog",
+        ]
 
-    def test_unparseable_reply_means_no_search(self, monkeypatch):
-        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "I think maybe you should look it up")
-        assert web.decide_query("m", [{"role": "user", "content": "?"}]) is None
+    def test_duplicate_queries_are_dropped(self, monkeypatch):
+        monkeypatch.setattr(
+            "ollama_client.chat", planner("Q: ollama news\nQ: Ollama News\nQ: ollama blog")
+        )
+        assert web.plan_searches(ASK, "m") == ["ollama news", "ollama blog"]
 
-    def test_a_failing_model_does_not_break_the_chat(self, monkeypatch):
-        def boom(*a, **k):
-            raise ValueError("ollama down")
-        monkeypatch.setattr("ollama_client.chat", boom)
-        assert web.decide_query("m", [{"role": "user", "content": "?"}]) is None
+    def test_respects_the_query_cap(self, monkeypatch):
+        monkeypatch.setattr(
+            "ollama_client.chat", planner("\n".join(f"Q: query {i}" for i in range(9)))
+        )
+        assert len(web.plan_searches(ASK, "m", max_queries=3)) == 3
+
+    def test_unparseable_reply_yields_no_queries(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("I think you should look it up"))
+        assert web.plan_searches(ASK, "m") == []
+
+    def test_echoed_none_is_not_a_query(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("Q: NONE"))
+        assert web.plan_searches(ASK, "m") == []
+
+    def test_absurdly_long_query_is_dropped(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("Q: " + "x" * 500))
+        assert web.plan_searches(ASK, "m") == []
 
     def test_no_user_turn_means_no_search(self):
-        assert web.decide_query("m", [{"role": "assistant", "content": "x"}]) is None
+        assert web.plan_searches([{"role": "assistant", "content": "x"}], "m") == []
+
+    def test_dedicated_planner_model_is_used_when_set(self, monkeypatch):
+        seen = {}
+
+        def capture(model, messages, options=None):
+            seen["model"] = model
+            seen["options"] = options
+            return "Q: something"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        monkeypatch.setenv("WEB_PLANNER_MODEL", "qwen2.5-coder:0.5b")
+        web.plan_searches(ASK, "qwen3-coder:30b")
+        assert seen["model"] == "qwen2.5-coder:0.5b"
+        # Planning is a routing decision: deterministic and short.
+        assert seen["options"]["temperature"] == 0
+        assert seen["options"]["num_predict"] <= 128
+
+    def test_falls_back_to_the_answering_model(self, monkeypatch):
+        seen = {}
+
+        def capture(model, messages, options=None):
+            seen["model"] = model
+            return "NONE"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        monkeypatch.delenv("WEB_PLANNER_MODEL", raising=False)
+        web.plan_searches(ASK, "llama3.1:8b")
+        assert seen["model"] == "llama3.1:8b"
+
+
+class TestPlannerInput:
+    def test_includes_recent_context_for_follow_ups(self):
+        msgs = [
+            {"role": "user", "content": "tell me about qwen3 coder"},
+            {"role": "assistant", "content": "It is a code model in 30b and 14b sizes."},
+            {"role": "user", "content": "what about the 14b one?"},
+        ]
+        text = web.planner_input(msgs)
+        assert "qwen3 coder" in text and "what about the 14b one?" in text
+
+    def test_trims_long_turns(self):
+        msgs = [{"role": "user", "content": "x" * 5000}]
+        assert len(web.planner_input(msgs)) <= 700
+
+    def test_empty_conversation(self):
+        assert web.planner_input([]) == ""
+
+
+class TestMergeResults:
+    def test_interleaves_so_every_query_contributes(self):
+        groups = [
+            [{"url": "a1"}, {"url": "a2"}, {"url": "a3"}],
+            [{"url": "b1"}, {"url": "b2"}],
+        ]
+        assert [r["url"] for r in web.merge_results(groups, 4)] == ["a1", "b1", "a2", "b2"]
+
+    def test_drops_duplicate_urls_across_queries(self):
+        groups = [[{"url": "same"}, {"url": "a2"}], [{"url": "same"}, {"url": "b2"}]]
+        assert [r["url"] for r in web.merge_results(groups, 4)] == ["same", "a2", "b2"]
+
+    def test_respects_the_limit(self):
+        groups = [[{"url": f"a{i}"} for i in range(5)], [{"url": f"b{i}"} for i in range(5)]]
+        assert len(web.merge_results(groups, 3)) == 3
+
+    def test_handles_empty_input(self):
+        assert web.merge_results([], 3) == []
+        assert web.merge_results([[], []], 3) == []
 
 
 class TestSearchParsing:

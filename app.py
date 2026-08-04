@@ -38,6 +38,7 @@ from config import (
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
+    get_web_max_docs,
     logger,
     web_enabled,
 )
@@ -231,31 +232,42 @@ def _gather_web(
                 yield _line({"status": str(exc)})
         return
 
-    yield _line({"status": "Considering a search…"})
-    query = web.decide_query(model, messages)
-    if not query:
+    yield _line({"status": "Working out what to search for…"})
+    queries = web.plan_searches(messages, model)
+    if queries is None:
+        yield _line({"status": "Could not plan a search; answering without one."})
+        return
+    if not queries:
         yield _line({"status": ""})
         return
 
-    yield _line({"status": f"Searching for “{query}”…"})
-    try:
-        results = web.search(query, limit=4)
-    except web.WebError as exc:
-        yield _line({"status": str(exc)})
-        return
+    yield _line({"status": "Searching: " + " · ".join(queries)})
+    groups, failures = [], []
+    for query in queries:
+        try:
+            groups.append(web.search(query, limit=4))
+        except web.WebError as exc:
+            failures.append(str(exc))
 
+    max_docs = get_web_max_docs()
+    # Interleave so each query contributes, then fetch a few more candidates
+    # than needed since some will be paywalled, JS-only, or plain unreachable.
+    results = web.merge_results(groups, limit=max_docs * 2)
     if not results:
-        yield _line({"status": "No search results found."})
+        yield _line({"status": failures[0] if failures else "No search results found."})
         return
 
     for result in results:
-        if len(documents) >= 2:   # two good sources is plenty for a small model
+        if len(documents) >= max_docs:
             break
         yield _line({"status": f"Reading {_host_of(result['url'])}…"})
         try:
             documents.append(web.fetch(result["url"]))
         except web.WebError as exc:
             logger.info("Skipping %s: %s", result["url"], exc)
+
+    if not documents:
+        yield _line({"status": "Found results but couldn't read any of them."})
 
 
 @app.route("/api/voice/models", methods=["GET"])

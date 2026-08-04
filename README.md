@@ -30,9 +30,10 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   in, then ask a vision model about it (`llava`, `*-vision`, `minicpm-v`,
   `qwen2.5vl`, `moondream`, …). Images are downscaled in the browser before
   upload. See "Vision models" below.
-- 🌐 **Web access (optional)** — reads a link you paste, or lets the model decide
-  when a search would help, and cites what it used. Only public addresses are
-  ever fetched. Off by default. See "Web access" below.
+- 🌐 **Web access (optional)** — reads a link you paste, or has a small model
+  turn your message into search queries, then grounds the answer in the pages it
+  finds and cites them. Only public addresses are ever fetched. Off by default.
+  See "Web access" below.
 - 🧠 **Pick your model** — a dropdown lists every model installed on your Ollama
   server; the configured default is pre-selected.
 - 🟢 **Connection status** — a dot shows whether the model server is reachable.
@@ -88,6 +89,8 @@ All settings are environment variables (the server manager injects them):
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
 | `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Unset falls back to DuckDuckGo HTML |
+| `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model |
+| `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
 | `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
@@ -181,11 +184,30 @@ Two paths:
   best case for a local model: one clean document beats a pile of search
   snippets, and it's far better than screenshotting a page for a vision model,
   since the model gets real text instead of OCR'd pixels.
-- **Otherwise the model is asked whether to search.** A short, cheap call
-  returns `SEARCH: <query>` or `NONE`; on `SEARCH` the app runs the query, reads
-  the top two results, and grounds the answer in them. Using a plain call rather
-  than tool calling means this works with *every* model, including vision and
-  reasoning ones that expose no tool support.
+- **Otherwise a planner turns your message into search queries.** A short,
+  cheap, deterministic call replies with either `NONE` or up to three `Q: `
+  lines — search-engine keywords, each attacking the topic from a different
+  angle. The app runs all of them, interleaves the results so every query
+  contributes, and reads the top few pages. Using a plain call rather than tool
+  calling means this works with *every* model, including vision and reasoning
+  ones that expose no tool support.
+
+  The planner sees the last few turns, not just your latest message, so a
+  follow-up like *"what about the 14b one?"* still produces a usable query.
+
+### Planner model
+
+By default the answering model does the planning. Set `WEB_PLANNER_MODEL` to a
+small model to keep a large one from being invoked twice a turn:
+
+```
+WEB_PLANNER_MODEL=qwen2.5-coder:0.5b
+```
+
+Worth measuring rather than assuming: this is only faster if both models fit in
+VRAM at once. If they don't, Ollama swaps between them every turn and a small
+planner ends up *slower* than just reusing the model already loaded. Leave it
+unset if VRAM is tight.
 
 Progress appears live above the reply ("Searching for…", "Reading example.com…")
 and the pages used are listed underneath, numbered to match the `[n]` citations
