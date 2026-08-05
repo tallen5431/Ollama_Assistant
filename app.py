@@ -121,6 +121,22 @@ def healthz() -> Any:
     return "ok", 200
 
 
+def _names_match(wanted: str, installed: List[str]) -> bool:
+    """Whether ``wanted`` names one of ``installed``, Ollama's way.
+
+    Ollama treats ``X`` and ``X:latest`` as the same model — that is the form
+    ``ollama pull`` accepts and the form several of these models were installed
+    under. Exact string equality flagged a perfectly working default as missing
+    and told the owner to go pick a different one.
+    """
+    def canonical(name: str) -> str:
+        name = (name or "").strip()
+        return name[:-7] if name.endswith(":latest") else name
+
+    target = canonical(wanted)
+    return any(canonical(name) == target for name in installed if name)
+
+
 @app.route("/api/health", methods=["GET"])
 def health() -> Any:
     """JSON status, including whether Ollama actually answers.
@@ -155,7 +171,7 @@ def health() -> Any:
             "default_model": default,
             # A default naming a model that has been deleted or renamed since
             # is a silent failure on every turn until someone notices.
-            "default_installed": bool(installed) and default in installed,
+            "default_installed": bool(installed) and _names_match(default, installed),
             "auth": AUTH_ENABLED,
             "voice": voice.voice_available(),
             "web": web_enabled(),
@@ -207,7 +223,15 @@ def _store_unavailable(exc: sqlite3.Error) -> Any:
     failed fetch and then ignored, because saveMessage checked neither resp.ok
     nor the body. History silently stopped accumulating while the chat carried
     on working perfectly.
+
+    ProgrammingError and InterfaceError are ours, not the disk's: a bad query
+    or a wrong binding count would otherwise be reported to the user as a
+    corrupt database and logged as one line with no stack, which is exactly the
+    wrong place to start looking. Those get a traceback.
     """
+    if isinstance(exc, (sqlite3.ProgrammingError, sqlite3.InterfaceError)):
+        logger.exception("Bug in a history query, not a database problem")
+        return jsonify({"error": "Internal error in the history layer."}), 500
     logger.error("History database error: %s", exc)
     return jsonify({
         "error": "Conversation history is unavailable — the database could not "
@@ -603,7 +627,13 @@ def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
     # Not a `with` block: the context manager joins every worker on exit, which
     # would undo the early return entirely — the turn would still wait for the
     # slowest of six after the third had landed.
-    pool = ThreadPoolExecutor(max_workers=min(8, len(items)))
+    # thread_name_prefix marks these in a stack dump; more importantly, the
+    # abandoned ones are joined by concurrent.futures' interpreter-exit hook, so
+    # restarting the card mid-fetch would stall for the remaining budget. Each
+    # fetch is bounded by its own wall clock, so that wait is finite — but the
+    # deadline is what keeps it short, not the pool.
+    pool = ThreadPoolExecutor(max_workers=min(8, len(items)),
+                              thread_name_prefix="retrieval")
     futures: Dict[Any, int] = {}
     try:
         futures = {pool.submit(func, item): i for i, item in enumerate(items)}

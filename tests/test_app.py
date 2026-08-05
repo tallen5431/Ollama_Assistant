@@ -332,3 +332,59 @@ class TestHealthProbesOllama:
         mod.app.test_client().get("/api/health")
         assert isinstance(seen["timeout"], tuple)
         assert max(seen["timeout"]) <= 10, "health must not wait like a chat turn does"
+
+
+class TestDefaultModelMatching:
+    """Ollama treats X and X:latest as the same model.
+
+    Exact equality flagged a working default as missing and told the owner to
+    pick a different one — `minicpm-v` is the form `ollama pull` accepts, and
+    /api/tags reports `minicpm-v:latest`.
+    """
+
+    @pytest.mark.parametrize("wanted,installed", [
+        ("minicpm-v", ["minicpm-v:latest"]),
+        ("glm-ocr:latest", ["glm-ocr"]),
+        ("llama3.1:8b", ["other:1b", "llama3.1:8b"]),
+    ])
+    def test_equivalent_names_match(self, wanted, installed):
+        assert app_module._names_match(wanted, installed) is True
+
+    @pytest.mark.parametrize("wanted,installed", [
+        ("llama3.1:8b", ["llama3.1:70b"]),      # a different size is not it
+        ("nope", ["llama3.1:8b"]),
+        ("", ["llama3.1:8b"]),
+    ])
+    def test_different_models_do_not_match(self, wanted, installed):
+        assert app_module._names_match(wanted, installed) is False
+
+    def test_health_does_not_flag_a_working_bare_name(self, monkeypatch):
+        mod = load_app(monkeypatch, {"OLLAMA_MODEL": "minicpm-v"})
+        monkeypatch.setattr(mod, "list_models", lambda **kw: [{"name": "minicpm-v:latest"}])
+        assert mod.app.test_client().get("/api/health").get_json()["default_installed"] is True
+
+
+class TestStoreErrorsAreClassified:
+    """A bad query is our bug, not the disk's — and needs a stack, not a 503
+    telling the owner their database is unwritable."""
+
+    def test_a_query_bug_is_a_500_with_a_traceback(self, monkeypatch, caplog):
+        import sqlite3
+        mod = load_app(monkeypatch)
+        monkeypatch.setattr(mod.store, "list_conversations",
+                            lambda: (_ for _ in ()).throw(
+                                sqlite3.ProgrammingError("Incorrect number of bindings")))
+        resp = mod.app.test_client().get("/api/conversations")
+        assert resp.status_code == 500
+        assert "history layer" in resp.get_json()["error"]
+        assert any(r.exc_info for r in caplog.records), "no traceback was logged"
+
+    def test_a_real_database_failure_is_still_a_503(self, monkeypatch):
+        import sqlite3
+        mod = load_app(monkeypatch)
+        monkeypatch.setattr(mod.store, "list_conversations",
+                            lambda: (_ for _ in ()).throw(
+                                sqlite3.DatabaseError("database disk image is malformed")))
+        resp = mod.app.test_client().get("/api/conversations")
+        assert resp.status_code == 503
+        assert resp.get_json()["history"] is False

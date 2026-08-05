@@ -632,7 +632,14 @@ _THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?(</\1>|\Z)", re.I | re.S
 # The same, when only the closing tag is in the output. Ollama's deepseek-r1
 # template opens <think> in the prompt itself, so the model's reply *starts*
 # inside the scratchpad and the opening tag never appears in what comes back.
-_ORPHAN_THINK_RE = re.compile(r"\A.*?</(?:think|thinking|reasoning)>", re.I | re.S)
+#
+# Anchored to a line of its own, which is how a template emits it. Matching it
+# anywhere meant a reply that merely mentioned the tag lost everything before
+# it — the same defect this had in the browser, where the truncated text was
+# what got stored.
+_ORPHAN_THINK_RE = re.compile(
+    r"\A.*?^[^\S\n]*</(?:think|thinking|reasoning)>[^\S\n]*$\n?", re.I | re.S | re.M
+)
 
 # A decision not to search. Matched loosely on purpose: a small model writes
 # "None needed." as often as the documented bare NONE, and reading that as a

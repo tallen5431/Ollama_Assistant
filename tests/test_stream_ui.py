@@ -229,11 +229,30 @@ class TestSplitThink:
         assert out["thinking"] == "reasoning"
         assert out["content"] == "answer"
 
-    def test_a_closing_tag_with_no_opening_one_is_still_reasoning(self):
-        """Ollama's deepseek-r1 template opens <think> in the prompt."""
-        out = self.split("reasoning about it</think>the answer")
-        assert out["thinking"] == "reasoning about it"
-        assert out["content"] == "the answer"
+    def test_a_closing_tag_alone_on_its_line_is_a_scratchpad_terminator(self):
+        """Ollama's deepseek-r1 template opens <think> in the prompt, so the
+        reply starts inside the scratchpad and emits only the closing tag."""
+        out = self.split("reasoning about it\n</think>\nthe answer")
+        assert out["thinking"].strip() == "reasoning about it"
+        assert out["content"].strip() == "the answer"
+
+    @pytest.mark.parametrize("reply", [
+        "Yes — the reply only carries </think> at the end. That is all.",
+        "Use `</think>` to close it. That is the whole answer.",
+        "The closing tag is </think> and the opening one is <thing>.",
+    ])
+    def test_a_reply_that_merely_mentions_the_tag_is_not_truncated(self, reply):
+        """This lost everything before the tag — and the truncated text was
+        what got pushed into messages[] and written to history, so the loss was
+        permanent and invisible."""
+        out = self.split(reply)
+        assert out["content"] == reply
+        assert out["thinking"] == ""
+
+    def test_a_reply_that_is_only_scratchpad_is_shown_whole(self):
+        """Better an odd-looking answer than a blank one."""
+        out = self.split("I was still thinking\n</think>")
+        assert "still thinking" in out["content"]
 
     def test_a_stray_closing_tag_after_a_real_block_keeps_the_answer(self):
         out = self.split("<think>a</think>real answer </think> tail")
@@ -319,3 +338,65 @@ class TestScrollFollowing:
         top = json.loads(subprocess.run(["node", "-e", js], capture_output=True,
                                         text=True, check=True).stdout)
         assert top == 0, "a queued frame dragged the view back to the bottom"
+
+
+class TestRollbackDoesNotReachIntoAnotherConversation:
+    """newChat() and loadConversation() abort the in-flight request.
+
+    Pushing the abandoned message and its photos into the composer of a
+    different conversation is not a rescue, it is a surprise — and the hint
+    claimed a restore that had not happened.
+    """
+
+    def drive_with_swap(self, script, abort_after):
+        """Swap `messages` mid-stream, as newChat()/loadConversation() do."""
+        page = _page()
+        js = "\n".join([
+            _DOM.replace(
+                "      if (TYPE_DURING !== null) { inputEl.value = TYPE_DURING; TYPE_DURING = null; }",
+                "      if (TYPE_DURING === 'SWAP') { messages = []; TYPE_DURING = null; }"),
+            _slice(page, "      function addUser", "      // ---- Image attachments"),
+            _slice(page, "      // Split assistant text", "      function fmtUsage"),
+            _slice(page, "      // Feature-detected, like isSecureContext elsewhere",
+                   "      function stop()"),
+            f"run({json.dumps(script)}, {abort_after}, \"abandoned question\", \"SWAP\")"
+            ".then(r => process.stdout.write(JSON.stringify(r)));",
+        ])
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True)
+        return json.loads(out.stdout)
+
+    def test_an_abandoned_turn_does_not_repopulate_the_composer(self):
+        r = self.drive_with_swap([{"message": {"content": "", "thinking": "hmm"}}], 1)
+        assert r["input"] == "", "the discarded message was pushed into a new conversation"
+
+    def test_and_does_not_claim_it_came_back(self):
+        r = self.drive_with_swap([{"message": {"content": "", "thinking": "hmm"}}], 1)
+        assert "back in the box" not in r["hint"]
+
+
+class TestTheWaitCounterIsNotSuppressedByAnEmptyStatus:
+    """app.py yields {"status": ""} to *clear* the line when the planner
+    declines. Latching on that suppressed the counter on exactly the turns
+    that are slowest — a cold 30b with the web toggle left on."""
+
+    def owned_after(self, script):
+        page = _page()
+        js = "\n".join([
+            _DOM,
+            _slice(page, "      function addUser", "      // ---- Image attachments"),
+            _slice(page, "      // Split assistant text", "      function fmtUsage"),
+            _slice(page, "      // Feature-detected, like isSecureContext elsewhere",
+                   "      function stop()"),
+            f"run({json.dumps(script)}, -1, \"hi\", null)"
+            ".then(() => process.stdout.write(JSON.stringify(!!lastView.statusOwned)));",
+        ])
+        return json.loads(subprocess.run(["node", "-e", js], capture_output=True,
+                                         text=True, check=True).stdout)
+
+    def test_an_empty_status_does_not_take_over_the_line(self):
+        assert self.owned_after([{"status": ""}, {"message": {"content": "hi"}},
+                                 {"done": True}]) is False
+
+    def test_a_real_status_does(self):
+        assert self.owned_after([{"status": "Searching: x"}, {"message": {"content": "hi"}},
+                                 {"done": True}]) is True
