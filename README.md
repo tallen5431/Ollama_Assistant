@@ -26,21 +26,25 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   with [Vosk](https://alphacephei.com/vosk/) — nothing is sent to the cloud.
   *(Needs the app served over HTTPS; browsers only allow the mic on a secure
   origin. See "Voice input" below.)*
-- 🖼️ **Image input** — attach files with 📎, grab a 📸 screenshot, or paste one
-  in, then ask a vision model about it (`llava`, `*-vision`, `minicpm-v`,
-  `qwen2.5vl`, `moondream`, …). Images are downscaled in the browser before
-  upload. See "Vision models" below.
+- 🖼️ **Image input** — attach files with 📎, take a photo with 📷, grab a 📸
+  screenshot, or paste one in, then ask about it (`llava`, `*-vision`,
+  `minicpm-v`, `qwen2.5vl`, `moondream`, …). Images are downscaled in the
+  browser before upload. See "Vision models" below.
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
 - ✍️ **Formatted replies** — markdown is rendered, with labelled code blocks and
   a copy button. Matters most with the coder models.
-- 👁️ **Vision routing** — attach an image while a text-only model is selected
-  and the app switches to one that can actually see it.
+- 👁️ **Image reading without losing your model** — attach a screenshot while a
+  text-only model is selected and an OCR model transcribes it for you, so a
+  stack trace doesn't cost you `qwen3-coder:30b` mid-debug. Only if nothing can
+  transcribe does the app switch you to a vision model.
 - 🌐 **Web access (optional)** — reads a link you paste, or has a small model
   turn your message into search queries, then grounds the answer in the pages it
-  finds and cites them. Only public addresses are ever fetched. Off by default.
-  See "Web access" below.
+  finds and cites them. Knows today's date, falls back to search snippets when a
+  page can't be read, and says so when it found nothing rather than answering
+  from memory as if it had. Only public addresses are ever fetched. Off by
+  default. See "Web access" below.
 - 🧠 **Pick your model** — a dropdown lists every model installed on your Ollama
   server; the configured default is pre-selected.
 - 🟢 **Connection status** — a dot shows whether the model server is reachable.
