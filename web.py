@@ -340,7 +340,15 @@ def fetch(url: str) -> Dict[str, str]:
     cap = get_web_max_chars()
     if len(text) > cap:
         text = text[:cap].rsplit(" ", 1)[0] + " …[truncated]"
-    return {"url": resp.url if hasattr(resp, "url") else url, "title": title, "text": text}
+    # "url" is where we ended up, which is what a citation should point at;
+    # "requested" is where we started, which is how a caller matches this back
+    # to the search result it came from. A redirect makes the two differ.
+    return {
+        "url": resp.url if hasattr(resp, "url") else url,
+        "requested": url,
+        "title": title,
+        "text": text,
+    }
 
 
 def find_urls(text: str, limit: int = 3) -> List[str]:
@@ -538,16 +546,34 @@ _NOISE = re.compile(r"^(?:\d+[.)]\s*|[-*•]\s*)+")
 # A reasoning model's scratchpad, which is never the answer.
 _THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?(</\1>|\Z)", re.I | re.S)
 
-# "NONE" as a decision, not the word appearing inside a query.
-_NONE_RE = re.compile(r"^\W*NONE\W*$", re.I | re.M)
+# The same, when only the closing tag is in the output. Ollama's deepseek-r1
+# template opens <think> in the prompt itself, so the model's reply *starts*
+# inside the scratchpad and the opening tag never appears in what comes back.
+_ORPHAN_THINK_RE = re.compile(r"\A.*?</(?:think|thinking|reasoning)>", re.I | re.S)
+
+# A decision not to search. Matched loosely on purpose: a small model writes
+# "None needed." as often as the documented bare NONE, and reading that as a
+# malformed query means searching "thanks!" every time the web toggle is left on.
+_NONE_RE = re.compile(r"\bNONE\b", re.I)
 
 
 def strip_thinking(text: str) -> str:
-    """Remove any <think> block, closed or left open by a truncated reply."""
-    return _THINK_RE.sub("", text or "").strip()
+    """Remove a scratchpad block, however the model happened to delimit it.
+
+    Three shapes, all seen in practice: properly closed, left open by a reply
+    that ran out of budget mid-thought, and closed-only — where the template
+    opened the block so the tag never appears in the output. The last one is
+    the dangerous shape: leave it and a query the model was *reasoning about*
+    gets run as one it chose.
+    """
+    text = _THINK_RE.sub("", text or "")
+    return _ORPHAN_THINK_RE.sub("", text).strip()
 
 
-def _fallback_query(messages: List[Dict[str, str]]) -> List[str]:
+def _fallback_query(
+    messages: List[Dict[str, str]],
+    image_note: Optional[str] = None,
+) -> List[str]:
     """The user's own words, as a query, when the planner gave nothing usable.
 
     Reaching here means the user explicitly asked for the web on this message
@@ -555,6 +581,8 @@ def _fallback_query(messages: List[Dict[str, str]]) -> List[str]:
     actually typed is a far better answer to that than quietly not searching.
     """
     text = " ".join(last_user_text(messages).split())
+    if not text and image_note:
+        text = " ".join(str(image_note).split())
     return [text[:200]] if text else []
 
 
@@ -598,7 +626,11 @@ def plan_searches(
     """
     from ollama_client import chat  # local import keeps this module standalone
 
-    if not last_user_text(messages).strip():
+    # Nothing to plan from — unless an image came with it. Snapping a photo and
+    # hitting send with no caption is the normal way to ask about something on
+    # a phone, and refusing to plan there disabled image-informed search for
+    # exactly the case that needs it most.
+    if not last_user_text(messages).strip() and not image_note:
         return []
 
     planner_model = get_planner_model() or model
@@ -662,7 +694,7 @@ def plan_searches(
     # rather than silently doing nothing, which looks identical to a failure.
     logger.info("Planner (%s) returned nothing usable; searching the message itself",
                 planner_model)
-    return _fallback_query(messages)
+    return _fallback_query(messages, image_note)
 
 
 def merge_results(
@@ -739,7 +771,7 @@ def build_context(documents: List[Dict[str, str]]) -> str:
 
 
 _NO_RESULTS = (
-    "A web search was run for the user's latest message and came back with "
+    "The web was searched for the user's latest message and came back with "
     "nothing usable — today is {today}, and no page could be retrieved. Answer "
     "from what you already know, and say plainly that you could not check it "
     "against a source. Do not present anything recent or version-specific as "
@@ -769,8 +801,12 @@ def snippet_documents(
     exception, and a result whose page could not be read used to contribute
     nothing whatsoever. Its search snippet is a poor substitute for the page —
     but it is an enormous improvement on silence, and it is already paid for.
+
+    Matching on both the requested and the final URL matters: a page that
+    redirected comes back under a different URL than the result it came from,
+    so keying on one alone re-adds a summary of a page already quoted in full.
     """
-    taken = {d.get("url") for d in exclude}
+    taken = {d.get("url") for d in exclude} | {d.get("requested") for d in exclude}
     out: List[Dict[str, str]] = []
     for result in results:
         if len(out) >= limit:

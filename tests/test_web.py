@@ -356,6 +356,41 @@ class TestPlanSearches:
         queries = web.plan_searches(long_ask, "m")
         assert len(queries) == 1 and len(queries[0]) <= 200
 
+    @pytest.mark.parametrize("decline", ["NONE", "None needed.", "The answer is NONE."])
+    def test_a_decline_in_prose_is_still_a_decline(self, monkeypatch, decline):
+        """A small model writes "None needed." as often as the bare token.
+
+        Reading that as a malformed reply meant falling back to searching the
+        message — so leaving the web toggle on ran a search for "thanks!".
+        """
+        monkeypatch.setattr("ollama_client.chat", planner(decline))
+        assert web.plan_searches([{"role": "user", "content": "thanks!"}], "m") == []
+
+
+class TestImageOnlyMessage:
+    """A photo with no caption is how you ask about something on a phone."""
+
+    IMG = [{"role": "user", "content": "", "images": ["aW1n"]}]
+
+    def test_an_image_with_no_text_can_still_plan_a_search(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("Q: TypeError concat str bytes"))
+        assert web.plan_searches(
+            self.IMG, "m", image_note="TypeError: can't concat str to bytes"
+        ) == ["TypeError concat str bytes"]
+
+    def test_the_transcript_is_the_fallback_when_there_are_no_words(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("uh"))
+        assert web.plan_searches(
+            self.IMG, "m", image_note="TypeError: can't concat str to bytes"
+        ) == ["TypeError: can't concat str to bytes"]
+
+    def test_an_empty_message_with_no_image_still_plans_nothing(self, monkeypatch):
+        called = []
+        monkeypatch.setattr("ollama_client.chat",
+                            lambda *a, **k: called.append(1) or "Q: x")
+        assert web.plan_searches([{"role": "user", "content": "  "}], "m") == []
+        assert not called, "no message and no image is not worth a model call"
+
     def test_no_user_turn_means_no_search(self):
         assert web.plan_searches([{"role": "assistant", "content": "x"}], "m") == []
 
@@ -459,6 +494,26 @@ class TestReasoningPlanner:
     @pytest.mark.parametrize("tag", ["think", "thinking", "reasoning"])
     def test_the_common_scratchpad_tags_are_all_stripped(self, tag):
         assert web.strip_thinking(f"<{tag}>noise</{tag}>\nkept") == "kept"
+
+    def test_a_closing_tag_with_no_opening_one_still_strips(self):
+        """Ollama's deepseek-r1 template opens <think> in the *prompt*.
+
+        The reply therefore starts inside the scratchpad and only the closing
+        tag comes back. Leaving that meant a query the model was reasoning
+        *about* got run as one it had chosen.
+        """
+        reply = "I could search the changelog.\nQ: a guess\n</think>\nQ: the real one"
+        assert web.strip_thinking(reply) == "Q: the real one"
+
+    def test_a_reasoned_over_query_is_not_run(self, monkeypatch):
+        monkeypatch.setattr(
+            "ollama_client.chat",
+            planner("thinking about it\nQ: a guess\n</think>\nQ: ollama release notes"),
+        )
+        assert web.plan_searches(ASK, "deepseek-r1:8b") == ["ollama release notes"]
+
+    def test_a_bare_reply_with_no_tags_is_untouched(self):
+        assert web.strip_thinking("Q: one\nQ: two") == "Q: one\nQ: two"
 
 
 class TestPlannerInput:
@@ -599,6 +654,43 @@ class TestSnippets:
         assert extra[0]["url"] == "https://paywall.example/"
         assert extra[0]["text"] == "Ollama 0.5 adds streaming tool calls."
         assert extra[0]["snippet_only"] is True
+
+    def test_a_redirected_page_is_not_summarised_as_well(self):
+        """fetch() reports where it landed; the result says where it started.
+
+        Keying on one alone re-added a summary of a page already quoted in
+        full, and listed the same source twice under the reply.
+        """
+        results = [
+            {"url": "https://docs.example/a", "title": "A", "snippet": "blurb"},
+            {"url": "https://dead.example/b", "title": "B", "snippet": "b blurb"},
+        ]
+        fetched = [{
+            "url": "https://docs.example/a/en/latest",   # after the redirect
+            "requested": "https://docs.example/a",        # what we asked for
+            "title": "A", "text": "full page",
+        }]
+        extra = web.snippet_documents(results, fetched, limit=3)
+        assert [d["url"] for d in extra] == ["https://dead.example/b"]
+
+    def test_fetch_records_both_urls(self, monkeypatch):
+        class R:
+            ok = True
+            encoding = "utf-8"
+            url = "https://docs.example/a/en/latest"
+            headers = {"Content-Type": "text/html"}
+            def iter_content(self, size):
+                yield b"<html><body><p>hello there</p></body></html>"
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setenv("WEB_ENABLED", "1")
+        monkeypatch.setattr(web, "_get", lambda url, **kw: R())
+        doc = web.fetch("https://docs.example/a")
+        assert doc["url"] == "https://docs.example/a/en/latest"
+        assert doc["requested"] == "https://docs.example/a"
 
     def test_a_result_with_no_snippet_is_skipped(self):
         results = [{"url": "https://a.example/", "title": "A", "snippet": "   "}]
