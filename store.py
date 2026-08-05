@@ -258,7 +258,13 @@ def delete(convo_id: str) -> bool:
         # per-connection and easy to lose in a future refactor.
         conn.execute("DELETE FROM messages WHERE conversation_id = ?", (convo_id,))
         cur = conn.execute("DELETE FROM conversations WHERE id = ?", (convo_id,))
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+    if deleted:
+        # Deleting an image-heavy thread frees a lot of pages, and the README
+        # says deleting reclaims space — so make that true. No-ops unless there
+        # is enough dead space to be worth the rewrite.
+        compact()
+    return deleted
 
 
 def stats() -> Dict[str, int]:
@@ -271,3 +277,51 @@ def stats() -> Dict[str, int]:
     except OSError:
         size = 0
     return {"conversations": convos, "messages": msgs, "bytes": size}
+
+
+# Only bother when a meaningful share of the file is dead space; a VACUUM
+# rewrites the whole database, so doing it after every delete would be silly.
+_COMPACT_MIN_FREE_FRACTION = 0.25
+_COMPACT_MIN_BYTES = 4 * 1024 * 1024
+
+
+def compact() -> int:
+    """Give freed pages back to the filesystem. Returns the bytes reclaimed.
+
+    Gated on there being enough dead space to be worth it: VACUUM rewrites the
+    whole database, so running it after every delete would be silly. Deleting
+    one small conversation does nothing; deleting an image-heavy one, or
+    several, reclaims the lot.
+    """
+    try:
+        before = db_path().stat().st_size
+    except OSError:
+        return 0
+    try:
+        with _connect() as conn:
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+            total = conn.execute("PRAGMA page_count").fetchone()[0]
+            if not total or not page_size:
+                return 0
+            free_bytes = free * page_size
+            if free_bytes < _COMPACT_MIN_BYTES and \
+                    (free / total) < _COMPACT_MIN_FREE_FRACTION:
+                return 0
+            conn.isolation_level = None        # VACUUM cannot run in a transaction
+            conn.execute("VACUUM")
+            # In WAL mode a VACUUM writes the compacted database into the WAL;
+            # the main file is not truncated until a checkpoint. Without this,
+            # VACUUM appeared to succeed while the file stayed exactly the same
+            # size — 4.6 MB with 99% of its pages on the freelist.
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except (sqlite3.Error, OSError) as exc:
+        logger.warning("Could not compact %s: %s", db_path(), exc)
+        return 0
+    try:
+        reclaimed = before - db_path().stat().st_size
+    except OSError:
+        return 0
+    if reclaimed > 0:
+        logger.info("Reclaimed %.1f MB from %s", reclaimed / (1024 * 1024), db_path())
+    return max(0, reclaimed)

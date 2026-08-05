@@ -182,6 +182,22 @@ class _ThinkRejectingHandler(BaseHTTPRequestHandler):
         pass
 
 
+@pytest.fixture
+def json_ollama(monkeypatch):
+    """A stand-in Ollama that answers with plain JSON, as /api/chat does when
+    stream=false. The NDJSON fixture above cannot serve a non-streaming call."""
+    server = HTTPServer(("127.0.0.1", 0), _ThinkRejectingHandler)
+    server.requests = []
+    server.reject_think = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("OLLAMA_HOST", f"http://127.0.0.1:{server.server_port}")
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 class TestThinkCompatibility:
     """think=False is worth asking for, but not worth failing over.
 
@@ -190,42 +206,29 @@ class TestThinkCompatibility:
     planner reports as "could not plan a search".
     """
 
-    @pytest.fixture
-    def old_ollama(self, monkeypatch):
-        server = HTTPServer(("127.0.0.1", 0), _ThinkRejectingHandler)
-        server.requests = []
-        server.reject_think = True
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        monkeypatch.setenv("OLLAMA_HOST", f"http://127.0.0.1:{server.server_port}")
-        try:
-            yield server
-        finally:
-            server.shutdown()
-            server.server_close()
-
-    def test_a_rejected_think_field_retries_without_it(self, old_ollama):
+    def test_a_rejected_think_field_retries_without_it(self, json_ollama):
         reply = ollama_client.chat("m", [{"role": "user", "content": "hi"}], think=False)
         assert reply == "Q: widget 5"
-        sent = old_ollama.requests
+        sent = json_ollama.requests
         assert len(sent) == 2, "expected one rejected call then one retry"
         assert "think" in sent[0] and "think" not in sent[1]
 
-    def test_a_call_that_never_asked_to_think_is_not_retried(self, old_ollama):
+    def test_a_call_that_never_asked_to_think_is_not_retried(self, json_ollama):
         """Only the think field earns a second attempt; other errors stand."""
         ollama_client.chat("m", [{"role": "user", "content": "hi"}])
-        assert len(old_ollama.requests) == 1
+        assert len(json_ollama.requests) == 1
 
-    def test_a_modern_ollama_gets_think_and_only_one_call(self, old_ollama):
-        old_ollama.reject_think = False
+    def test_a_modern_ollama_gets_think_and_only_one_call(self, json_ollama):
+        json_ollama.reject_think = False
         assert ollama_client.chat(
             "m", [{"role": "user", "content": "hi"}], think=False
         ) == "Q: widget 5"
-        assert len(old_ollama.requests) == 1
-        assert old_ollama.requests[0]["think"] is False
+        assert len(json_ollama.requests) == 1
+        assert json_ollama.requests[0]["think"] is False
 
-    def test_think_is_absent_when_not_asked_for(self, old_ollama):
+    def test_think_is_absent_when_not_asked_for(self, json_ollama):
         ollama_client.chat("m", [{"role": "user", "content": "hi"}])
-        assert "think" not in old_ollama.requests[0]
+        assert "think" not in json_ollama.requests[0]
 
 
 class TestTimeouts:
@@ -244,7 +247,8 @@ class TestTimeouts:
             seen["timeout"] = kwargs.get("timeout")
             raise requests.RequestException("nope")
 
-        monkeypatch.setattr(requests, "get", capture)
+        monkeypatch.setattr(ollama_client._SESSION, "get", capture)
+        ollama_client.invalidate_models_cache()
         with pytest.raises(ValueError):
             ollama_client.get_ollama("/api/tags")
         assert isinstance(seen["timeout"], tuple), "a scalar is also the connect timeout"
@@ -259,7 +263,7 @@ class TestTimeouts:
             seen["timeout"] = kwargs.get("timeout")
             raise requests.RequestException("nope")
 
-        monkeypatch.setattr(requests, "post", capture)
+        monkeypatch.setattr(ollama_client._SESSION, "post", capture)
         with pytest.raises(ValueError):
             list(ollama_client.chat_stream("m", [{"role": "user", "content": "hi"}]))
         assert isinstance(seen["timeout"], tuple)
@@ -288,7 +292,7 @@ class TestThinkRetryIsNarrow:
             calls.append(1)
             raise requests.RequestException("timed out")
 
-        monkeypatch.setattr(requests, "post", capture)
+        monkeypatch.setattr(ollama_client._SESSION, "post", capture)
         with pytest.raises(ValueError):
             ollama_client.chat("m", [{"role": "user", "content": "hi"}], think=False)
         assert len(calls) == 1, f"dialled a dead host {len(calls)} times"
@@ -301,7 +305,83 @@ class TestThinkRetryIsNarrow:
             status_code = 404
             text = '{"error": "model \'nope\' not found"}'
 
-        monkeypatch.setattr(requests, "post", lambda url, **kw: calls.append(1) or R())
+        monkeypatch.setattr(ollama_client._SESSION, "post", lambda url, **kw: calls.append(1) or R())
         with pytest.raises(ValueError):
             ollama_client.chat("nope", [{"role": "user", "content": "hi"}], think=False)
         assert len(calls) == 1
+
+
+class TestModelListCaching:
+    """A single chat turn asked Ollama for its model list up to five times.
+
+    Three fields of /api/models, then vision routing from inside the streaming
+    generator — each its own round trip to a desktop that may be asleep.
+    """
+
+    def test_repeated_calls_hit_the_network_once(self, fake_ollama):
+        calls = []
+        real = ollama_client.get_ollama
+        ollama_client.invalidate_models_cache()
+
+        def counting(path, timeout=None):
+            calls.append(path)
+            return real(path, timeout=timeout)
+
+        try:
+            ollama_client.get_ollama = counting
+            for _ in range(5):
+                assert ollama_client.list_models() == [{"name": "codellama:7b"}]
+        finally:
+            ollama_client.get_ollama = real
+        assert len(calls) == 1, f"asked Ollama {len(calls)} times for one turn"
+
+    def test_fresh_forces_a_call(self, fake_ollama):
+        calls = []
+        real = ollama_client.get_ollama
+        ollama_client.invalidate_models_cache()
+
+        def counting(path, timeout=None):
+            calls.append(path)
+            return real(path, timeout=timeout)
+
+        try:
+            ollama_client.get_ollama = counting
+            ollama_client.list_models()
+            ollama_client.list_models(fresh=True)
+        finally:
+            ollama_client.get_ollama = real
+        assert len(calls) == 2
+
+    def test_a_failure_is_not_cached(self, monkeypatch):
+        """The desktop waking up should show models on the next attempt."""
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+        ollama_client.invalidate_models_cache()
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                ollama_client.list_models()
+
+    def test_the_cache_is_not_shared_mutable_state(self, fake_ollama):
+        """Callers tag the dicts; that must not write into the cache."""
+        ollama_client.invalidate_models_cache()
+        first = ollama_client.list_models()
+        first[0]["vision"] = True
+        # A caller that mutates in place would corrupt the next reader; the app
+        # copies before tagging, and this documents why it must.
+        assert "vision" in ollama_client.list_models()[0], (
+            "list_models returns shared dicts — callers must copy before tagging"
+        )
+
+
+class TestKeepAlive:
+    def test_it_is_absent_unless_asked_for(self, json_ollama):
+        ollama_client.chat("m", [{"role": "user", "content": "hi"}])
+        assert "keep_alive" not in json_ollama.requests[-1]
+
+    def test_a_helper_can_unload_itself(self, json_ollama):
+        ollama_client.chat("m", [{"role": "user", "content": "hi"}], keep_alive="0")
+        assert json_ollama.requests[-1]["keep_alive"] == "0"
+
+    def test_the_streaming_call_takes_it_too(self, fake_ollama):
+        list(ollama_client.chat_stream("m", [{"role": "user", "content": "hi"}],
+                                       keep_alive="30m"))
+        assert fake_ollama.last_request["keep_alive"] == "30m"

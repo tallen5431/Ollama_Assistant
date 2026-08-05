@@ -97,6 +97,8 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_MODEL`      | `llama3.1:8b`               | Default model shown/selected in the UI |
 | `OLLAMA_TIMEOUT`    | `300`                       | How long to wait for a reply, in seconds — a 30b legitimately takes minutes |
 | `OLLAMA_CONNECT_TIMEOUT` | `5`                    | How long to wait to *connect*, separately. A sleeping desktop drops the packet rather than refusing it, so this is what stops a message hanging for the full reply timeout |
+| `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
+| `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
@@ -310,9 +312,16 @@ doesn't litter the list.
 > kill switch, so auth is the control.
 
 Attached images are stored with their message so a reopened thread still makes
-sense, which means an image-heavy history grows the database. Delete old
-conversations to reclaim it; the file is plain SQLite if you'd rather prune it
-yourself.
+sense, which means an image-heavy history grows the database. The drawer shows
+what it currently costs, and deleting conversations genuinely gives the space
+back — the file is compacted when enough of it has become dead space, rather
+than only marking pages free.
+
+Only the most recent image-bearing turn re-sends its attachments to the model.
+Re-uploading every screenshot in a thread on every turn was slow over a phone
+connection and rarely what was meant; earlier turns keep their text, so the
+conversation still reads. Set `CHAT_IMAGE_TURNS` higher if you compare images
+across turns.
 
 ## Vision models
 
@@ -342,8 +351,12 @@ Only when there's no transcriber installed does the app switch models, picking
 the *smallest* general vision model — silently loading a 19 GB model because you
 pasted a screenshot is a poor surprise. You can always change the dropdown.
 
-If an image has no readable text and the model can't see it, the reply says so
-and suggests picking a vision model, rather than inventing an answer.
+If the OCR pass finds no text at all — a photo of a plant, not a screenshot —
+a general vision model describes the image instead, so you get an answer rather
+than advice to change a dropdown. Only if that also comes back empty does the
+reply say so and suggest picking a vision model, rather than inventing one. A
+reader model that could not be *reached* is reported as exactly that, never as
+a claim about what was in your picture.
 
 **Reading text out of an image**, when **Web access** is on. Before the search is
 planned, the image is transcribed so the exact error text, product names and

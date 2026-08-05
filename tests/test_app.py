@@ -269,7 +269,7 @@ class TestReviewRegressions:
 
         seen = {}
 
-        def fake_stream(model, messages, options=None):
+        def fake_stream(model, messages, options=None, **kw):
             seen["options"] = options
             yield '{"done": true}'
 

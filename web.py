@@ -669,6 +669,17 @@ def _fallback_query(
     return [text[:200]] if text else []
 
 
+def _helper_keep_alive(helper_model: str, answering_model: str) -> Optional[str]:
+    """``"0"`` when a helper model should be unloaded the moment it replies.
+
+    A one-shot planner or image-reader call has no reason to hold VRAM for
+    Ollama's default five minutes, and on a single-GPU desktop that is VRAM the
+    answering model wants. Returns None when the helper *is* the answering
+    model, where unloading would force a reload for the reply moments later.
+    """
+    return None if helper_model == answering_model else "0"
+
+
 def _planner_options(planner_model: str, answering_model: str) -> Dict[str, Any]:
     """Options for the planner call, matching the answer's where it matters.
 
@@ -752,6 +763,10 @@ def plan_searches(
             # "no search needed", so picking deepseek-r1 silently turned the web
             # button off. Ask it not to think; strip the block if it does anyway.
             think=False,
+            # Release the VRAM straight away when this was a *different* model
+            # from the one about to answer. Unloading the answering model here
+            # would make it reload for the reply it is two seconds away from.
+            keep_alive=_helper_keep_alive(planner_model, model),
         )
     except Exception as exc:  # noqa: BLE001 - never let planning break the chat
         logger.warning("Search planner (%s) failed: %s", planner_model, exc)
@@ -965,7 +980,12 @@ class ReadFailed(Exception):
     """
 
 
-def describe_images(images: List[str], model: str, ocr: bool = False) -> Optional[str]:
+def describe_images(
+    images: List[str],
+    model: str,
+    ocr: bool = False,
+    answering_model: str = "",
+) -> Optional[str]:
     """Transcribe or describe attached images into text.
 
     Serves two jobs: giving a text-only model something to answer about, and
@@ -979,19 +999,25 @@ def describe_images(images: List[str], model: str, ocr: bool = False) -> Optiona
 
     if not images or not model:
         return None
+    keep_alive = _helper_keep_alive(model, answering_model)
 
     # Every image, not just the first. The one-image shortcut was written when
     # this only oriented a search query; it now also feeds the answer, and the
     # composer offers four — so "compare these two screenshots" was answered
     # confidently about one of them, the other three deleted without trace.
     readings: List[str] = []
-    for index, image in enumerate(images[:_MAX_IMAGES_READ], 1):
+    batch = images[:_MAX_IMAGES_READ]
+    for index, image in enumerate(batch, 1):
         try:
             reply = chat(
                 model,
                 [{"role": "user", "content": _TRANSCRIBE if ocr else _DESCRIBE,
                   "images": [image]}],
                 options={"temperature": 0, "num_predict": 320},
+                # Hold the reader in VRAM between images of the same message,
+                # then let it go — reloading it three times would cost more
+                # than the reading is worth.
+                keep_alive=keep_alive if index == len(batch) else None,
             )
         except Exception as exc:  # noqa: BLE001 - reported, never raised as-is
             logger.warning("Image description (%s) failed: %s", model, exc)
@@ -1108,7 +1134,8 @@ def _cache_key(images: List[str], model: str, ocr: bool) -> str:
     return digest.hexdigest()
 
 
-def read_images(images: List[str], model: str, ocr: bool = False) -> Optional[str]:
+def read_images(images: List[str], model: str, ocr: bool = False,
+                answering_model: str = "") -> Optional[str]:
     """describe_images, memoised on the image bytes.
 
     Raises ``ReadFailed`` if the reader model could not be asked; a failure is
@@ -1126,7 +1153,7 @@ def read_images(images: List[str], model: str, ocr: bool = False) -> Optional[st
     # seconds, and holding the cache shut for that would serialise every other
     # request. Two threads racing the same new image both call the model once,
     # which is wasteful but correct — and the second write is identical.
-    result = describe_images(images, model, ocr=ocr)
+    result = describe_images(images, model, ocr=ocr, answering_model=answering_model)
 
     # "Nothing readable in it" is a real answer and worth memoising; a failure
     # raises instead and never reaches here, so one reader-model OOM — routine
@@ -1151,4 +1178,30 @@ def strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if isinstance(msg, dict) and msg.get("images"):
             msg = {k: v for k, v in msg.items() if k != "images"}
         out.append(msg)
+    return out
+
+
+def keep_recent_images(
+    messages: List[Dict[str, Any]],
+    keep_turns: int = 1,
+) -> List[Dict[str, Any]]:
+    """Copy of ``messages`` keeping image payloads only on the last few turns.
+
+    A vision model re-reads every image in the thread on every turn, which is
+    both slow and rarely what was meant: after five exchanges about a
+    screenshot, turn six is almost never about the one from turn one. The
+    earlier turns keep their text, so the conversation still makes sense — they
+    just stop shipping megabytes of base64 to be re-encoded each time.
+
+    ``keep_turns=0`` strips everything, which is ``strip_images``.
+    """
+    out = list(messages or [])
+    kept = 0
+    for i in range(len(out) - 1, -1, -1):
+        msg = out[i]
+        if not isinstance(msg, dict) or not msg.get("images"):
+            continue
+        kept += 1
+        if kept > keep_turns:
+            out[i] = {k: v for k, v in msg.items() if k != "images"}
     return out

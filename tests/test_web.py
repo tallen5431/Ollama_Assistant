@@ -398,7 +398,7 @@ class TestImageOnlyMessage:
     def test_dedicated_planner_model_is_used_when_set(self, monkeypatch):
         seen = {}
 
-        def capture(model, messages, options=None, think=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["model"] = model
             seen["options"] = options
             seen["think"] = think
@@ -417,7 +417,7 @@ class TestImageOnlyMessage:
     def test_falls_back_to_the_answering_model(self, monkeypatch):
         seen = {}
 
-        def capture(model, messages, options=None, think=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["model"] = model
             return "NONE"
 
@@ -430,7 +430,7 @@ class TestImageOnlyMessage:
         """"the latest release" means as of now, not as of the training cutoff."""
         seen = {}
 
-        def capture(model, messages, options=None, think=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["system"] = messages[0]["content"]
             return "NONE"
 
@@ -484,7 +484,7 @@ class TestReasoningPlanner:
         """Stripping is the fallback; not generating it is the fix."""
         seen = {}
 
-        def capture(model, messages, options=None, think=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["think"] = think
             return "NONE"
 
@@ -947,7 +947,7 @@ class TestPlannerLoadOptions:
     def test_the_same_model_gets_the_same_context_window(self, monkeypatch):
         seen = {}
 
-        def capture(model, messages, options=None, think=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["options"] = options
             return "NONE"
 
@@ -963,7 +963,7 @@ class TestPlannerLoadOptions:
         """It loads on its own anyway; a big window would only cost memory."""
         seen = {}
 
-        def capture(model, messages, options=None, think=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["options"] = options
             return "NONE"
 
@@ -981,11 +981,11 @@ class TestPlannerLoadOptions:
         mod = importlib.reload(app_module)
         seen = {}
 
-        def fake_stream(model, messages, options=None):
+        def fake_stream(model, messages, options=None, **kw):
             seen["chat"] = options
             yield '{"done": true}'
 
-        def capture(model, messages, options=None, think=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["planner"] = options
             return "NONE"
 
@@ -999,3 +999,91 @@ class TestPlannerLoadOptions:
         }).get_data()
 
         assert seen["planner"]["num_ctx"] == seen["chat"]["num_ctx"]
+
+
+class TestImagePayloadTrimming:
+    """A vision model re-read every image in the thread on every turn.
+
+    Measured: a 400 KB request body for a message whose text was 714 bytes,
+    re-uploaded from the phone each turn, for images the model had already
+    seen. Turn six is almost never about turn one's screenshot.
+    """
+
+    THREAD = [
+        {"role": "user", "content": "first", "images": ["AAA"]},
+        {"role": "assistant", "content": "a cat"},
+        {"role": "user", "content": "second", "images": ["BBB"]},
+        {"role": "assistant", "content": "a dog"},
+        {"role": "user", "content": "third, no image"},
+    ]
+
+    def test_only_the_most_recent_image_turn_keeps_its_payload(self):
+        out = web.keep_recent_images(self.THREAD, keep_turns=1)
+        assert "images" not in out[0]
+        assert out[2]["images"] == ["BBB"]
+
+    def test_the_text_of_earlier_turns_survives(self):
+        """Dropping the whole turn would break the conversation."""
+        out = web.keep_recent_images(self.THREAD, keep_turns=1)
+        assert [m["content"] for m in out] == [m["content"] for m in self.THREAD]
+        assert [m["role"] for m in out] == [m["role"] for m in self.THREAD]
+
+    def test_keeping_more_turns_is_configurable(self):
+        out = web.keep_recent_images(self.THREAD, keep_turns=2)
+        assert out[0]["images"] == ["AAA"]
+        assert out[2]["images"] == ["BBB"]
+
+    def test_zero_is_the_same_as_stripping_everything(self):
+        out = web.keep_recent_images(self.THREAD, keep_turns=0)
+        assert all("images" not in m for m in out)
+
+    def test_the_caller_s_list_is_not_mutated(self):
+        web.keep_recent_images(self.THREAD, keep_turns=0)
+        assert self.THREAD[0]["images"] == ["AAA"], "the caller's messages were modified"
+
+    def test_a_thread_with_no_images_is_unchanged(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        assert web.keep_recent_images(msgs) == msgs
+
+
+class TestHelperModelsReleaseTheirVram:
+    """A one-shot planner or reader call held VRAM for Ollama's default five
+    minutes, on a single-GPU desktop where the answering model wanted it."""
+
+    def test_a_separate_planner_is_unloaded_immediately(self, monkeypatch):
+        seen = {}
+
+        def capture(model, messages, options=None, think=None, keep_alive=None):
+            seen["keep_alive"] = keep_alive
+            return "NONE"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        monkeypatch.setenv("WEB_PLANNER_MODEL", "qwen3.5:4b")
+        web.plan_searches(ASK, "qwen3-coder:30b")
+        assert seen["keep_alive"] == "0"
+
+    def test_the_answering_model_is_not_unloaded_by_its_own_planner_call(self, monkeypatch):
+        """Unloading it here would force a reload for the reply seconds later."""
+        seen = {}
+
+        def capture(model, messages, options=None, think=None, keep_alive=None):
+            seen["keep_alive"] = keep_alive
+            return "NONE"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        monkeypatch.delenv("WEB_PLANNER_MODEL", raising=False)
+        web.plan_searches(ASK, "qwen3-coder:30b")
+        assert seen["keep_alive"] is None
+
+    def test_the_image_reader_is_unloaded_after_the_last_image(self, monkeypatch):
+        calls = []
+
+        def capture(model, messages, options=None, think=None, keep_alive=None):
+            calls.append(keep_alive)
+            return "text"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        web.describe_images(["a", "b", "c"], "glm-ocr:latest", ocr=True,
+                            answering_model="qwen3-coder:30b")
+        # Held between images of the same message, released after the last.
+        assert calls == [None, None, "0"]

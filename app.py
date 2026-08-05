@@ -38,6 +38,8 @@ from config import (
     get_app_title,
     get_default_model,
     get_host_port,
+    get_image_turns,
+    get_keep_alive,
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
@@ -172,12 +174,15 @@ def api_models() -> Any:
     # Tag each model so the UI can route an attached image to something that can
     # actually see it — and away from the OCR specialists, which transcribe well
     # and reason poorly.
-    for model in models:
-        if isinstance(model, dict):
-            model["vision"] = has_vision(model)
-            model["ocr"] = is_ocr(model)
+    #
+    # Copies, not in-place: list_models memoises, so mutating what it returns
+    # would write these keys into the shared cache that every other caller reads.
+    tagged = [
+        {**m, "vision": has_vision(m), "ocr": is_ocr(m)} if isinstance(m, dict) else m
+        for m in models
+    ]
     return jsonify({
-        "models": models,
+        "models": tagged,
         "default": get_default_model(),
         # Smallest general vision model: loading 19 GB because someone pasted a
         # screenshot is a poor surprise, and the user can still pick another.
@@ -209,6 +214,12 @@ def _store_unavailable(exc: sqlite3.Error) -> Any:
                  "be written. Chatting still works; nothing is being saved.",
         "history": False,
     }), 503
+
+
+@app.route("/api/conversations/stats", methods=["GET"])
+def api_conversation_stats() -> Any:
+    """What history is costing on disk, for the drawer to show."""
+    return jsonify(store.stats())
 
 
 @app.route("/api/conversations", methods=["GET"])
@@ -319,7 +330,12 @@ def api_chat() -> Any:
             # Always send num_ctx, not only on web turns: changing a model's
             # load options mid-conversation makes Ollama reload the runner and
             # throw away the KV cache.
-            convo, options = messages, {"num_ctx": get_num_ctx()}
+            # Only the most recent image-bearing turn keeps its payload. A
+            # vision model otherwise re-reads every screenshot in the thread on
+            # every turn, and turn six is almost never about turn one's image.
+            # Earlier turns keep their text, so the conversation still reads.
+            convo = web.keep_recent_images(messages, keep_turns=get_image_turns())
+            options = {"num_ctx": get_num_ctx()}
 
             # An image attached to a model that cannot see used to force a
             # switch, which meant giving up your best model exactly when you
@@ -333,9 +349,22 @@ def api_chat() -> Any:
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
                     yield _line({"status": f"Reading the image with {reader}…"})
+                    describing = not is_ocr_reader
                     try:
-                        transcript = web.read_images(images, reader, ocr=is_ocr_reader)
-                        context = web.image_context(transcript, ocr=is_ocr_reader)
+                        transcript = web.read_images(images, reader, ocr=is_ocr_reader,
+                                                     answering_model=model)
+                        # An OCR model that found nothing is not the end of it:
+                        # a photo of a plant has no text, and telling the user
+                        # to go change a dropdown while a vision model sits idle
+                        # is a poor answer to "what is this?".
+                        if transcript is None and is_ocr_reader:
+                            describer = _describing_model(model)
+                            if describer:
+                                yield _line({"status": f"No text in it — looking at it with {describer}…"})
+                                transcript = web.read_images(images, describer, ocr=False,
+                                                             answering_model=model)
+                                describing = True
+                        context = web.image_context(transcript, ocr=not describing)
                     except web.ReadFailed as exc:
                         # A reader-model OOM is routine when a 30b model holds
                         # the GPU. Reporting it as "no readable text was found"
@@ -364,7 +393,8 @@ def api_chat() -> Any:
                     yield _line(
                         {"sources": [{"url": d["url"], "title": d["title"]} for d in documents]}
                     )
-            for line in chat_stream(model, convo, options=options):
+            for line in chat_stream(model, convo, options=options,
+                                    keep_alive=get_keep_alive() or None):
                 yield line + "\n"
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
@@ -437,7 +467,8 @@ def _gather_web(
             if reader:
                 yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
                 try:
-                    image_note = web.read_images(images, reader, ocr=is_reader_ocr)
+                    image_note = web.read_images(images, reader, ocr=is_reader_ocr,
+                                                 answering_model=model)
                 except web.ReadFailed as exc:
                     # Planning without the image beats not answering.
                     logger.warning("Image read via %s failed: %s", reader, exc)
@@ -526,6 +557,27 @@ def _image_reader(answering_model: str) -> Any:
         return next(iter(vision), ""), False
     except Exception:  # noqa: BLE001 - Ollama unreachable; skip the pass
         return "", False
+
+
+def _describing_model(answering_model: str) -> str:
+    """A general vision model to describe an image, or "" if none is installed.
+
+    Used only when the OCR pass found no text at all. Transcription is the
+    right first choice — it keeps the exact error string a screenshot carries,
+    which prose paraphrases away — but a photo of a plant has no text in it,
+    and the reply then told the user to change a dropdown while a perfectly
+    good vision model sat idle.
+
+    Smallest first, deliberately: silently loading 19 GB because someone
+    photographed their dinner is a poor surprise.
+    """
+    try:
+        vision = vision_models(include_ocr=False)
+    except Exception:  # noqa: BLE001 - Ollama unreachable
+        return ""
+    if answering_model in vision:
+        return answering_model
+    return next(iter(vision), "")
 
 
 def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:

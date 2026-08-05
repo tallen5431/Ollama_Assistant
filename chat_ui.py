@@ -1041,6 +1041,27 @@ _PAGE = """<!doctype html>
         if (document.visibilityState === "visible" && busy) acquireWakeLock();
       });
 
+      // Send image bytes only for the most recent turn that has any. They were
+      // re-uploaded in full on every subsequent turn — measured at a 400 KB
+      // body for a message whose text was 714 bytes — over a phone connection,
+      // for a model that had already read them. The server applies the same
+      // rule; this just stops the bytes crossing the network at all.
+      const KEEP_IMAGE_TURNS = 1;
+      function withRecentImages(list) {
+        const out = list.slice();
+        let kept = 0;
+        for (let i = out.length - 1; i >= 0; i--) {
+          if (!out[i] || !out[i].images || !out[i].images.length) continue;
+          kept += 1;
+          if (kept > KEEP_IMAGE_TURNS) {
+            const copy = Object.assign({}, out[i]);
+            delete copy.images;
+            out[i] = copy;
+          }
+        }
+        return out;
+      }
+
       async function send() {
         const text = inputEl.value.trim();
         const images = pendingImages.slice();
@@ -1126,7 +1147,7 @@ _PAGE = """<!doctype html>
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               model: modelEl.value || undefined,
-              messages,
+              messages: withRecentImages(messages),
               web: webEl.checked || undefined,
             }),
             signal: controller.signal,
@@ -1339,6 +1360,23 @@ _PAGE = """<!doctype html>
           row.appendChild(open); row.appendChild(ren); row.appendChild(del);
           convoListEl.appendChild(row);
         }
+        showHistoryCost();
+      }
+
+      // What history is costing on disk. Attached images are stored with their
+      // message, so an image-heavy history grows quickly and there was no way
+      // to see that short of looking at the file.
+      async function showHistoryCost() {
+        try {
+          const s = await (await fetch("api/conversations/stats")).json();
+          if (!s || typeof s.bytes !== "number") return;
+          const mb = s.bytes / (1024 * 1024);
+          const size = mb >= 1 ? mb.toFixed(1) + " MB" : Math.round(s.bytes / 1024) + " KB";
+          const note = document.createElement("p");
+          note.className = "convo-empty";
+          note.textContent = s.messages + " messages · " + size + " on disk";
+          convoListEl.appendChild(note);
+        } catch (e) { /* a footnote is never worth an error */ }
       }
 
       // Create on first use rather than on page load, so idly opening the app

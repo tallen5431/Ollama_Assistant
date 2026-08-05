@@ -18,6 +18,19 @@ _WATCHED = ("app", "ollama_client", "web", "store", "voice")
 
 
 @pytest.fixture(autouse=True)
+def clear_process_caches():
+    """Memoised state lives for the process, so tests would inherit it.
+
+    The installed-model list is cached for a few seconds; without this, a test
+    that points at one fake Ollama sees the previous test's model list.
+    """
+    import ollama_client
+    ollama_client.invalidate_models_cache()
+    yield
+    ollama_client.invalidate_models_cache()
+
+
+@pytest.fixture(autouse=True)
 def no_stub_left_behind():
     """Fail the test that leaks a stub, not the twenty tests downstream.
 

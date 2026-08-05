@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import os
 import sqlite3
 import time
 
@@ -248,3 +250,83 @@ class TestStoreFailuresReachTheClient:
         monkeypatch.setenv("CHAT_DB", str(bad))
         mod = importlib.reload(app_module)
         assert mod.app.test_client().get("/api/health").get_json()["history"] is False
+
+
+class TestDiskIsActuallyReclaimed:
+    """The README says deleting a conversation reclaims space; make it true.
+
+    SQLite leaves freed pages on the freelist, so deleting twenty image-heavy
+    threads left an 18 MB file at 18 MB. And in WAL mode a VACUUM writes the
+    compacted database into the WAL — the main file is not truncated until a
+    checkpoint, so VACUUM alone appeared to succeed while changing nothing.
+    """
+
+    def big_thread(self, n=3):
+        img = base64.b64encode(os.urandom(200_000)).decode()
+        convo = store.create("image heavy", "m")
+        for _ in range(n):
+            store.add_message(convo["id"], "user", "look at this", [img], None)
+        return convo["id"]
+
+    def test_deleting_image_heavy_threads_shrinks_the_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAT_DB", str(tmp_path / "chat.db"))
+        ids = [self.big_thread() for _ in range(6)]
+        full = (tmp_path / "chat.db").stat().st_size
+        assert full > 3 * 1024 * 1024, "fixture did not create enough data"
+
+        for convo_id in ids:
+            store.delete(convo_id)
+
+        after = (tmp_path / "chat.db").stat().st_size
+        assert after < full / 4, f"{full} -> {after}: the space was not given back"
+
+    def test_a_small_delete_does_not_rewrite_the_database(self, tmp_path, monkeypatch):
+        """VACUUM rewrites everything; doing it per delete would be silly."""
+        monkeypatch.setenv("CHAT_DB", str(tmp_path / "chat.db"))
+        self.big_thread(n=6)                      # bulk that must not be rewritten
+        convo = store.create("tiny", "m")
+        store.add_message(convo["id"], "user", "hi", None, None)
+        before = (tmp_path / "chat.db").stat().st_size
+
+        store.delete(convo["id"])
+        assert (tmp_path / "chat.db").stat().st_size == before
+
+    def test_compact_is_safe_on_an_empty_database(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAT_DB", str(tmp_path / "chat.db"))
+        store.available()
+        assert store.compact() == 0
+
+    def test_compact_never_raises_on_a_broken_database(self, tmp_path, monkeypatch):
+        bad = tmp_path / "chat.db"
+        bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
+        monkeypatch.setenv("CHAT_DB", str(bad))
+        assert store.compact() == 0
+
+    def test_the_data_survives_a_compaction(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAT_DB", str(tmp_path / "chat.db"))
+        keep = store.create("keep me", "m")
+        store.add_message(keep["id"], "user", "important", None, None)
+        for convo_id in [self.big_thread() for _ in range(6)]:
+            store.delete(convo_id)
+
+        got = store.get(keep["id"])
+        assert got["title"] == "keep me"
+        assert [m["content"] for m in got["messages"]] == ["important"]
+
+
+class TestStatsAreReachable:
+    """stats() existed, was tested, and had no caller anywhere."""
+
+    def test_the_endpoint_reports_what_history_costs(self, tmp_path, monkeypatch):
+        import importlib
+        import app as app_module
+
+        monkeypatch.setenv("CHAT_DB", str(tmp_path / "chat.db"))
+        mod = importlib.reload(app_module)
+        convo = store.create("t", "m")
+        store.add_message(convo["id"], "user", "hi", None, None)
+
+        data = mod.app.test_client().get("/api/conversations/stats").get_json()
+        assert data["conversations"] == 1
+        assert data["messages"] == 1
+        assert data["bytes"] > 0

@@ -159,6 +159,28 @@ def get_web_max_bytes() -> int:
     return int(_number("WEB_MAX_BYTES", 2 * 1024 * 1024))
 
 
+def get_image_turns() -> int:
+    """How many recent image-bearing turns keep their attachments.
+
+    A vision model re-reads every image in the thread on every turn, which is
+    slow and rarely intended. Raise CHAT_IMAGE_TURNS if you compare images
+    across turns ("here is before… here is after"); 0 sends none at all.
+    """
+    return max(0, int(_number("CHAT_IMAGE_TURNS", 1)))
+
+
+def get_keep_alive() -> str:
+    """How long Ollama should hold the answering model in VRAM after a turn.
+
+    Empty means "whatever Ollama is configured to do" (five minutes by
+    default). Set OLLAMA_KEEP_ALIVE to something like ``30m`` to keep a 30b
+    resident between turns and skip its load time — worth it only if the VRAM
+    is not wanted by anything else. Helper models are unloaded immediately
+    regardless; a one-shot planner call has no reason to squat.
+    """
+    return os.getenv("OLLAMA_KEEP_ALIVE", "").strip()
+
+
 def get_num_ctx() -> int:
     """Context window to request when web context is attached.
 
