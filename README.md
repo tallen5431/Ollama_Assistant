@@ -288,6 +288,9 @@ There are three ways to attach an image, up to four per message:
   picker decides what is shared; a single frame is taken and the capture stream
   is dropped immediately, so nothing is recorded. Desktop only — the button is
   hidden where `getDisplayMedia` isn't supported, which includes mobile browsers.
+- **📷 Camera** — take a photo there and then. Shown only on touch devices,
+  where it opens the rear camera directly rather than the gallery; on a desktop
+  it would just duplicate 📎.
 - **Paste** — paste an image anywhere on the page, usually the quickest route
   for a screenshot taken with the OS shortcut.
 

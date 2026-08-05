@@ -22,11 +22,14 @@ WEB_MAX_BYTES — see config.py.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import re
 import socket
+import threading
 import time
+from collections import OrderedDict
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlparse
@@ -668,11 +671,11 @@ def describe_images(images: List[str], model: str, ocr: bool = False) -> Optiona
 
 
 _OCR_PREAMBLE = (
-    "Text transcribed from the image the user attached. The model answering "
+    "Text transcribed from an image in this conversation. The model answering "
     "cannot see images, so this transcription is all there is of it. Treat it as "
-    "a faithful reading of the image, not as something the user typed, and answer "
-    "their question using it. Say so plainly if it does not contain what they are "
-    "asking about."
+    "a faithful reading of that image, not as something the user typed. Use it "
+    "where it is relevant to what they are asking, and ignore it where it is "
+    "not — it may be from an earlier turn about something else."
 )
 
 _OCR_NOTHING = (
@@ -711,3 +714,85 @@ def last_user_images(messages: List[Dict[str, Any]]) -> List[str]:
             images = msg.get("images")
             return [i for i in images if isinstance(i, str)] if isinstance(images, list) else []
     return []
+
+
+def conversation_images(messages: List[Dict[str, Any]]) -> List[str]:
+    """Images from the most recent user turn that had any.
+
+    Not just the last turn: a follow-up ("which line is it on?") carries no new
+    attachment, but the screenshot it is about is still in the thread. Looking
+    only at the last turn left a text-only model with no image context from the
+    second question onwards — worse than the vision path it replaced.
+    """
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        images = msg.get("images")
+        if isinstance(images, list):
+            found = [i for i in images if isinstance(i, str)]
+            if found:
+                return found
+    return []
+
+
+# Transcriptions keyed by image content, so re-reading the same screenshot on
+# every follow-up costs one model call rather than one per turn. Bounded, since
+# this lives for the process's lifetime.
+_TRANSCRIPTS: "OrderedDict[str, Optional[str]]" = OrderedDict()
+_TRANSCRIPT_CACHE_MAX = 64
+# Waitress serves on a thread pool, so lookup and eviction can interleave. The
+# membership test and the move_to_end that follows it are a check-then-act pair:
+# an eviction landing between them raises KeyError out of a chat turn.
+_TRANSCRIPTS_LOCK = threading.Lock()
+
+
+def _cache_key(images: List[str], model: str, ocr: bool) -> str:
+    digest = hashlib.sha256()
+    for image in images[:1]:
+        digest.update(image.encode("utf-8", "ignore"))
+    digest.update(f"|{model}|{ocr}".encode())
+    return digest.hexdigest()
+
+
+def read_images(images: List[str], model: str, ocr: bool = False) -> Optional[str]:
+    """describe_images, memoised on the image bytes."""
+    if not images or not model:
+        return None
+    key = _cache_key(images, model, ocr)
+    with _TRANSCRIPTS_LOCK:
+        if key in _TRANSCRIPTS:
+            _TRANSCRIPTS.move_to_end(key)
+            return _TRANSCRIPTS[key]
+
+    # Deliberately outside the lock: reading an image is a model call taking
+    # seconds, and holding the cache shut for that would serialise every other
+    # request. Two threads racing the same new image both call the model once,
+    # which is wasteful but correct — and the second write is identical.
+    result = describe_images(images, model, ocr=ocr)
+
+    # Only a successful read is memoised. describe_images returns None both for
+    # "the call failed" and nothing else, so caching it meant one reader-model
+    # OOM — routine when a 30b model holds the GPU — told the user that
+    # screenshot had no readable text forever, in every conversation, until the
+    # process restarted.
+    if result is not None:
+        with _TRANSCRIPTS_LOCK:
+            _TRANSCRIPTS[key] = result
+            while len(_TRANSCRIPTS) > _TRANSCRIPT_CACHE_MAX:
+                _TRANSCRIPTS.popitem(last=False)
+    return result
+
+
+def strip_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copy of ``messages`` with image payloads removed.
+
+    Once a model that cannot see has the transcription, the base64 is dead
+    weight it will never read — but it keeps riding along in every request body
+    and counts against the size limit.
+    """
+    out = []
+    for msg in messages or []:
+        if isinstance(msg, dict) and msg.get("images"):
+            msg = {k: v for k, v in msg.items() if k != "images"}
+        out.append(msg)
+    return out

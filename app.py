@@ -280,14 +280,20 @@ def api_chat() -> Any:
             # were debugging with a screenshot. Transcribe it instead and hand
             # the text over, so a coder model keeps the question.
             transcript = None
-            images = web.last_user_images(messages)
+            # Any image still in the thread, not only a newly attached one, so a
+            # follow-up question about the same screenshot keeps its context.
+            images = web.conversation_images(messages)
             if images and not _model_has_vision(model):
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
                     yield _line({"status": f"Reading the image with {reader}…"})
-                    transcript = web.describe_images(images, reader, ocr=is_ocr_reader)
+                    transcript = web.read_images(images, reader, ocr=is_ocr_reader)
+                    # Drop the base64 once it is transcribed: this model will
+                    # never read it, and it costs the body limit every turn.
                     convo = web.with_context(
-                        messages, web.image_context(transcript, ocr=is_ocr_reader))
+                        web.strip_images(messages),
+                        web.image_context(transcript, ocr=is_ocr_reader),
+                    )
 
             if use_web:
                 documents: List[Dict[str, str]] = []
@@ -349,13 +355,21 @@ def _gather_web(
     # "what's this?". Read it first so the planner has something to work with.
     # Reuse the transcription the chat path already made, if any — one OCR pass
     # per turn, serving both the answer and the search.
-    image_note = transcript
+    # last_user_images, not conversation_images: only an image attached to *this*
+    # turn should shape the search. Scanning the whole thread meant a screenshot
+    # from turn 1 was still steering queries at turn 11 ("what's the weather in
+    # Paris" planned against a stale traceback). That gate has to cover the
+    # reused transcript too, which is read from the whole thread by design —
+    # otherwise the stale image walks straight back in through the reuse path.
+    image_note = None
     images = web.last_user_images(messages)
-    if images and image_note is None:
-        reader, is_reader_ocr = _image_reader(model)
-        if reader:
-            yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
-            image_note = web.describe_images(images, reader, ocr=is_reader_ocr)
+    if images:
+        image_note = transcript
+        if image_note is None:
+            reader, is_reader_ocr = _image_reader(model)
+            if reader:
+                yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
+                image_note = web.read_images(images, reader, ocr=is_reader_ocr)
 
     yield _line({"status": "Working out what to search for…"})
     queries = web.plan_searches(messages, model, image_note=image_note)
