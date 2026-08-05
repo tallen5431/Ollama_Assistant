@@ -82,12 +82,33 @@ def chat(
     model: str,
     messages: List[Dict[str, str]],
     options: Dict[str, Any] | None = None,
+    think: bool | None = None,
 ) -> str:
-    """Send a chat completion (non-streaming) and return the reply text."""
+    """Send a chat completion (non-streaming) and return the reply text.
+
+    ``think=False`` asks a reasoning model to skip its scratchpad. For a short
+    structured reply — a routing decision, a transcription — the reasoning is
+    pure cost: it burns the token budget before the answer starts, so the reply
+    comes back truncated mid-thought with nothing usable in it.
+
+    Ollama only learned the field in 0.9, and older builds reject an unknown
+    key, so a rejection retries once without it rather than failing the call.
+    """
     payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": False}
     if options:
         payload["options"] = options
-    data = post_ollama("/api/chat", payload)
+    if think is not None:
+        payload["think"] = think
+
+    try:
+        data = post_ollama("/api/chat", payload)
+    except ValueError:
+        if think is None:
+            raise
+        logger.info("Ollama rejected think=%s for %s; retrying without it", think, model)
+        payload.pop("think")
+        data = post_ollama("/api/chat", payload)
+
     message = data.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     return content or data.get("response") or ""

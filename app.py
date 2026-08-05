@@ -297,8 +297,15 @@ def api_chat() -> Any:
 
             if use_web:
                 documents: List[Dict[str, str]] = []
-                for line in _gather_web(model, messages, documents, transcript):
+                outcome: Dict[str, bool] = {}
+                for line in _gather_web(model, messages, documents, transcript, outcome):
                     yield line
+                if not documents and outcome.get("attempted"):
+                    # Retrieval ran and produced nothing. Say so, or the answer
+                    # comes back from stale memory sounding exactly like a
+                    # sourced one — the worst possible failure mode for a
+                    # feature whose whole point is not guessing.
+                    convo = web.with_context(convo, web.no_results_context())
                 if documents:
                     # Layer the page context on whatever the image already added.
                     convo = web.with_context(convo, web.build_context(documents))
@@ -332,6 +339,7 @@ def _gather_web(
     messages: List[Dict[str, str]],
     documents: List[Dict[str, str]],
     transcript: Optional[str] = None,
+    outcome: Optional[Dict[str, bool]] = None,
 ) -> Any:
     """Collect web documents for this turn, yielding progress lines as it goes.
 
@@ -339,9 +347,16 @@ def _gather_web(
     an explicit instruction to read that page; otherwise the model is asked
     whether a search is warranted. Retrieval problems are reported and skipped —
     never fatal, since answering without the web beats not answering.
+
+    ``outcome["attempted"]`` records whether retrieval was actually tried, which
+    the caller needs to tell "searched and found nothing" apart from "decided no
+    search was needed" — identical from the outside, opposite in meaning.
     """
+    if outcome is None:
+        outcome = {}
     urls = web.find_urls(web.last_user_text(messages))
     if urls:
+        outcome["attempted"] = True
         for url in urls[:2]:
             yield _line({"status": f"Reading {_host_of(url)}…"})
             try:
@@ -380,6 +395,7 @@ def _gather_web(
         yield _line({"status": ""})
         return
 
+    outcome["attempted"] = True
     yield _line({"status": "Searching: " + " · ".join(queries)})
     # Concurrently: three searches then several fetches, run one after another,
     # each with its own timeout, is the sum of every round trip before the user
@@ -398,6 +414,14 @@ def _gather_web(
     yield _line({"status": "Reading " + ", ".join(_host_of(u) for u in urls[:max_docs]) + "…"})
     fetched, _ = _run_all(web.fetch, urls)
     documents.extend(fetched[:max_docs])
+
+    # Paywalled, JS-only and dead pages are routine. Their search snippets are
+    # already paid for, so use them to fill out the budget rather than throwing
+    # away everything that query found. Labelled as summaries in the context.
+    if len(documents) < max_docs:
+        documents.extend(
+            web.snippet_documents(results, documents, limit=max_docs - len(documents))
+        )
 
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})

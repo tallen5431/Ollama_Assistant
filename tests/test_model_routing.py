@@ -152,7 +152,7 @@ class TestTranscriptionPrompt:
         import web
         seen = {}
 
-        def capture(model, messages, options=None):
+        def capture(model, messages, options=None, think=None):
             seen["prompt"] = messages[-1]["content"]
             return "Q: TypeError concat str to bytes python"
 

@@ -328,17 +328,33 @@ class TestPlanSearches:
         )
         assert len(web.plan_searches(ASK, "m", max_queries=3)) == 3
 
-    def test_unparseable_reply_yields_no_queries(self, monkeypatch):
-        monkeypatch.setattr("ollama_client.chat", planner("I think you should look it up"))
-        assert web.plan_searches(ASK, "m") == []
+    def test_an_unparseable_reply_searches_the_message_itself(self, monkeypatch):
+        """The user pressed the web button; doing nothing is the worst answer.
 
-    def test_echoed_none_is_not_a_query(self, monkeypatch):
+        A small model that ignores the format used to read as "no search
+        needed", which looks exactly like a working search that found nothing.
+        """
+        monkeypatch.setattr("ollama_client.chat", planner("I think you should look it up"))
+        assert web.plan_searches(ASK, "m") == ["what changed in the newest ollama?"]
+
+    def test_echoed_none_is_a_decision_not_a_query(self, monkeypatch):
+        """"Q: NONE" is the model declining in the documented shape."""
         monkeypatch.setattr("ollama_client.chat", planner("Q: NONE"))
         assert web.plan_searches(ASK, "m") == []
 
-    def test_absurdly_long_query_is_dropped(self, monkeypatch):
-        monkeypatch.setattr("ollama_client.chat", planner("Q: " + "x" * 500))
+    def test_a_bare_none_still_means_no_search(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("NONE"))
         assert web.plan_searches(ASK, "m") == []
+
+    def test_an_absurdly_long_query_is_dropped_and_falls_back(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("Q: " + "x" * 500))
+        assert web.plan_searches(ASK, "m") == ["what changed in the newest ollama?"]
+
+    def test_the_fallback_query_is_bounded(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("no idea"))
+        long_ask = [{"role": "user", "content": "why " * 400}]
+        queries = web.plan_searches(long_ask, "m")
+        assert len(queries) == 1 and len(queries[0]) <= 200
 
     def test_no_user_turn_means_no_search(self):
         assert web.plan_searches([{"role": "assistant", "content": "x"}], "m") == []
@@ -346,23 +362,26 @@ class TestPlanSearches:
     def test_dedicated_planner_model_is_used_when_set(self, monkeypatch):
         seen = {}
 
-        def capture(model, messages, options=None):
+        def capture(model, messages, options=None, think=None):
             seen["model"] = model
             seen["options"] = options
+            seen["think"] = think
             return "Q: something"
 
         monkeypatch.setattr("ollama_client.chat", capture)
         monkeypatch.setenv("WEB_PLANNER_MODEL", "qwen2.5-coder:0.5b")
         web.plan_searches(ASK, "qwen3-coder:30b")
         assert seen["model"] == "qwen2.5-coder:0.5b"
-        # Planning is a routing decision: deterministic and short.
+        # Planning is a routing decision: deterministic, short, and not worth
+        # a reasoning model's scratchpad.
         assert seen["options"]["temperature"] == 0
-        assert seen["options"]["num_predict"] <= 128
+        assert seen["options"]["num_predict"] <= 256
+        assert seen["think"] is False
 
     def test_falls_back_to_the_answering_model(self, monkeypatch):
         seen = {}
 
-        def capture(model, messages, options=None):
+        def capture(model, messages, options=None, think=None):
             seen["model"] = model
             return "NONE"
 
@@ -370,6 +389,76 @@ class TestPlanSearches:
         monkeypatch.delenv("WEB_PLANNER_MODEL", raising=False)
         web.plan_searches(ASK, "llama3.1:8b")
         assert seen["model"] == "llama3.1:8b"
+
+    def test_the_planner_is_told_todays_date(self, monkeypatch):
+        """"the latest release" means as of now, not as of the training cutoff."""
+        seen = {}
+
+        def capture(model, messages, options=None, think=None):
+            seen["system"] = messages[0]["content"]
+            return "NONE"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        web.plan_searches(ASK, "m")
+        assert web.today() in seen["system"]
+        assert "{today}" not in seen["system"]
+
+
+class TestReasoningPlanner:
+    """A reasoning model as the planner silently turned the web button off.
+
+    With no dedicated planner set, the answering model plans. Pick deepseek-r1
+    and the whole 96-token budget went on the scratchpad: the reply came back
+    truncated mid-thought, no "Q:" line in it, which parsed as "no search
+    needed". The status line said nothing was wrong.
+    """
+
+    def test_thinking_is_not_mistaken_for_the_answer(self, monkeypatch):
+        reply = (
+            "<think>\nOkay, the user wants to know about ollama. I should "
+            "probably search for release notes. Let me think about the best "
+            "terms to use here.\n</think>\n"
+            "Q: ollama latest release notes\nQ: ollama changelog"
+        )
+        monkeypatch.setattr("ollama_client.chat", planner(reply))
+        assert web.plan_searches(ASK, "deepseek-r1:8b") == [
+            "ollama latest release notes",
+            "ollama changelog",
+        ]
+
+    def test_a_query_inside_the_scratchpad_is_not_used(self, monkeypatch):
+        """The model reasoning about a query hasn't chosen it yet."""
+        monkeypatch.setattr(
+            "ollama_client.chat",
+            planner("<think>Maybe Q: bad guess</think>\nQ: the real one"),
+        )
+        assert web.plan_searches(ASK, "deepseek-r1:8b") == ["the real one"]
+
+    def test_an_unclosed_think_block_still_searches(self, monkeypatch):
+        """Truncated mid-thought is exactly what the token budget produced."""
+        monkeypatch.setattr(
+            "ollama_client.chat",
+            planner("<think>Okay so the user is asking about ollama and I sh"),
+        )
+        assert web.plan_searches(ASK, "deepseek-r1:8b") == [
+            "what changed in the newest ollama?"
+        ]
+
+    def test_thinking_is_switched_off_at_the_api(self, monkeypatch):
+        """Stripping is the fallback; not generating it is the fix."""
+        seen = {}
+
+        def capture(model, messages, options=None, think=None):
+            seen["think"] = think
+            return "NONE"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        web.plan_searches(ASK, "deepseek-r1:8b")
+        assert seen["think"] is False
+
+    @pytest.mark.parametrize("tag", ["think", "thinking", "reasoning"])
+    def test_the_common_scratchpad_tags_are_all_stripped(self, tag):
+        assert web.strip_thinking(f"<{tag}>noise</{tag}>\nkept") == "kept"
 
 
 class TestPlannerInput:
@@ -411,6 +500,126 @@ class TestMergeResults:
         assert web.merge_results([[], []], 3) == []
 
 
+class TestHostDiversity:
+    """Three angles on one topic surface the same popular site three times."""
+
+    def test_a_single_host_cannot_take_every_slot(self):
+        groups = [[
+            {"url": "https://reddit.com/a"},
+            {"url": "https://reddit.com/b"},
+            {"url": "https://reddit.com/c"},
+            {"url": "https://docs.example/x"},
+        ]]
+        urls = [r["url"] for r in web.merge_results(groups, 3)]
+        assert urls == ["https://reddit.com/a", "https://reddit.com/b", "https://docs.example/x"]
+
+    def test_www_is_the_same_host(self):
+        groups = [[
+            {"url": "https://www.example.com/a"},
+            {"url": "https://example.com/b"},
+            {"url": "https://example.com/c"},
+            {"url": "https://other.example/d"},
+        ]]
+        urls = [r["url"] for r in web.merge_results(groups, 3)]
+        assert urls[-1] == "https://other.example/d"
+
+    def test_a_short_host_is_not_mangled_into_another(self):
+        """A prefix strip, not lstrip — that turns "w3.org" into "3.org"."""
+        groups = [[
+            {"url": "https://w3.org/a"},
+            {"url": "https://w3.org/b"},
+            {"url": "https://3.org/c"},
+        ]]
+        assert len(web.merge_results(groups, 3)) == 3
+
+    def test_diversity_never_costs_a_result(self):
+        """One host is all there is: fill from it rather than return short."""
+        groups = [[{"url": f"https://only.example/{i}"} for i in range(5)]]
+        assert len(web.merge_results(groups, 4)) == 4
+
+
+class TestSnippets:
+    def test_duckduckgo_snippets_are_captured(self):
+        html = (
+            '<a class="result__a" href="https://a.example/">Ollama 0.5 released</a>'
+            '<a class="result__snippet" href="https://a.example/">'
+            "Adds <b>streaming</b> tool calls and a new API.</a>"
+        )
+        parser = web._DuckLinks()
+        parser.feed(html)
+        assert parser.results[0]["snippet"] == "Adds streaming tool calls and a new API."
+        assert parser.results[0]["title"] == "Ollama 0.5 released"
+
+    def test_a_bold_tag_does_not_end_the_capture_early(self):
+        """DuckDuckGo bolds matched terms; </b> must not close the snippet."""
+        html = (
+            '<a class="result__a" href="https://a.example/">T</a>'
+            '<a class="result__snippet">one <b>two</b> three <b>four</b> five</a>'
+        )
+        parser = web._DuckLinks()
+        parser.feed(html)
+        assert parser.results[0]["snippet"] == "one two three four five"
+
+    def test_a_void_tag_does_not_leave_the_capture_open(self):
+        """<br> has no closing tag; counting it swallowed the rest of the page."""
+        html = (
+            '<a class="result__a" href="https://a.example/">T</a>'
+            '<a class="result__snippet">one<br>two</a>'
+            '<a class="result__a" href="https://b.example/">Second</a>'
+        )
+        parser = web._DuckLinks()
+        parser.feed(html)
+        assert len(parser.results) == 2
+        assert parser.results[1]["title"] == "Second"
+        assert "Second" not in parser.results[0]["snippet"]
+
+    def test_snippets_are_bounded(self):
+        html = (
+            '<a class="result__a" href="https://a.example/">T</a>'
+            '<a class="result__snippet">' + "word " * 500 + "</a>"
+        )
+        parser = web._DuckLinks()
+        parser.feed(html)
+        results = [
+            {"snippet": " ".join(r["snippet"].split())[:web._SNIPPET_MAX]}
+            for r in parser.results
+        ]
+        assert len(results[0]["snippet"]) <= web._SNIPPET_MAX
+
+    def test_unfetchable_results_still_contribute_their_snippet(self):
+        """Paywalled and JS-only pages used to contribute nothing at all."""
+        results = [
+            {"url": "https://ok.example/", "title": "Fetched", "snippet": "ignored"},
+            {"url": "https://paywall.example/", "title": "Paywalled",
+             "snippet": "Ollama 0.5 adds streaming tool calls."},
+        ]
+        fetched = [{"url": "https://ok.example/", "title": "Fetched", "text": "full page"}]
+        extra = web.snippet_documents(results, fetched, limit=2)
+        assert len(extra) == 1
+        assert extra[0]["url"] == "https://paywall.example/"
+        assert extra[0]["text"] == "Ollama 0.5 adds streaming tool calls."
+        assert extra[0]["snippet_only"] is True
+
+    def test_a_result_with_no_snippet_is_skipped(self):
+        results = [{"url": "https://a.example/", "title": "A", "snippet": "   "}]
+        assert web.snippet_documents(results, [], limit=3) == []
+
+    def test_snippet_documents_are_labelled_in_the_context(self):
+        """The model must not mistake a results-page blurb for the page."""
+        context = web.build_context([
+            {"url": "https://a.example/", "title": "Real", "text": "body"},
+            {"url": "https://b.example/", "title": "Blurb", "text": "snip",
+             "snippet_only": True},
+        ])
+        assert "[1] Real\n" in context
+        assert "[2] Blurb (search result summary)" in context
+
+    def test_the_context_carries_todays_date(self):
+        context = web.build_context([{"url": "https://a.example/", "title": "T", "text": "x"}])
+        assert web.today() in context
+        assert "{today}" not in context
+
+
 class TestSearchParsing:
     def test_duckduckgo_results_are_unwrapped(self, monkeypatch):
         html = (
@@ -447,7 +656,9 @@ class TestSearchParsing:
             return R()
 
         monkeypatch.setattr(web, "_get", fake_get)
-        assert web.search("test query") == [{"url": "https://a.example/", "title": "A"}]
+        assert web.search("test query") == [
+            {"url": "https://a.example/", "title": "A", "snippet": ""}
+        ]
         assert captured["url"].startswith("http://127.0.0.1:8888/search")
         # A self-hosted SearXNG is normally on localhost, so it must be exempt
         # from the public-address rule — but only because the operator set it.

@@ -98,7 +98,7 @@ All settings are environment variables (the server manager injects them):
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
 | `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Unset falls back to DuckDuckGo HTML |
-| `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model |
+| `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
@@ -204,19 +204,49 @@ Two paths:
   The planner sees the last few turns, not just your latest message, so a
   follow-up like *"what about the 14b one?"* still produces a usable query.
 
+  If it replies with something unusable — small models do ignore the format —
+  the app searches your message as typed rather than quietly skipping the
+  search, which from the outside looks identical to a search that found
+  nothing.
+
+Both the planner and the answering model are told today's date. A model's sense
+of "now" is its training cutoff, which is how *"the latest release"* gets
+answered with a version from two years ago and how the planner writes queries
+anchored to the wrong year.
+
 ### Planner model
 
 By default the answering model does the planning. Set `WEB_PLANNER_MODEL` to a
 small model to keep a large one from being invoked twice a turn:
 
 ```
-WEB_PLANNER_MODEL=qwen2.5-coder:0.5b
+WEB_PLANNER_MODEL=qwen3.5:4b
 ```
 
 Worth measuring rather than assuming: this is only faster if both models fit in
 VRAM at once. If they don't, Ollama swaps between them every turn and a small
 planner ends up *slower* than just reusing the model already loaded. Leave it
 unset if VRAM is tight.
+
+**Reasoning models make poor planners.** Planning is a routing decision with a
+short deterministic budget, and a reasoning model spends that whole budget on
+its scratchpad — so the reply comes back truncated mid-thought with no query in
+it. The app asks Ollama for `think: false` on the planner call and strips any
+`<think>` block that arrives anyway, so `deepseek-r1` works; it is still slower
+and no better than a small instruct model. Prefer one.
+
+### When a page can't be read
+
+Paywalls, JS-only pages and dead links are the normal case, not the exception.
+A result whose page can't be fetched still contributes its **search snippet**,
+labelled in the context as a summary rather than the page, so the model treats
+it as a lead instead of established fact. Results are also capped at two per
+host, so three angles on one topic don't come back as three pages of the same
+site wearing three hats.
+
+If retrieval produces nothing at all, the model is told so explicitly and asked
+to say it couldn't check. A failed search that reads like a successful one is
+the worst outcome for a feature whose whole point is not guessing.
 
 Progress appears live above the reply ("Searching for…", "Reading example.com…")
 and the pages used are listed underneath, numbered to match the `[n]` citations

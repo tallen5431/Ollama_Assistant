@@ -258,3 +258,94 @@ class TestRetrievalFailure:
         text = "".join(o.get("message", {}).get("content", "") for o in out)
         assert text == "Widget 5 is out."
         assert not [o for o in out if "error" in o]
+
+    def test_an_unreadable_page_still_contributes_its_snippet(self, rig, monkeypatch):
+        """Paywalls and JS-only pages are the normal case, not the exception.
+
+        The snippet was already paid for by the search; dropping it meant that
+        result contributed nothing whatsoever to the answer.
+        """
+        monkeypatch.setattr(web, "search", lambda q, limit=3: [{
+            "url": "https://paywall.example/article",
+            "title": "Widget 5 review",
+            "snippet": "Widget 5 shipped on Tuesday with a new hinge.",
+        }])
+        monkeypatch.setattr(web, "fetch",
+                            lambda url: (_ for _ in ()).throw(web.WebError("HTTP 403")))
+        resp = rig["client"].post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "what is widget 5?"}], "web": True},
+        )
+        resp.get_data()
+
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        system = chat_call["messages"][0]["content"]
+        assert "new hinge" in system
+        # Labelled, so the model doesn't quote a blurb as if it read the page.
+        assert "search result summary" in system
+
+    def test_the_model_is_told_todays_date(self, rig):
+        resp = rig["client"].post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "what is widget 5?"}], "web": True},
+        )
+        resp.get_data()
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        assert web.today() in chat_call["messages"][0]["content"]
+
+
+class TestSearchedButFoundNothing:
+    """A failed search must not read like a successful one.
+
+    Without a note the model answers from training data with the same
+    confidence as a sourced reply — the exact failure the web button exists to
+    prevent.
+    """
+
+    def test_the_model_is_told_the_search_came_back_empty(self, rig, monkeypatch):
+        monkeypatch.setattr(web, "search", lambda q, limit=3: [])
+        resp = rig["client"].post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "what is widget 5?"}], "web": True},
+        )
+        resp.get_data()
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        system = chat_call["messages"][0]["content"]
+        assert "came back with nothing usable" in system
+        assert "could not check it against a source" in system
+
+    def test_an_unreadable_page_also_counts_as_empty(self, rig, monkeypatch):
+        monkeypatch.setattr(web, "search", lambda q, limit=3: [
+            {"url": "https://a.example/", "title": "A", "snippet": ""},
+        ])
+        monkeypatch.setattr(web, "fetch",
+                            lambda url: (_ for _ in ()).throw(web.WebError("HTTP 403")))
+        resp = rig["client"].post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "what is widget 5?"}], "web": True},
+        )
+        resp.get_data()
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        assert "came back with nothing usable" in chat_call["messages"][0]["content"]
+
+    def test_a_planner_that_declined_adds_no_note(self, rig):
+        """"No search needed" is a decision, not a failure — stay quiet."""
+        rig["ollama"].planner_reply = "NONE"
+        resp = rig["client"].post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "say hello"}], "web": True},
+        )
+        resp.get_data()
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        assert [m["role"] for m in chat_call["messages"]] == ["user"]
+
+    def test_a_successful_search_adds_no_note(self, rig):
+        resp = rig["client"].post(
+            "/api/chat",
+            json={"messages": [{"role": "user", "content": "what is widget 5?"}], "web": True},
+        )
+        resp.get_data()
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        system = chat_call["messages"][0]["content"]
+        assert "came back with nothing usable" not in system
+        assert "Widget 5 shipped on Tuesday" in system

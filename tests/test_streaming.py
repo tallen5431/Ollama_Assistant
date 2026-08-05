@@ -157,3 +157,71 @@ class TestVisionPassthrough:
         )
         assert resp.status_code == 200
         assert len(fake_ollama.last_request["messages"]) == 3
+
+
+class _ThinkRejectingHandler(BaseHTTPRequestHandler):
+    """Ollama before 0.9, which rejects the unknown "think" key outright."""
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        payload = json.loads(body or b"{}")
+        self.server.requests.append(payload)
+        if "think" in payload and self.server.reject_think:
+            out = json.dumps({"error": 'unknown field "think"'}).encode()
+            self.send_response(400)
+        else:
+            out = json.dumps({"message": {"content": "Q: widget 5"}}).encode()
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+    def log_message(self, *args):
+        pass
+
+
+class TestThinkCompatibility:
+    """think=False is worth asking for, but not worth failing over.
+
+    Ollama only learned the field in 0.9. Sending it unconditionally to an
+    older build would turn every planner call into a hard failure — which the
+    planner reports as "could not plan a search".
+    """
+
+    @pytest.fixture
+    def old_ollama(self, monkeypatch):
+        server = HTTPServer(("127.0.0.1", 0), _ThinkRejectingHandler)
+        server.requests = []
+        server.reject_think = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setenv("OLLAMA_HOST", f"http://127.0.0.1:{server.server_port}")
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_rejected_think_field_retries_without_it(self, old_ollama):
+        reply = ollama_client.chat("m", [{"role": "user", "content": "hi"}], think=False)
+        assert reply == "Q: widget 5"
+        sent = old_ollama.requests
+        assert len(sent) == 2, "expected one rejected call then one retry"
+        assert "think" in sent[0] and "think" not in sent[1]
+
+    def test_a_call_that_never_asked_to_think_is_not_retried(self, old_ollama):
+        """Only the think field earns a second attempt; other errors stand."""
+        ollama_client.chat("m", [{"role": "user", "content": "hi"}])
+        assert len(old_ollama.requests) == 1
+
+    def test_a_modern_ollama_gets_think_and_only_one_call(self, old_ollama):
+        old_ollama.reject_think = False
+        assert ollama_client.chat(
+            "m", [{"role": "user", "content": "hi"}], think=False
+        ) == "Q: widget 5"
+        assert len(old_ollama.requests) == 1
+        assert old_ollama.requests[0]["think"] is False
+
+    def test_think_is_absent_when_not_asked_for(self, old_ollama):
+        ollama_client.chat("m", [{"role": "user", "content": "hi"}])
+        assert "think" not in old_ollama.requests[0]
