@@ -311,7 +311,18 @@ _PAGE = """<!doctype html>
       // scrollHeight on every token forces a synchronous re-wrap of the whole
       // reply, which is quadratic in its length.
       let scrollPending = false;
-      function scrollDown() {
+      // Follow the stream only while the user is already at the bottom.
+      // Scrolling up to re-read the question during a long answer used to drag
+      // you back on every token, and the only way out was to press Stop.
+      let stickBottom = true;
+      function atBottom() {
+        return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80;
+      }
+      chatEl.addEventListener("scroll", () => { stickBottom = atBottom(); }, { passive: true });
+
+      function scrollDown(force) {
+        if (force) stickBottom = true;
+        if (!stickBottom) return;
         if (scrollPending) return;
         scrollPending = true;
         requestAnimationFrame(() => { scrollPending = false; chatEl.scrollTop = chatEl.scrollHeight; });
@@ -583,7 +594,7 @@ _PAGE = """<!doctype html>
           bubble.appendChild(el);
         }
         if (text) bubble.appendChild(document.createTextNode(text));
-        chatEl.appendChild(wrap); scrollDown();
+        chatEl.appendChild(wrap); scrollDown(true);   // your own message: always jump
         return wrap;   // so a turn that produced nothing can be rolled back
       }
 
@@ -785,7 +796,7 @@ _PAGE = """<!doctype html>
           '</div></div>';
         // Model names come from the Ollama server — set as text, never markup.
         wrap.querySelector(".role").textContent = modelEl.value || "Assistant";
-        chatEl.appendChild(wrap); scrollDown();
+        chatEl.appendChild(wrap); scrollDown(true);
         return {
           root: wrap,
           bubble: wrap.querySelector(".bubble"),
@@ -820,7 +831,7 @@ _PAGE = """<!doctype html>
         wrap.innerHTML = '<div class="msg error"><div class="col"><div class="role">Error</div>' +
                          '<div class="bubble"></div></div></div>';
         wrap.querySelector(".bubble").textContent = msg;
-        chatEl.appendChild(wrap); scrollDown();
+        chatEl.appendChild(wrap); scrollDown(true);   // an error must not be missed
       }
 
       async function loadModels() {
@@ -860,10 +871,15 @@ _PAGE = """<!doctype html>
             o.textContent = data.default || "(no models found)"; o.value = data.default || "";
             modelEl.appendChild(o);
           } else {
+            // Prefer whatever this device picked last. The server's default is
+            // one value for every device, so the phone landed on it every load
+            // and re-picking meant scrolling a truncated dropdown one-handed.
+            const preferred = list.indexOf(remembered("model")) >= 0
+              ? remembered("model") : data.default;
             for (const name of list) {
               const o = document.createElement("option");
               o.value = name; o.textContent = name;
-              if (name === data.default) o.selected = true;
+              if (name === preferred) o.selected = true;
               modelEl.appendChild(o);
             }
           }
@@ -996,6 +1012,24 @@ _PAGE = """<!doctype html>
         controller = new AbortController();
         let rawContent = "", thinkingField = "", started = false, usage = null, lastSources = null;
 
+        // Between Send and the first token there was no feedback at all. A cold
+        // 30b over Tailscale is half a minute of a motionless "…" against a
+        // five-minute timeout, which is what makes people give up and reload.
+        // A grounding status line takes the slot over permanently when it
+        // arrives, since it says something more useful than a stopwatch.
+        const waitingSince = Date.now();
+        let waitTimer = setInterval(() => {
+          if (started || view.statusOwned) return;
+          const secs = Math.round((Date.now() - waitingSince) / 1000);
+          if (secs < 3) return;   // don't flicker on a warm model
+          view.status.textContent = "waiting for " + (modelEl.value || "the model") +
+                                    "… " + secs + "s";
+          view.status.hidden = false;
+        }, 1000);
+        function stopWaitTimer() {
+          if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+        }
+
         try {
           const resp = await fetch("api/chat", {
             method: "POST",
@@ -1025,8 +1059,10 @@ _PAGE = """<!doctype html>
               if (!line) continue;
               const obj = JSON.parse(line);
               if (obj.error) throw new Error(obj.error);
-              // Web-grounding progress, emitted before the model starts.
+              // Web-grounding progress, emitted before the model starts. It
+              // says more than a stopwatch, so it owns the line from here on.
               if (obj.status !== undefined) {
+                view.statusOwned = true;
                 view.status.textContent = obj.status;
                 view.status.hidden = !obj.status;
                 scrollDown();
@@ -1046,7 +1082,12 @@ _PAGE = """<!doctype html>
 
               const { content, thinking } = splitThink(rawContent);
               const allThink = thinkingField + thinking;
-              if (piece || think) { started = true; view.bubble.textContent = content || "…"; }
+              if (piece || think) {
+                started = true;
+                stopWaitTimer();
+                if (!view.statusOwned) view.status.hidden = true;
+                view.bubble.textContent = content || "…";
+              }
               if (allThink) { view.think.hidden = false; view.thinkBody.textContent = allThink; }
               scrollDown();
             }
@@ -1105,6 +1146,7 @@ _PAGE = """<!doctype html>
             setStatus("bad", "error");
           }
         } finally {
+          stopWaitTimer();
           busy = false; sendBtn.disabled = false; stopBtn.hidden = true;
           controller = null;
           if (pendingAutoSend) {
@@ -1282,7 +1324,7 @@ _PAGE = """<!doctype html>
         }
         closeDrawer();
         refreshConversations();
-        scrollDown();
+        scrollDown(true);
       }
 
       function openDrawer() { drawerEl.hidden = false; backdropEl.hidden = false; refreshConversations(); }
@@ -1537,10 +1579,23 @@ _PAGE = """<!doctype html>
         return new Blob([buf], { type: "audio/wav" });
       }
 
+      // Remembered per device, because the right answer differs per device:
+      // the phone and the desktop want different models. Storage can throw in a
+      // locked-down browser, so every access is guarded.
+      function remembered(key) {
+        try { return localStorage.getItem("chat." + key) || ""; } catch (e) { return ""; }
+      }
+      function remember(key, value) {
+        try { localStorage.setItem("chat." + key, value); } catch (e) {}
+      }
+      // Only an explicit choice is stored. switchToVisionModel() and
+      // loadConversation() set modelEl.value programmatically, which does not
+      // fire "change" — so an automatic switch never overwrites your pick.
+      modelEl.addEventListener("change", () => remember("model", modelEl.value));
+
       // Remember the voice toggles — they describe your hardware and habits, not
       // this visit. Headphones defaults ON (see the checkbox in the markup);
-      // only an explicit stored choice overrides it. Storage can throw in a
-      // locked-down browser, so every access is guarded.
+      // only an explicit stored choice overrides it.
       function rememberToggle(el, key, dflt) {
         try {
           const saved = localStorage.getItem(key);

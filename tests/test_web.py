@@ -934,3 +934,68 @@ class TestResolverIsBounded:
 
     def test_a_normal_lookup_is_unaffected(self):
         assert web.check_url("http://8.8.8.8/") == "http://8.8.8.8/"
+
+
+class TestPlannerLoadOptions:
+    """num_ctx is a load option: changing it makes Ollama reload the runner.
+
+    With WEB_PLANNER_MODEL unset the planner and the answer are the same model
+    back to back, so sending different load options forced a full reload
+    between them — tens of seconds on a 30b, in a turn that has not started.
+    """
+
+    def test_the_same_model_gets_the_same_context_window(self, monkeypatch):
+        seen = {}
+
+        def capture(model, messages, options=None, think=None):
+            seen["options"] = options
+            return "NONE"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        monkeypatch.delenv("WEB_PLANNER_MODEL", raising=False)
+        web.plan_searches(ASK, "qwen3-coder:30b")
+
+        import config
+        assert seen["options"]["num_ctx"] == config.get_num_ctx()
+        assert seen["options"]["temperature"] == 0
+
+    def test_a_separate_planner_model_is_left_alone(self, monkeypatch):
+        """It loads on its own anyway; a big window would only cost memory."""
+        seen = {}
+
+        def capture(model, messages, options=None, think=None):
+            seen["options"] = options
+            return "NONE"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        monkeypatch.setenv("WEB_PLANNER_MODEL", "qwen3.5:4b")
+        web.plan_searches(ASK, "qwen3-coder:30b")
+        assert "num_ctx" not in seen["options"]
+
+    def test_it_matches_what_the_chat_path_sends(self, monkeypatch):
+        """If these ever drift apart the reload comes straight back."""
+        import importlib
+        import app as app_module
+        import ollama_client
+
+        mod = importlib.reload(app_module)
+        seen = {}
+
+        def fake_stream(model, messages, options=None):
+            seen["chat"] = options
+            yield '{"done": true}'
+
+        def capture(model, messages, options=None, think=None):
+            seen["planner"] = options
+            return "NONE"
+
+        monkeypatch.setattr(mod, "chat_stream", fake_stream)
+        monkeypatch.setattr(ollama_client, "chat", capture)
+        monkeypatch.setenv("WEB_ENABLED", "1")
+        monkeypatch.delenv("WEB_PLANNER_MODEL", raising=False)
+        mod.app.test_client().post("/api/chat", json={
+            "model": "m", "web": True,
+            "messages": [{"role": "user", "content": "what changed?"}],
+        }).get_data()
+
+        assert seen["planner"]["num_ctx"] == seen["chat"]["num_ctx"]

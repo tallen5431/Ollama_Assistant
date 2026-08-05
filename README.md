@@ -95,7 +95,8 @@ All settings are environment variables (the server manager injects them):
 | `PORT`              | `8070`                      | Port to listen on |
 | `OLLAMA_HOST`       | `http://127.0.0.1:11434`    | Where Ollama runs. Point at your **desktop's** LAN/Tailscale address (a trailing `/v1` is accepted). |
 | `OLLAMA_MODEL`      | `llama3.1:8b`               | Default model shown/selected in the UI |
-| `OLLAMA_TIMEOUT`    | `300`                       | Per-request timeout, in seconds |
+| `OLLAMA_TIMEOUT`    | `300`                       | How long to wait for a reply, in seconds — a 30b legitimately takes minutes |
+| `OLLAMA_CONNECT_TIMEOUT` | `5`                    | How long to wait to *connect*, separately. A sleeping desktop drops the packet rather than refusing it, so this is what stops a message hanging for the full reply timeout |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |

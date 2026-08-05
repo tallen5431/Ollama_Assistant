@@ -33,10 +33,26 @@ if [[ -z "$PY_CMD" ]]; then
 fi
 
 # --- Install dependencies ---
+# A network hiccup here must not stop the app. The box reboots after a power
+# cut, this runs before DNS is up, pip exits 1, and under `set -e` the whole
+# launch dies — discovered days later from the phone. If the dependencies are
+# already installed (the steady state on every reboot but the first), a failed
+# install is nothing to stop for. The same pattern is used for vosk below.
+#
+# pip/setuptools/wheel are deliberately not upgraded on every start: it is the
+# one unpinned step in an otherwise pinned install, so it is the only thing
+# that can change under the app without anyone asking it to.
 if [[ -f "$APP_DIR/requirements.txt" ]]; then
   echo "[SETUP] Installing dependencies..."
-  "$PY_CMD" -m pip install --upgrade pip setuptools wheel >/dev/null
-  "$PY_CMD" -m pip install -r "$APP_DIR/requirements.txt"
+  if ! "$PY_CMD" -m pip install -r "$APP_DIR/requirements.txt"; then
+    echo "[WARN] Could not install dependencies (no network yet?)."
+    if "$PY_CMD" -c 'import flask, requests, waitress' 2>/dev/null; then
+      echo "[WARN] They are already present — starting anyway."
+    else
+      echo "[ERROR] And they are not already installed. Cannot start."
+      exit 1
+    fi
+  fi
 fi
 
 # --- Optional voice support (vosk has no wheel on some platforms) ---

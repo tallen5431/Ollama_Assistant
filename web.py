@@ -669,6 +669,22 @@ def _fallback_query(
     return [text[:200]] if text else []
 
 
+def _planner_options(planner_model: str, answering_model: str) -> Dict[str, Any]:
+    """Options for the planner call, matching the answer's where it matters.
+
+    num_ctx is a *load* option: Ollama reloads the runner when it changes. With
+    WEB_PLANNER_MODEL unset the planner and the answer are the same model, back
+    to back, and sending different load options meant a full reload between
+    them — on a 30b that is tens of seconds of a turn that has not started yet.
+    Harmless when they differ, since the planner is loaded separately anyway.
+    """
+    options: Dict[str, Any] = {"temperature": 0, "num_predict": 192}
+    if planner_model == answering_model:
+        from config import get_num_ctx
+        options["num_ctx"] = get_num_ctx()
+    return options
+
+
 def planner_input(messages: List[Dict[str, str]], max_chars: int = 700) -> str:
     """Recent conversation as plain text, so follow-ups plan sensibly.
 
@@ -730,7 +746,7 @@ def plan_searches(
                 {"role": "user", "content": prompt},
             ],
             # Deterministic and short: this is a routing decision, not prose.
-            options={"temperature": 0, "num_predict": 192},
+            options=_planner_options(planner_model, model),
             # A reasoning model would spend the whole budget thinking and return
             # a truncated scratchpad with no queries in it — which parsed as
             # "no search needed", so picking deepseek-r1 silently turned the web

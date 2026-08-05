@@ -239,3 +239,48 @@ class TestSplitThink:
         out = self.split("just an answer")
         assert out["thinking"] == ""
         assert out["content"] == "just an answer"
+
+
+class TestScrollFollowing:
+    """Scrolling up to re-read the question during a long answer used to drag
+    you back to the bottom on every token; the only escape was to press Stop."""
+
+    def run_scroll(self, script):
+        page = _page()
+        js = "\n".join([
+            r"""
+            let scrolls = [], listener = null;
+            const chatEl = {
+              scrollHeight: 1000, clientHeight: 200, scrollTop: 800,
+              addEventListener(name, fn) { listener = fn; },
+            };
+            function requestAnimationFrame(fn) { fn(); }
+            function scrollTo(top) { chatEl.scrollTop = top; listener(); }
+            """,
+            _slice(page, "      let scrollPending = false;", "      function clearPlaceholder"),
+            script + "process.stdout.write(JSON.stringify(chatEl.scrollTop));",
+        ])
+        return json.loads(subprocess.run(["node", "-e", js], capture_output=True,
+                                         text=True, check=True).stdout)
+
+    def test_a_stream_follows_when_you_are_at_the_bottom(self):
+        assert self.run_scroll("chatEl.scrollHeight = 1200; scrollDown();") == 1200
+
+    def test_a_stream_does_not_yank_you_back_after_scrolling_up(self):
+        top = self.run_scroll(
+            "scrollTo(100);"                      # the user scrolls up to re-read
+            "chatEl.scrollHeight = 1200; scrollDown();"   # more tokens arrive
+        )
+        assert top == 100, "the view was dragged back to the bottom"
+
+    def test_scrolling_back_down_resumes_following(self):
+        top = self.run_scroll(
+            "scrollTo(100);"
+            "scrollTo(chatEl.scrollHeight - chatEl.clientHeight);"   # back to the bottom
+            "chatEl.scrollHeight = 1200; scrollDown();"
+        )
+        assert top == 1200
+
+    def test_your_own_message_always_jumps_to_the_bottom(self):
+        top = self.run_scroll("scrollTo(100); chatEl.scrollHeight = 1200; scrollDown(true);")
+        assert top == 1200, "sending a message must always show it"
