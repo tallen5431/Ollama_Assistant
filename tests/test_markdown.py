@@ -95,6 +95,74 @@ class TestEmphasisFlanking:
         assert "<strong>critical</strong>" in out
 
 
+class TestLineEndings:
+    """A stray carriage return defeated every block pattern.
+
+    "." does not match \r in a JS regex, and "$" without the m flag only
+    matches end-of-input — so with CRLF output every marker rendered literally.
+    """
+
+    def test_crlf_is_handled_like_lf(self):
+        assert render("## Title\r\nText\r\n- one\r\n- two") == render("## Title\nText\n- one\n- two")
+
+    def test_a_lone_carriage_return_also_splits(self):
+        out = render("## Title\rText")
+        assert "<h4>Title</h4>" in out
+        assert "##" not in out
+
+    def test_crlf_inside_a_fence_keeps_the_code(self):
+        out = render("```bash\r\nls -la\r\necho hi\r\n```")
+        assert "ls -la" in out and "echo hi" in out
+        assert "\r" not in out
+
+
+class TestFences:
+    """Every one of these swallowed or dropped part of a reply."""
+
+    def test_a_fence_that_opens_and_closes_on_one_line_is_a_code_block(self):
+        out = render("To install, run:\n\n```pip install foo```\n\nThen restart.")
+        assert "<code>pip install foo</code>" in out
+        # Not a language badge — that was the command being painted as one.
+        assert "data-lang" not in out
+        # And the rest of the reply survived rather than being eaten by an
+        # unterminated fence.
+        assert "Then restart." in out
+
+    def test_text_after_the_closing_fence_is_kept(self):
+        out = render("```\nls\n``` and then reboot")
+        assert "<code>ls</code>" in out
+        assert "and then reboot" in out
+
+    def test_an_unterminated_fence_still_renders_as_code(self):
+        """A cut-off reply is truncated, not malformed — showing it raw is worse."""
+        out = render("```python\nx = 1\ny = 2")
+        assert 'data-lang="python"' in out
+        assert "x = 1" in out and "y = 2" in out
+
+
+class TestHeadings:
+    def test_a_hash_indented_into_code_is_not_a_heading(self):
+        """CommonMark stops at 3 spaces; 4 is an indented code block."""
+        out = render("    # install deps\n    pip install -r requirements.txt")
+        assert "<h3>" not in out
+        assert "# install deps" in out
+
+    def test_up_to_three_spaces_still_makes_a_heading(self):
+        assert "<h4>Result</h4>" in render("   ## Result")
+
+
+class TestListContinuation:
+    def test_an_indented_detail_line_continues_the_step(self):
+        """Ending the list there poisoned every marker after it."""
+        out = render("1. one\n2. two\n   extra detail\n3. three")
+        assert out == "<ol><li>one</li><li>two extra detail</li><li>three</li></ol>", out
+
+    def test_a_blank_line_still_ends_the_list(self):
+        out = render("- one\n- two\n\nseparate paragraph")
+        assert "<ul><li>one</li><li>two</li></ul>" in out
+        assert "<p>separate paragraph</p>" in out
+
+
 class TestBlocks:
     def test_fenced_code_keeps_its_language_and_a_copy_button(self):
         out = render("Run:\n\n```bash\nsudo systemctl restart x\n```")

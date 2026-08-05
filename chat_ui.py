@@ -183,7 +183,12 @@ _PAGE = """<!doctype html>
         footer { padding:0.5rem 0.7rem; }
         .col { max-width:92%; }
         textarea { font-size:1rem; }            /* < 1rem makes iOS zoom on focus */
-        .composer { gap:0.35rem; }
+        /* Four controls plus the textarea do not fit a phone: measured at
+           360px the input collapsed to 63px, and to a 0px content box at 320px.
+           Wrapping is scoped here — applied globally it moves the textarea onto
+           its own row on the desktop, which is a redesign, not a fix. */
+        .composer { gap:0.35rem; flex-wrap:wrap; }
+        #input { flex:1 1 100%; }
         .composer button { padding:0.5rem 0.45rem; }
         button.primary { padding:0.5rem 0.7rem; }
         .voicebar { gap:0.4rem 0.6rem; }
@@ -360,7 +365,11 @@ _PAGE = """<!doctype html>
       // every construct, so the very common "## Summary\\nText" and
       // "Here are steps:\\n- one" rendered their markers literally.
       function renderMarkdown(raw) {
-        const lines = esc(raw).split("\\n");
+        // Split on any line ending, not just \\n. A stray \\r survives a plain
+        // split and then defeats every block pattern below, because "." does not
+        // match a carriage return and "$" without the m flag only matches
+        // end-of-input — so CRLF output rendered its markers literally.
+        const lines = esc(raw).split(/\\r\\n|\\r|\\n/);
         const out = [];
         let para = [];        // paragraph lines awaiting a <br>-joined <p>
         let list = null;      // { tag: "ul"|"ol", items: [], start: n }
@@ -386,6 +395,11 @@ _PAGE = """<!doctype html>
           quote = [];
         }
         function flushAll() { flushPara(); flushList(); flushQuote(); }
+        function emitCode(lang, body) {
+          out.push('<div class="code"><button class="copy" type="button">Copy</button>' +
+                   "<pre" + (lang ? ' data-lang="' + lang + '"' : "") + "><code>" +
+                   body + "</code></pre></div>");
+        }
 
         for (const line of lines) {
           // A fence is only a fence at the start of a line — an inline triple
@@ -393,11 +407,12 @@ _PAGE = """<!doctype html>
           const fenceMatch = line.match(/^\\s*```(.*)$/);
           if (fence) {
             if (fenceMatch) {
-              const lang = fence.lang;
-              out.push('<div class="code"><button class="copy" type="button">Copy</button>' +
-                       "<pre" + (lang ? ' data-lang="' + lang + '"' : "") + "><code>" +
-                       fence.body.join("\\n") + "</code></pre></div>");
+              emitCode(fence.lang, fence.body.join("\\n"));
               fence = null;
+              // Prose after the closing fence used to be dropped on the floor:
+              // the capture was matched and then never read.
+              const rest = fenceMatch[1].trim();
+              if (rest) para.push(rest);
             } else {
               fence.body.push(line);
             }
@@ -405,13 +420,22 @@ _PAGE = """<!doctype html>
           }
           if (fenceMatch) {
             flushAll();
+            // A fence that opens AND closes on one line — ```pip install foo``` —
+            // is a whole code block, not the start of one. Treating it as an
+            // opener swallowed the rest of the reply into the block and painted
+            // the command itself as the language badge.
+            const solo = line.match(/^\\s*```(.*?)```\\s*$/);
+            if (solo) {
+              emitCode("", solo[1]);
+              continue;
+            }
             fence = { lang: fenceMatch[1].trim(), body: [] };
             continue;
           }
 
           if (!line.trim()) { flushAll(); continue; }
 
-          const heading = line.match(/^\\s*(#{1,6})\\s+(.*)$/);
+          const heading = line.match(/^ {0,3}(#{1,6})\\s+(.*)$/);
           if (heading) {
             flushAll();
             const level = Math.min(6, heading[1].length + 2);
@@ -450,17 +474,20 @@ _PAGE = """<!doctype html>
             continue;
           }
 
+          // A plain line while a list is open continues its last item rather
+          // than ending the list — otherwise the interrupt guard above rejects
+          // every following marker and half the list renders as raw text.
+          if (list && list.items.length) {
+            list.items[list.items.length - 1] += " " + line.trim();
+            continue;
+          }
           flushList(); flushQuote();
           para.push(line.trim());
         }
 
         // An unterminated fence still renders as code — the reply was cut off,
         // not malformed, and showing it raw would be worse.
-        if (fence) {
-          out.push('<div class="code"><button class="copy" type="button">Copy</button>' +
-                   "<pre" + (fence.lang ? ' data-lang="' + fence.lang + '"' : "") + "><code>" +
-                   fence.body.join("\\n") + "</code></pre></div>");
-        }
+        if (fence) emitCode(fence.lang, fence.body.join("\\n"));
         flushAll();
         return out.join("");
       }
@@ -642,7 +669,16 @@ _PAGE = """<!doctype html>
       // gives you, so the button would be a duplicate.
       if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) {
         cameraBtn.hidden = false;
-        cameraBtn.addEventListener("click", () => cameraFileEl.click());
+        cameraBtn.addEventListener("click", () => {
+          // Check before opening: on a phone this is a full-screen camera
+          // intent, and finding out afterwards that there was no room means
+          // framing and shooting a photo for nothing.
+          if (pendingImages.length >= 4) {
+            hintEl.textContent = "Up to 4 images per message.";
+            return;
+          }
+          cameraFileEl.click();
+        });
       }
 
       // Screenshots: grab a single frame from a display-capture stream, then

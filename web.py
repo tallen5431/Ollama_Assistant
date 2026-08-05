@@ -27,6 +27,7 @@ import ipaddress
 import json
 import re
 import socket
+import threading
 import time
 from collections import OrderedDict
 from html.parser import HTMLParser
@@ -670,11 +671,11 @@ def describe_images(images: List[str], model: str, ocr: bool = False) -> Optiona
 
 
 _OCR_PREAMBLE = (
-    "Text transcribed from the image the user attached. The model answering "
+    "Text transcribed from an image in this conversation. The model answering "
     "cannot see images, so this transcription is all there is of it. Treat it as "
-    "a faithful reading of the image, not as something the user typed, and answer "
-    "their question using it. Say so plainly if it does not contain what they are "
-    "asking about."
+    "a faithful reading of that image, not as something the user typed. Use it "
+    "where it is relevant to what they are asking, and ignore it where it is "
+    "not — it may be from an earlier turn about something else."
 )
 
 _OCR_NOTHING = (
@@ -739,6 +740,10 @@ def conversation_images(messages: List[Dict[str, Any]]) -> List[str]:
 # this lives for the process's lifetime.
 _TRANSCRIPTS: "OrderedDict[str, Optional[str]]" = OrderedDict()
 _TRANSCRIPT_CACHE_MAX = 64
+# Waitress serves on a thread pool, so lookup and eviction can interleave. The
+# membership test and the move_to_end that follows it are a check-then-act pair:
+# an eviction landing between them raises KeyError out of a chat turn.
+_TRANSCRIPTS_LOCK = threading.Lock()
 
 
 def _cache_key(images: List[str], model: str, ocr: bool) -> str:
@@ -754,13 +759,27 @@ def read_images(images: List[str], model: str, ocr: bool = False) -> Optional[st
     if not images or not model:
         return None
     key = _cache_key(images, model, ocr)
-    if key in _TRANSCRIPTS:
-        _TRANSCRIPTS.move_to_end(key)
-        return _TRANSCRIPTS[key]
+    with _TRANSCRIPTS_LOCK:
+        if key in _TRANSCRIPTS:
+            _TRANSCRIPTS.move_to_end(key)
+            return _TRANSCRIPTS[key]
+
+    # Deliberately outside the lock: reading an image is a model call taking
+    # seconds, and holding the cache shut for that would serialise every other
+    # request. Two threads racing the same new image both call the model once,
+    # which is wasteful but correct — and the second write is identical.
     result = describe_images(images, model, ocr=ocr)
-    _TRANSCRIPTS[key] = result
-    while len(_TRANSCRIPTS) > _TRANSCRIPT_CACHE_MAX:
-        _TRANSCRIPTS.popitem(last=False)
+
+    # Only a successful read is memoised. describe_images returns None both for
+    # "the call failed" and nothing else, so caching it meant one reader-model
+    # OOM — routine when a 30b model holds the GPU — told the user that
+    # screenshot had no readable text forever, in every conversation, until the
+    # process restarted.
+    if result is not None:
+        with _TRANSCRIPTS_LOCK:
+            _TRANSCRIPTS[key] = result
+            while len(_TRANSCRIPTS) > _TRANSCRIPT_CACHE_MAX:
+                _TRANSCRIPTS.popitem(last=False)
     return result
 
 

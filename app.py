@@ -355,13 +355,21 @@ def _gather_web(
     # "what's this?". Read it first so the planner has something to work with.
     # Reuse the transcription the chat path already made, if any — one OCR pass
     # per turn, serving both the answer and the search.
-    image_note = transcript
-    images = web.conversation_images(messages)
-    if images and image_note is None:
-        reader, is_reader_ocr = _image_reader(model)
-        if reader:
-            yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
-            image_note = web.read_images(images, reader, ocr=is_reader_ocr)
+    # last_user_images, not conversation_images: only an image attached to *this*
+    # turn should shape the search. Scanning the whole thread meant a screenshot
+    # from turn 1 was still steering queries at turn 11 ("what's the weather in
+    # Paris" planned against a stale traceback). That gate has to cover the
+    # reused transcript too, which is read from the whole thread by design —
+    # otherwise the stale image walks straight back in through the reuse path.
+    image_note = None
+    images = web.last_user_images(messages)
+    if images:
+        image_note = transcript
+        if image_note is None:
+            reader, is_reader_ocr = _image_reader(model)
+            if reader:
+                yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
+                image_note = web.read_images(images, reader, ocr=is_reader_ocr)
 
     yield _line({"status": "Working out what to search for…"})
     queries = web.plan_searches(messages, model, image_note=image_note)
