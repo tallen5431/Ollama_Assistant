@@ -26,6 +26,15 @@ INSTALLED = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def clear_transcript_cache():
+    """read_images memoises per process; tests must not see each other's entries."""
+    import web
+    web._TRANSCRIPTS.clear()
+    yield
+    web._TRANSCRIPTS.clear()
+
+
 @pytest.fixture
 def installed(monkeypatch):
     monkeypatch.setattr(oc, "list_models", lambda: INSTALLED)
@@ -312,3 +321,56 @@ class TestDescribeModeFraming:
         assert "BEGIN IMAGE TEXT" in ocr_ctx
         assert "BEGIN IMAGE DESCRIPTION" in desc_ctx
         assert "summary, not a full transcription" in desc_ctx
+
+
+class TestTranscriptReuse:
+    """A follow-up about the same screenshot must keep its context."""
+
+    def test_images_are_found_anywhere_in_the_thread(self):
+        import web
+        thread = [
+            {"role": "user", "content": "what's this?", "images": ["aW1n"]},
+            {"role": "assistant", "content": "a traceback"},
+            {"role": "user", "content": "which line?"},
+        ]
+        # The last user turn has no attachment, but the screenshot is still
+        # what the question is about.
+        assert web.last_user_images(thread) == []
+        assert web.conversation_images(thread) == ["aW1n"]
+
+    def test_the_same_image_is_read_once_across_turns(self, monkeypatch):
+        import web
+        calls = []
+        monkeypatch.setattr(web, "describe_images",
+                            lambda images, model, ocr=False: calls.append(model) or "TypeError: x")
+        for _ in range(4):
+            assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
+        assert len(calls) == 1, f"expected one model call, got {len(calls)}"
+
+    def test_a_different_image_is_read_again(self, monkeypatch):
+        import web
+        calls = []
+        monkeypatch.setattr(web, "describe_images",
+                            lambda images, model, ocr=False: calls.append(images[0]) or "text")
+        web.read_images(["first"], "glm-ocr:latest", ocr=True)
+        web.read_images(["second"], "glm-ocr:latest", ocr=True)
+        assert calls == ["first", "second"]
+
+    def test_the_cache_is_bounded(self, monkeypatch):
+        import web
+        monkeypatch.setattr(web, "describe_images", lambda images, model, ocr=False: "t")
+        for i in range(web._TRANSCRIPT_CACHE_MAX + 20):
+            web.read_images([f"image-{i}"], "m", ocr=True)
+        assert len(web._TRANSCRIPTS) <= web._TRANSCRIPT_CACHE_MAX
+
+    def test_transcribed_images_are_stripped_from_the_payload(self):
+        """Base64 a blind model will never read shouldn't ride along forever."""
+        import web
+        thread = [
+            {"role": "user", "content": "what's this?", "images": ["aW1n"]},
+            {"role": "assistant", "content": "a traceback"},
+        ]
+        stripped = web.strip_images(thread)
+        assert "images" not in stripped[0]
+        assert stripped[0]["content"] == "what's this?"
+        assert thread[0]["images"] == ["aW1n"], "the original must not be mutated"

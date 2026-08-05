@@ -104,7 +104,7 @@ _PAGE = """<!doctype html>
         font-size:0.75rem; color:var(--muted); white-space:nowrap;
       }
       .voicebar-check input { accent-color:var(--accent); margin:0; }
-      #attach, #shot { font-size:1.05rem; line-height:1; padding:0.5rem 0.6rem; }
+      #attach, #shot, #camera { font-size:1.05rem; line-height:1; padding:0.5rem 0.6rem; }
       .thumbs { display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.5rem; }
       .thumb { position:relative; width:3.5rem; height:3.5rem; border-radius:0.5rem;
         overflow:hidden; border:1px solid var(--border); }
@@ -178,7 +178,7 @@ _PAGE = """<!doctype html>
         .model-label { display:none; }          /* the dropdown speaks for itself */
         #statusText { display:none; }           /* the coloured dot already says it */
         #model { max-width:9rem; font-size:0.8rem; padding:0.35rem 0.4rem; }
-        #newChat { font-size:0.8rem; padding:0.35rem 0.5rem; }
+        #newChat { font-size:0.8rem; padding:0.35rem 0.5rem; white-space:nowrap; }
         #chat { padding:0.9rem 0.7rem; }
         footer { padding:0.5rem 0.7rem; }
         .col { max-width:92%; }
@@ -246,12 +246,14 @@ _PAGE = """<!doctype html>
         <div class="composer">
           <textarea id="input" rows="1" placeholder="Type a message…"></textarea>
           <button id="attach" title="Attach an image (needs a vision model)">📎</button>
+          <button id="camera" title="Take a photo" hidden>📷</button>
           <button id="shot" title="Capture a screenshot to analyse" hidden>📸</button>
           <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
           <button class="primary" id="send">Send</button>
           <button class="danger" id="stop" hidden>Stop</button>
         </div>
         <input type="file" id="file" accept="image/*" multiple hidden>
+        <input type="file" id="cameraFile" accept="image/*" capture="environment" hidden>
         <p class="hint" id="hint"></p>
       </div>
     </footer>
@@ -278,6 +280,8 @@ _PAGE = """<!doctype html>
       const attachBtn = document.getElementById("attach");
       const shotBtn  = document.getElementById("shot");
       const fileEl   = document.getElementById("file");
+      const cameraBtn = document.getElementById("camera");
+      const cameraFileEl = document.getElementById("cameraFile");
       const thumbsEl = document.getElementById("thumbs");
       const modelEl  = document.getElementById("model");
       const dotEl    = document.getElementById("dot");
@@ -351,48 +355,113 @@ _PAGE = """<!doctype html>
         });
       }
 
+      // Walk the text line by line rather than deciding a whole blank-line
+      // chunk's type at once. The chunk approach needed a blank line before
+      // every construct, so the very common "## Summary\\nText" and
+      // "Here are steps:\\n- one" rendered their markers literally.
       function renderMarkdown(raw) {
+        const lines = esc(raw).split("\\n");
         const out = [];
-        // Split on fences first, so code contents are never treated as markup.
-        const parts = esc(raw).split(/```/);
-        parts.forEach(function (part, i) {
-          if (i % 2 === 1) {
-            const nl = part.indexOf("\\n");
-            const lang = nl >= 0 ? part.slice(0, nl).trim() : "";
-            const code = nl >= 0 ? part.slice(nl + 1) : part;
-            out.push('<div class="code"><button class="copy" type="button">Copy</button>' +
-                     "<pre" + (lang ? ' data-lang="' + lang + '"' : "") + "><code>" +
-                     code.replace(/\\n$/, "") + "</code></pre></div>");
-            return;
+        let para = [];        // paragraph lines awaiting a <br>-joined <p>
+        let list = null;      // { tag: "ul"|"ol", items: [], start: n }
+        let quote = [];       // blockquote lines
+        let fence = null;     // { lang, body: [] } while inside ```
+
+        function flushPara() {
+          if (!para.length) return;
+          out.push("<p>" + inlineMd(para.join("<br>")) + "</p>");
+          para = [];
+        }
+        function flushList() {
+          if (!list) return;
+          const attr = list.tag === "ol" && list.start !== 1 ? ' start="' + list.start + '"' : "";
+          out.push("<" + list.tag + attr + ">" +
+                   list.items.map(function (i) { return "<li>" + inlineMd(i) + "</li>"; }).join("") +
+                   "</" + list.tag + ">");
+          list = null;
+        }
+        function flushQuote() {
+          if (!quote.length) return;
+          out.push("<blockquote>" + inlineMd(quote.join("<br>")) + "</blockquote>");
+          quote = [];
+        }
+        function flushAll() { flushPara(); flushList(); flushQuote(); }
+
+        for (const line of lines) {
+          // A fence is only a fence at the start of a line — an inline triple
+          // backtick mid-sentence used to swallow the rest of the reply.
+          const fenceMatch = line.match(/^\\s*```(.*)$/);
+          if (fence) {
+            if (fenceMatch) {
+              const lang = fence.lang;
+              out.push('<div class="code"><button class="copy" type="button">Copy</button>' +
+                       "<pre" + (lang ? ' data-lang="' + lang + '"' : "") + "><code>" +
+                       fence.body.join("\\n") + "</code></pre></div>");
+              fence = null;
+            } else {
+              fence.body.push(line);
+            }
+            continue;
           }
-          part.split(/\\n{2,}/).forEach(function (block) {
-            const text = block.trim();
-            if (!text) return;
-            const heading = text.match(/^(#{1,4})\\s+(.*)$/);
-            if (heading) {
-              const level = Math.min(6, heading[1].length + 2);
-              out.push("<h" + level + ">" + inlineMd(heading[2]) + "</h" + level + ">");
-              return;
+          if (fenceMatch) {
+            flushAll();
+            fence = { lang: fenceMatch[1].trim(), body: [] };
+            continue;
+          }
+
+          if (!line.trim()) { flushAll(); continue; }
+
+          const heading = line.match(/^\\s*(#{1,6})\\s+(.*)$/);
+          if (heading) {
+            flushAll();
+            const level = Math.min(6, heading[1].length + 2);
+            out.push("<h" + level + ">" + inlineMd(heading[2].trim()) + "</h" + level + ">");
+            continue;
+          }
+
+          const bullet = line.match(/^\\s*[-*+]\\s+(.*)$/);
+          if (bullet) {
+            flushPara(); flushQuote();
+            if (!list || list.tag !== "ul") { flushList(); list = { tag: "ul", items: [], start: 1 }; }
+            list.items.push(bullet[1]);
+            continue;
+          }
+
+          const numbered = line.match(/^\\s*(\\d+)[.)]\\s+(.*)$/);
+          // As CommonMark has it, an ordered list may only interrupt a running
+          // paragraph when it starts at 1 — otherwise prose that wraps onto
+          // "1908. It changed everything" turns into a list.
+          if (numbered && !(para.length && parseInt(numbered[1], 10) !== 1)) {
+            flushPara(); flushQuote();
+            if (!list || list.tag !== "ol") {
+              flushList();
+              // Keep the author's first number, so "5. fifth" doesn't renumber
+              // to 1 and a year like "1908. Ford…" isn't silently rewritten.
+              list = { tag: "ol", items: [], start: parseInt(numbered[1], 10) || 1 };
             }
-            const lines = text.split("\\n");
-            if (lines.every(function (l) { return /^\\s*[-*]\\s+/.test(l); })) {
-              out.push("<ul>" + lines.map(function (l) {
-                return "<li>" + inlineMd(l.replace(/^\\s*[-*]\\s+/, "")) + "</li>"; }).join("") + "</ul>");
-              return;
-            }
-            if (lines.every(function (l) { return /^\\s*\\d+[.)]\\s+/.test(l); })) {
-              out.push("<ol>" + lines.map(function (l) {
-                return "<li>" + inlineMd(l.replace(/^\\s*\\d+[.)]\\s+/, "")) + "</li>"; }).join("") + "</ol>");
-              return;
-            }
-            if (lines.every(function (l) { return /^\\s*&gt;\\s?/.test(l); })) {
-              out.push("<blockquote>" + inlineMd(lines.map(function (l) {
-                return l.replace(/^\\s*&gt;\\s?/, ""); }).join("<br>")) + "</blockquote>");
-              return;
-            }
-            out.push("<p>" + inlineMd(lines.join("<br>")) + "</p>");
-          });
-        });
+            list.items.push(numbered[2]);
+            continue;
+          }
+
+          const quoted = line.match(/^\\s*&gt;\\s?(.*)$/);
+          if (quoted) {
+            flushPara(); flushList();
+            quote.push(quoted[1]);
+            continue;
+          }
+
+          flushList(); flushQuote();
+          para.push(line.trim());
+        }
+
+        // An unterminated fence still renders as code — the reply was cut off,
+        // not malformed, and showing it raw would be worse.
+        if (fence) {
+          out.push('<div class="code"><button class="copy" type="button">Copy</button>' +
+                   "<pre" + (fence.lang ? ' data-lang="' + fence.lang + '"' : "") + "><code>" +
+                   fence.body.join("\\n") + "</code></pre></div>");
+        }
+        flushAll();
         return out.join("");
       }
 
@@ -557,13 +626,24 @@ _PAGE = """<!doctype html>
 
       attachBtn.addEventListener("click", () => fileEl.click());
 
-      fileEl.addEventListener("change", async () => {
-        for (const file of Array.from(fileEl.files)) {
+      async function takeFiles(input) {
+        for (const file of Array.from(input.files)) {
           try { if (!addAttachment(await toAttachment(file))) break; }
-          catch (e) { hintEl.textContent = "Could not read " + file.name; }
+          catch (e) { hintEl.textContent = "Could not read " + (file.name || "that image"); }
         }
-        fileEl.value = "";   // so re-picking the same file fires change again
-      });
+        input.value = "";   // so re-picking the same file fires change again
+      }
+
+      fileEl.addEventListener("change", () => takeFiles(fileEl));
+      cameraFileEl.addEventListener("change", () => takeFiles(cameraFileEl));
+
+      // Only offer the camera where there is likely to be one pointed at the
+      // world. On a desktop, capture= just opens the same picker 📎 already
+      // gives you, so the button would be a duplicate.
+      if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) {
+        cameraBtn.hidden = false;
+        cameraBtn.addEventListener("click", () => cameraFileEl.click());
+      }
 
       // Screenshots: grab a single frame from a display-capture stream, then
       // drop the stream immediately — nothing is recorded, and the browser's own
