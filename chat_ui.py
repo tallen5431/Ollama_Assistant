@@ -493,6 +493,17 @@ _PAGE = """<!doctype html>
       }
 
       // Painted once the reply completes, not per token: a half-arrived fence
+      // Telling someone to press Ctrl+C is only useful if the text is selected.
+      function selectCode(code) {
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(code);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        } catch (err) { /* selection is a nicety, never a failure */ }
+      }
+
       // renders as garbage, and re-parsing every chunk is wasted work.
       function paintMarkdown(el, raw) {
         el.innerHTML = renderMarkdown(raw);
@@ -500,12 +511,18 @@ _PAGE = """<!doctype html>
         el.querySelectorAll("button.copy").forEach(function (btn) {
           btn.addEventListener("click", function () {
             const code = btn.parentElement.querySelector("code");
+            // The Clipboard API is [SecureContext]-gated, so it is undefined
+            // over plain http to the box by name or IP. Dereferencing it threw
+            // before any promise existed, which made the rejection fallback
+            // below unreachable — and invisible on localhost, which counts as
+            // a trustworthy origin.
+            if (!navigator.clipboard) { selectCode(code); btn.textContent = "Press Ctrl+C"; return; }
             navigator.clipboard.writeText(code.textContent).then(
               function () {
                 btn.textContent = "Copied";
                 setTimeout(function () { btn.textContent = "Copy"; }, 1200);
               },
-              function () { btn.textContent = "Press Ctrl+C"; }
+              function () { selectCode(code); btn.textContent = "Press Ctrl+C"; }
             );
           });
         });
@@ -521,6 +538,19 @@ _PAGE = """<!doctype html>
           last = m.index + m[0].length;
         }
         content += raw.slice(last);
+        // A closing tag with no opening one: Ollama's deepseek-r1 template opens
+        // <think> in the prompt, so the reply starts inside the scratchpad and
+        // only the closing tag comes back. web.py strips this shape server-side
+        // for the planner; without it here the whole scratchpad lands in the
+        // answer bubble. Only when we found no opening tag at all — otherwise a
+        // stray </think> after a proper block would eat the real answer.
+        if (!thinking) {
+          const orphan = content.indexOf("</think>");
+          if (orphan >= 0) {
+            thinking = content.slice(0, orphan);
+            content = content.slice(orphan + "</think>".length);
+          }
+        }
         return { content, thinking };
       }
 
@@ -554,6 +584,7 @@ _PAGE = """<!doctype html>
         }
         if (text) bubble.appendChild(document.createTextNode(text));
         chatEl.appendChild(wrap); scrollDown();
+        return wrap;   // so a turn that produced nothing can be rolled back
       }
 
       // ---- Image attachments (for vision models: llava, *-vision, moondream…) ----
@@ -796,6 +827,21 @@ _PAGE = """<!doctype html>
         try {
           const resp = await fetch("api/models");
           const data = await resp.json();
+          // The 502 this endpoint returns when Ollama is unreachable is a
+          // perfectly well-formed JSON body, so parsing it without checking
+          // read as "connected, zero models" — green dot, a picker seeded with
+          // the configured default, and on a phone (#statusText is hidden
+          // there) the dot was the only signal and it was lying.
+          if (!resp.ok || data.error) {
+            modelEl.innerHTML = "";
+            const o = document.createElement("option");
+            o.textContent = data.default || "(no models)"; o.value = data.default || "";
+            modelEl.appendChild(o);
+            setStatus("bad", "no connection");
+            hintEl.textContent = data.error ||
+              "Could not reach the model server. Check Ollama is running and OLLAMA_HOST is set.";
+            return;
+          }
           modelVision = {};
           for (const m of (data.models || [])) {
             if (m && typeof m === "object") {
@@ -901,7 +947,7 @@ _PAGE = """<!doctype html>
         if ((!text && !images.length) || busy) return;
         busy = true; sendBtn.disabled = true; stopBtn.hidden = false;
         pendingImages = []; renderThumbs();
-        addUser(text, images);
+        const userView = addUser(text, images);
         // Ollama takes images as bare base64 alongside the text, not as a data URL.
         const userMsg = { role: "user", content: text };
         if (images.length) userMsg.images = images.map(img => img.b64);
@@ -921,6 +967,23 @@ _PAGE = """<!doctype html>
         // Stop press, or an error that still produced text. Never one without
         // the other, so the stored thread always alternates the way the live one
         // does. No-ops if this thread was abandoned meanwhile.
+        // Nothing was produced, so nothing is recorded — and you get your
+        // message back to edit and resend. Leaving the bubble on screen without
+        // it reaching the store meant the phone and the desktop disagreed about
+        // the conversation, and the next send posted two user turns in a row.
+        function rollBackTurn() {
+          if (messages === thread && messages.length &&
+              messages[messages.length - 1] === userMsg) messages.pop();
+          if (userView) userView.remove();
+          // Only restore the composer if it is still empty: the user may have
+          // started typing the next message while this one was in flight.
+          if (!inputEl.value.trim()) {
+            inputEl.value = text;
+            if (images.length && !pendingImages.length) { pendingImages = images.slice(); renderThumbs(); }
+            autosize();
+          }
+        }
+
         let turnSaved = false;
         async function commitTurn(reply, sources) {
           if (turnSaved || messages !== thread) return;
@@ -970,33 +1033,57 @@ _PAGE = """<!doctype html>
                 continue;
               }
               if (obj.sources) { lastSources = obj.sources; showSources(view, obj.sources); scrollDown(); continue; }
-              if (obj.thinking) thinkingField += obj.thinking;
+              // /api/chat nests thinking under "message", the same as content.
+              // Reading only the top-level field — the /api/generate shape —
+              // meant that on any Ollama new enough to stream reasoning
+              // natively, the panel never opened and the bubble sat on its "…"
+              // placeholder for the whole scratchpad, looking hung.
+              const think = (obj.message && obj.message.thinking) || obj.thinking || "";
+              if (think) thinkingField += think;
               const piece = (obj.message && obj.message.content) || obj.content || "";
               if (piece) rawContent += piece;
               if (obj.done) usage = obj;
 
               const { content, thinking } = splitThink(rawContent);
               const allThink = thinkingField + thinking;
-              if (piece || obj.thinking) { started = true; view.bubble.textContent = content || "…"; }
+              if (piece || think) { started = true; view.bubble.textContent = content || "…"; }
               if (allThink) { view.think.hidden = false; view.thinkBody.textContent = allThink; }
               scrollDown();
             }
           }
           const finalContent = splitThink(rawContent).content;
           view.status.hidden = true;
-          if (finalContent) paintMarkdown(view.bubble, finalContent);
-          else view.bubble.textContent = "(empty response)";
-          if (finalContent && messages === thread) messages.push({ role: "assistant", content: finalContent });
-          if (finalContent) commitTurn(finalContent, lastSources);
-          if (usage) view.meta.textContent = fmtUsage(usage);
+          if (finalContent) {
+            paintMarkdown(view.bubble, finalContent);
+            if (messages === thread) messages.push({ role: "assistant", content: finalContent });
+            commitTurn(finalContent, lastSources);
+            if (usage) view.meta.textContent = fmtUsage(usage);
+          } else {
+            // The request completed but the model said nothing. Recording the
+            // question without an answer left the store disagreeing with the
+            // screen and made the next send post two user turns; roll the whole
+            // turn back and hand the message back so it can be retried.
+            view.root.remove();
+            rollBackTurn();
+            markError("The model returned an empty reply. Your message is back in the box.");
+          }
           setStatus("ok", "connected");
         } catch (err) {
           if (err.name === "AbortError") {
             const partial = splitThink(rawContent).content;
-            view.bubble.textContent = (partial || "") + "  ⏹ stopped";
-            if (partial && messages === thread) {
-              messages.push({ role: "assistant", content: partial });
+            if (partial) {
+              view.bubble.textContent = partial + "  ⏹ stopped";
+              if (messages === thread) messages.push({ role: "assistant", content: partial });
               commitTurn(partial, lastSources);   // Stop still produced an answer
+            } else {
+              // Stopped before any visible text — which for a reasoning model is
+              // the whole scratchpad, i.e. exactly when Stop gets pressed. The
+              // turn used to stay on screen and in messages[] while never being
+              // written, so the two devices diverged and the next send posted
+              // two user roles.
+              view.root.remove();
+              rollBackTurn();
+              hintEl.textContent = "Stopped before the model replied — your message is back in the box.";
             }
           } else {
             // An error can arrive mid-stream, after text is already on screen.
@@ -1012,8 +1099,7 @@ _PAGE = """<!doctype html>
               commitTurn(partial, lastSources);
             } else {
               view.root.remove();
-              if (messages === thread && messages.length &&
-                  messages[messages.length - 1].role === "user") messages.pop();
+              rollBackTurn();
               markError(err.message || String(err));
             }
             setStatus("bad", "error");
