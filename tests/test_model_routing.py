@@ -10,6 +10,12 @@ from __future__ import annotations
 
 import pytest
 
+# Imported here, at collection time, on purpose. app.py binds its dependencies
+# by value (`from ollama_client import list_models`), so importing it for the
+# first time from *inside* a test that has already stubbed one of them leaves
+# app holding that stub for the rest of the session — monkeypatch never patched
+# app, so it has nothing to restore.
+import app  # noqa: F401
 import ollama_client as oc
 
 # The models actually installed on the target machine.
@@ -180,9 +186,12 @@ class TestOcrInjection:
         import ollama_client
         import web
 
-        monkeypatch.setattr(ollama_client, "list_models", lambda: INSTALLED)
         monkeypatch.delenv("WEB_VISION_MODEL", raising=False)
+        # Reload first, patch second. The other order binds the stub into app's
+        # own global at import time, so monkeypatch records the *stub* as the
+        # original and restores it for the rest of the session.
         mod = importlib.reload(app_module)
+        monkeypatch.setattr(ollama_client, "list_models", lambda: INSTALLED)
         monkeypatch.setattr(mod, "list_models", lambda: INSTALLED)
         monkeypatch.setattr(mod, "vision_models", oc.vision_models)
         monkeypatch.setattr(mod, "ocr_models", oc.ocr_models)

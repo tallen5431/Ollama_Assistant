@@ -273,7 +273,10 @@ class TestReviewRegressions:
             seen["options"] = options
             yield '{"done": true}'
 
-        monkeypatch.setattr(ollama_client, "chat_stream", fake_stream)
+        # Patch the reloaded module only. Patching ollama_client *before*
+        # load_app binds the stub into app's own global at import time, so
+        # monkeypatch records the stub as the original and restores it forever
+        # — every later test in the session then streams '{"done": true}'.
         mod = load_app(monkeypatch)
         monkeypatch.setattr(mod, "chat_stream", fake_stream)
         mod.app.test_client().post("/api/chat", json={"prompt": "hi"}).get_data()
