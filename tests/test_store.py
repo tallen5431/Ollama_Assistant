@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
+
 import pytest
 
 import store
@@ -170,3 +173,78 @@ class TestUnusableDatabase:
         resp = mod.app.test_client().get("/api/health")
         assert resp.status_code == 200
         assert resp.get_json()["history"] is False
+
+
+class TestAvailabilityIsAWriteProbe:
+    """Opening a database proves almost nothing.
+
+    On an existing file sqlite allocates no page, so a corrupt database opened
+    cleanly and available() returned True forever while every write failed —
+    reported as history: true on /api/health, with no reload recovering. After
+    a power cut on a small always-on box, SQLITE_CORRUPT is the realistic
+    trigger, not a full disk.
+    """
+
+    def test_a_corrupt_database_is_reported_unavailable(self, tmp_path, monkeypatch):
+        bad = tmp_path / "chat.db"
+        bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)   # header-shaped, junk body
+        monkeypatch.setenv("CHAT_DB", str(bad))
+        assert store.available() is False
+
+    def test_a_healthy_database_is_available(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAT_DB", str(tmp_path / "chat.db"))
+        assert store.available() is True
+
+    def test_the_probe_leaves_nothing_behind(self, tmp_path, monkeypatch):
+        path = tmp_path / "chat.db"
+        monkeypatch.setenv("CHAT_DB", str(path))
+        store.available()
+        names = {r[0] for r in sqlite3.connect(str(path)).execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert not any(n.startswith("_probe") for n in names), names
+
+    def test_a_concurrent_write_is_not_mistaken_for_a_failure(self, tmp_path, monkeypatch):
+        """Locked means something is writing to it — a sign of health."""
+        path = tmp_path / "chat.db"
+        monkeypatch.setenv("CHAT_DB", str(path))
+        store.available()
+        blocker = sqlite3.connect(str(path), timeout=1)
+        blocker.execute("BEGIN EXCLUSIVE")
+        try:
+            started = time.monotonic()
+            assert store.available() is True
+            # And it must not stall the page load it runs on.
+            assert time.monotonic() - started < 3
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+
+class TestStoreFailuresReachTheClient:
+    def test_a_database_error_is_json_not_an_html_500(self, tmp_path, monkeypatch):
+        """The client parsed the HTML error page as a failed fetch and ignored
+        it, so history silently stopped accumulating while chat looked fine."""
+        import importlib
+        import app as app_module
+
+        bad = tmp_path / "chat.db"
+        bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
+        monkeypatch.setenv("CHAT_DB", str(bad))
+        mod = importlib.reload(app_module)
+
+        resp = mod.app.test_client().post("/api/conversations", json={"title": "x"})
+        assert resp.status_code == 503
+        assert resp.headers["Content-Type"].startswith("application/json")
+        body = resp.get_json()
+        assert body["history"] is False
+        assert "could not be written" in body["error"]
+
+    def test_health_reports_history_as_unavailable(self, tmp_path, monkeypatch):
+        import importlib
+        import app as app_module
+
+        bad = tmp_path / "chat.db"
+        bad.write_bytes(b"SQLite format 3\x00" + b"\x00" * 200)
+        monkeypatch.setenv("CHAT_DB", str(bad))
+        mod = importlib.reload(app_module)
+        assert mod.app.test_client().get("/api/health").get_json()["history"] is False

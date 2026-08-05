@@ -58,6 +58,12 @@ _OK_TYPES = ("text/html", "text/plain", "application/xhtml", "application/json")
 
 _MAX_REDIRECTS = 4
 
+# A remote host that drops the SYN should not be able to spend the whole page
+# budget doing nothing. Name resolution gets its own cap for the same reason:
+# it has no timeout of its own and sits outside every deadline in this module.
+_CONNECT_TIMEOUT = 5.0
+_RESOLVE_TIMEOUT = 5.0
+
 # Enough of a search snippet to be worth reading, short enough that a handful
 # of them can't crowd out the pages that were actually fetched.
 _SNIPPET_MAX = 400
@@ -103,6 +109,38 @@ class _Deadline:
 # ---------------------------------------------------------------------------
 
 
+def _resolve(host: str, timeout: float) -> Any:
+    """getaddrinfo, but bounded.
+
+    Name resolution has no timeout of its own and sits outside every deadline
+    in this module: a host whose nameserver blackholes queries held a waitress
+    worker for the resolver's own retry schedule — measured at 16 s against a
+    3 s budget — and four such hosts occupy the whole default thread pool, at
+    which point the chat UI stops responding.
+
+    A daemon thread rather than a pool: a pool's context manager joins its
+    workers on exit, so the caller would wait out the very lookup it timed out
+    on. This one is abandoned — it finishes into a result nobody reads and the
+    interpreter will not wait for it at exit.
+    """
+    box: Dict[str, Any] = {}
+
+    def lookup():
+        try:
+            box["infos"] = socket.getaddrinfo(host, None)
+        except Exception as exc:  # noqa: BLE001 - reported via the box
+            box["error"] = exc
+
+    worker = threading.Thread(target=lookup, daemon=True)
+    worker.start()
+    worker.join(max(1.0, timeout))
+    if worker.is_alive():
+        raise socket.gaierror(f"timed out resolving {host}")
+    if "error" in box:
+        raise box["error"]
+    return box.get("infos")
+
+
 def _is_public(host: str) -> bool:
     """True only when every address ``host`` resolves to is on the public net.
 
@@ -111,7 +149,7 @@ def _is_public(host: str) -> bool:
     carrier range that Tailscale uses.
     """
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = _resolve(host, _RESOLVE_TIMEOUT)
     except (socket.gaierror, UnicodeError, ValueError):
         return False
     if not infos:
@@ -267,13 +305,23 @@ def _get(
     # checked like any other URL.
     current = url if trusted else check_url(url)
     for _ in range(_MAX_REDIRECTS):
+        # requests' read timeout resets on every recv, so a server trickling
+        # header bytes renews it indefinitely. The wall clock is the only thing
+        # that actually bounds a hop; check it before each one and again after.
+        if budget.expired():
+            raise WebError("Timed out before the page could be fetched")
         resp = _SESSION.get(
             current,
-            timeout=budget.remaining(),
+            # (connect, read) rather than a scalar: a host that blackholes the
+            # SYN should be given up on well before the whole page budget.
+            timeout=(min(_CONNECT_TIMEOUT, budget.remaining()), budget.remaining()),
             allow_redirects=False,
             stream=True,
             headers={"User-Agent": _UA, "Accept-Language": "en", **(headers or {})},
         )
+        if budget.expired():
+            resp.close()
+            raise WebError("Timed out while fetching the page")
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location")
             resp.close()

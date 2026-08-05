@@ -1208,25 +1208,43 @@ _PAGE = """<!doctype html>
 
       // Create on first use rather than on page load, so idly opening the app
       // does not litter the list with empty conversations.
+      // History failing is not worth blocking the chat over — but it is worth
+      // saying. Neither of these checked resp.ok, so a 503 from a full or
+      // corrupt database resolved normally, the catch never ran, and the
+      // conversation list quietly stopped growing while chatting looked fine.
+      let historyBroken = false;
+      function noteHistoryBroken(detail) {
+        if (historyBroken) return;
+        historyBroken = true;
+        hintEl.textContent = detail ||
+          "Conversations are no longer being saved — the history database could not be written.";
+      }
+
       async function ensureConversation(firstMessage) {
         if (!historyOn || currentConvoId) return currentConvoId;
         try {
           const resp = await fetch("api/conversations", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: firstMessage || "", model: modelEl.value || null }) });
-          currentConvoId = (await resp.json()).id;
-        } catch (e) { currentConvoId = null; }
+          const data = await resp.json();
+          if (!resp.ok || !data.id) { noteHistoryBroken(data.error); currentConvoId = null; }
+          else { currentConvoId = data.id; historyBroken = false; }
+        } catch (e) { noteHistoryBroken(); currentConvoId = null; }
         return currentConvoId;
       }
 
       async function saveMessage(role, content, images, sources) {
         if (!historyOn || !currentConvoId) return;
         try {
-          await fetch("api/conversations/" + currentConvoId + "/messages", {
+          const resp = await fetch("api/conversations/" + currentConvoId + "/messages", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ role: role, content: content,
                                    images: images || null, sources: sources || null }) });
-        } catch (e) { /* history is a convenience; never block the chat on it */ }
+          if (!resp.ok) {
+            const data = await resp.json().catch(function () { return {}; });
+            noteHistoryBroken(data.error);
+          } else { historyBroken = false; }
+        } catch (e) { noteHistoryBroken(); }
       }
 
       async function loadConversation(id) {

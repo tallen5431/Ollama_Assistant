@@ -84,10 +84,36 @@ def _connect() -> Iterator[sqlite3.Connection]:
 
 
 def available() -> bool:
-    """Whether history can be stored (the file is creatable and writable)."""
+    """Whether history can be stored — checked by writing, not by opening.
+
+    Opening proves almost nothing: on an existing database sqlite allocates no
+    page, so a full disk and a corrupt file both opened cleanly and this
+    returned True forever while every write failed. The realistic trigger on a
+    small always-on box is not disk-full but SQLITE_CORRUPT after a power cut,
+    and no reload recovered from it because nothing ever noticed.
+    """
     try:
-        with _connect():
+        with _connect() as conn:
+            # BEGIN IMMEDIATE takes a write lock and forces the journal to be
+            # created, which is what actually fails on a read-only mount or a
+            # full disk — then rolls back, so nothing is left in the file. On a
+            # corrupt database _connect's schema step has already raised.
+            # The short busy timeout keeps this off the critical path: it runs
+            # on every page load, and the default 10 s would stall the UI
+            # behind an ordinary concurrent write.
+            conn.execute("PRAGMA busy_timeout = 300")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.rollback()
             return True
+    except sqlite3.OperationalError as exc:
+        # Being locked means the database exists and something is writing to
+        # it — a sign of health, not of failure. Reporting "history
+        # unavailable" because another device saved a message at the same
+        # moment would be worse than not checking at all.
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            return True
+        logger.warning("Conversation history unavailable (%s): %s", db_path(), exc)
+        return False
     # OSError too, not just sqlite3.Error: _connect() creates the parent
     # directory first, so an unwritable or nonsensical CHAT_DB raises
     # PermissionError/FileExistsError/EROFS before sqlite is ever reached — and

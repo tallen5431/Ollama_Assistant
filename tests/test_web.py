@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -906,3 +907,30 @@ class TestCharsetDecoding:
 
     def test_undecodable_bytes_do_not_raise(self):
         assert web._decode(b"\xff\xfe\x00bad", "text/html")
+
+
+class TestResolverIsBounded:
+    """getaddrinfo has no timeout and sits outside every deadline here.
+
+    A host whose nameserver blackholes queries held a waitress worker for the
+    resolver's own retry schedule; four of them occupy the whole default thread
+    pool, at which point the chat UI stops responding.
+    """
+
+    def test_a_hanging_resolver_does_not_hold_the_worker(self, monkeypatch):
+        import socket as socket_module
+
+        def blackhole(host, port):
+            time.sleep(30)
+            return [(2, 1, 6, "", ("1.2.3.4", 0))]
+
+        monkeypatch.setattr(socket_module, "getaddrinfo", blackhole)
+        monkeypatch.setattr(web, "_RESOLVE_TIMEOUT", 1.0)
+        started = time.monotonic()
+        with pytest.raises(web.WebError, match="private or local"):
+            web.check_url("https://blackhole.example/")
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, f"waited {elapsed:.1f}s on a hung resolver"
+
+    def test_a_normal_lookup_is_unaffected(self):
+        assert web.check_url("http://8.8.8.8/") == "http://8.8.8.8/"

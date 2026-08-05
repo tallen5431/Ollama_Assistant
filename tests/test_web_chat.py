@@ -349,3 +349,59 @@ class TestSearchedButFoundNothing:
         system = chat_call["messages"][0]["content"]
         assert "came back with nothing usable" not in system
         assert "Widget 5 shipped on Tuesday" in system
+
+
+class TestFetchesDoNotWaitOnStragglers:
+    """Six candidates are fetched to keep three, because paywalled and dead
+    pages are the normal case. Waiting for the slowest of six after three had
+    landed cost up to two full timeouts of dead air before the first token —
+    and a pool capped at four ran them in two waves on top of that."""
+
+    def test_the_turn_proceeds_once_enough_pages_have_landed(self):
+        import time as clock
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            if "slow" in url:
+                clock.sleep(5)
+            return {"url": url, "title": url, "text": "body"}
+
+        started = clock.monotonic()
+        docs, _ = app_module._run_all(
+            fetch, ["fast1", "slow1", "fast2", "slow2", "fast3", "slow3"], enough=3)
+        elapsed = clock.monotonic() - started
+
+        assert len(docs) == 3
+        assert elapsed < 2, f"waited {elapsed:.1f}s for stragglers"
+
+    def test_six_candidates_run_in_one_wave_not_two(self):
+        """The pool was capped at four, so URLs 5 and 6 could not start until
+        two others finished — a second full timeout on top of the first."""
+        import time as clock
+
+        def fetch(url):
+            clock.sleep(2)
+            return {"url": url, "title": url, "text": "body"}
+
+        started = clock.monotonic()
+        docs, _ = app_module._run_all(fetch, [f"u{i}" for i in range(6)])
+        elapsed = clock.monotonic() - started
+
+        assert len(docs) == 6
+        assert elapsed < 3.5, f"took {elapsed:.1f}s — that is two waves, not one"
+
+    def test_without_a_target_it_still_waits_for_everything(self):
+        import time as clock
+        docs, _ = app_module._run_all(
+            lambda u: {"url": u, "title": u, "text": "b"}, ["a", "b", "c"])
+        assert len(docs) == 3
+
+    def test_fewer_successes_than_wanted_does_not_hang(self):
+        import time as clock
+        def fetch(url):
+            raise web.WebError("dead")
+        started = clock.monotonic()
+        docs, errors = app_module._run_all(fetch, ["a", "b"], enough=3)
+        assert docs == [] and len(errors) == 2
+        assert clock.monotonic() - started < 2

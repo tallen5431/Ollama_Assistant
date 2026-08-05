@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -163,6 +164,24 @@ def api_models() -> Any:
 # -------------------------------------------------------------------
 # Conversation history
 # -------------------------------------------------------------------
+
+
+@app.errorhandler(sqlite3.Error)
+def _store_unavailable(exc: sqlite3.Error) -> Any:
+    """Report a database failure as JSON, not as an HTML 500.
+
+    None of the history routes caught sqlite3.Error, so a corrupt or full
+    database produced Flask's HTML error page — which the client parsed as a
+    failed fetch and then ignored, because saveMessage checked neither resp.ok
+    nor the body. History silently stopped accumulating while the chat carried
+    on working perfectly.
+    """
+    logger.error("History database error: %s", exc)
+    return jsonify({
+        "error": "Conversation history is unavailable — the database could not "
+                 "be written. Chatting still works; nothing is being saved.",
+        "history": False,
+    }), 503
 
 
 @app.route("/api/conversations", methods=["GET"])
@@ -423,7 +442,7 @@ def _gather_web(
 
     urls = [r["url"] for r in results]
     yield _line({"status": "Reading " + ", ".join(_host_of(u) for u in urls[:max_docs]) + "…"})
-    fetched, _ = _run_all(web.fetch, urls)
+    fetched, _ = _run_all(web.fetch, urls, enough=max_docs)
     documents.extend(fetched[:max_docs])
 
     # Paywalled, JS-only and dead pages are routine. Their search snippets are
@@ -482,28 +501,52 @@ def _image_reader(answering_model: str) -> Any:
         return "", False
 
 
-def _run_all(func: Any, items: List[Any]) -> Any:
+def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
     """Run ``func`` over ``items`` concurrently, returning (results, errors).
 
     Order is preserved so interleaving and ranking stay deterministic; a WebError
     for one item is collected rather than raised, since one dead link must not
     cost the others.
+
+    ``enough`` stops waiting once that many have succeeded. Fetching six
+    candidates to keep three meant the turn waited for the slowest of six even
+    when three had long since landed — worst case two full timeouts of dead air
+    before the first token, since a pool of four also ran them in two waves.
     """
     if not items:
         return [], []
     results: List[Any] = [None] * len(items)
     errors: List[str] = []
-    with ThreadPoolExecutor(max_workers=min(4, len(items))) as pool:
+    done = 0
+    # These are pure I/O waits, so the pool can be as wide as the work — one
+    # wave rather than two, and a stuck fetch no longer delays a queued one.
+    #
+    # Not a `with` block: the context manager joins every worker on exit, which
+    # would undo the early return entirely — the turn would still wait for the
+    # slowest of six after the third had landed.
+    pool = ThreadPoolExecutor(max_workers=min(8, len(items)))
+    futures: Dict[Any, int] = {}
+    try:
         futures = {pool.submit(func, item): i for i, item in enumerate(items)}
         for future in as_completed(futures):
             index = futures[future]
             try:
                 results[index] = future.result()
+                done += 1
             except web.WebError as exc:
                 errors.append(str(exc))
             except Exception as exc:  # noqa: BLE001 - one bad item, not the turn
                 logger.info("Retrieval failed for %r: %s", items[index], exc)
                 errors.append(str(exc))
+            if enough is not None and done >= enough:
+                break
+    finally:
+        # Drop what has not started; abandon what has. Each in-flight fetch is
+        # bounded by its own wall-clock deadline, so nothing runs forever.
+        # cancel() rather than shutdown(cancel_futures=...), which needs 3.9.
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False)
     return [r for r in results if r], errors
 
 
