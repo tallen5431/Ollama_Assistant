@@ -289,3 +289,33 @@ class TestScrollFollowing:
     def test_your_own_message_always_jumps_to_the_bottom(self):
         top = self.run_scroll("scrollTo(100); chatEl.scrollHeight = 1200; scrollDown(true);")
         assert top == 1200, "sending a message must always show it"
+
+    def test_a_queued_frame_does_not_yank_you_back(self):
+        """A frame already queued when the user scrolls away must not fire.
+
+        Firing it blindly both moved the view and re-armed following, because
+        an auto-scroll raises a scroll event of its own.
+        """
+        page = _page()
+        js = "\n".join([
+            r"""
+            let listener = null, pendingFrame = null;
+            const chatEl = {
+              scrollHeight: 2000, clientHeight: 200, scrollTop: 1800,
+              addEventListener(name, fn) { listener = fn; },
+            };
+            function requestAnimationFrame(fn) { pendingFrame = fn; }
+            function runFrame() { const f = pendingFrame; pendingFrame = null; if (f) f(); }
+            function scrollTo(top) { chatEl.scrollTop = top; listener(); }
+            """,
+            _slice(page, "      let scrollPending = false;", "      function clearPlaceholder"),
+            r"""
+            scrollDown();      // a frame is queued while we are at the bottom
+            scrollTo(0);       // the user scrolls up before it runs
+            runFrame();        // the queued frame fires
+            process.stdout.write(JSON.stringify(chatEl.scrollTop));
+            """,
+        ])
+        top = json.loads(subprocess.run(["node", "-e", js], capture_output=True,
+                                        text=True, check=True).stdout)
+        assert top == 0, "a queued frame dragged the view back to the bottom"

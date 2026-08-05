@@ -18,6 +18,10 @@ _PAGE = """<!doctype html>
     <meta charset="utf-8">
     <title>__TITLE__</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <!-- Inline, so there is no favicon request to 404 on every page load, and a
+         home-screen shortcut on a phone gets an icon rather than a blank page. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 11h16M8 16h16M8 21h10' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+    <meta name="theme-color" content="#0b1120">
     <style>
       :root {
         --bg:#0b1120; --panel:#0f172a; --panel2:#111c33; --border:#1e293b;
@@ -320,17 +324,32 @@ _PAGE = """<!doctype html>
       // Scrolling up to re-read the question during a long answer used to drag
       // you back on every token, and the only way out was to press Stop.
       let stickBottom = true;
+      let lastAutoTop = -1;      // where our own last auto-scroll left it
       function atBottom() {
         return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80;
       }
-      chatEl.addEventListener("scroll", () => { stickBottom = atBottom(); }, { passive: true });
+      chatEl.addEventListener("scroll", () => {
+        // Our own auto-follow fires this event too; reacting to it would reset
+        // the flag we are trying to honour. Only a scroll we did not cause
+        // counts as the user expressing a preference.
+        if (lastAutoTop >= 0 && Math.abs(chatEl.scrollTop - lastAutoTop) < 2) return;
+        stickBottom = atBottom();
+      }, { passive: true });
 
       function scrollDown(force) {
         if (force) stickBottom = true;
         if (!stickBottom) return;
         if (scrollPending) return;
         scrollPending = true;
-        requestAnimationFrame(() => { scrollPending = false; chatEl.scrollTop = chatEl.scrollHeight; });
+        requestAnimationFrame(() => {
+          scrollPending = false;
+          // Re-checked here, not only above: a frame was already queued when
+          // the user scrolled away, and firing it blindly yanked them back and
+          // re-armed the follow — which is what made the first fix ineffective.
+          if (!stickBottom) return;
+          chatEl.scrollTop = chatEl.scrollHeight;
+          lastAutoTop = chatEl.scrollTop;
+        });
       }
 
 
