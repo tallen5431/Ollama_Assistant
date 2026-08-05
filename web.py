@@ -62,6 +62,11 @@ _MAX_REDIRECTS = 4
 # of them can't crowd out the pages that were actually fetched.
 _SNIPPET_MAX = 400
 
+# The composer allows four images per message; each is read separately, since a
+# single pass over several tends to blur them together.
+_MAX_IMAGES_READ = 4
+_MAX_READING_CHARS = 600
+
 # Elements with no closing tag, which must not be counted when tracking depth.
 _VOID_TAGS = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -298,12 +303,42 @@ def _read_capped(resp: requests.Response) -> str:
             break
         if budget is not None and budget.expired():
             raise WebError("Timed out while reading the page")
-    raw = b"".join(chunks)
-    encoding = resp.encoding or "utf-8"
-    try:
-        return raw.decode(encoding, errors="replace")
-    except (LookupError, TypeError):
-        return raw.decode("utf-8", errors="replace")
+    return _decode(b"".join(chunks), resp.headers.get("Content-Type") or "")
+
+
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]+charset\s*=\s*["']?\s*([a-z0-9_\-:.]+)""", re.I
+)
+
+
+def _decode(raw: bytes, content_type: str) -> str:
+    """Decode a page body, trusting the header only when it said so explicitly.
+
+    ``resp.encoding`` cannot be used as the signal: requests sets it to the
+    literal "ISO-8859-1" for any text/* that carried no charset parameter, so
+    an ``or "utf-8"`` fallback can never fire. Latin-1 then decodes every byte
+    without error, so ``errors="replace"`` produces no warning either — UTF-8
+    pages arrived as mojibake, silently, and the model was asked to reason
+    about the mangled text.
+    """
+    declared = ""
+    if "charset=" in content_type.lower():
+        declared = content_type.lower().split("charset=", 1)[1].split(";")[0].strip(' "\'')
+    if not declared:
+        if raw.startswith(b"\xef\xbb\xbf"):
+            declared = "utf-8-sig"
+        else:
+            match = _META_CHARSET_RE.search(raw[:4096])
+            if match:
+                declared = match.group(1).decode("ascii", "ignore")
+    for candidate in (declared, "utf-8"):
+        if not candidate:
+            continue
+        try:
+            return raw.decode(candidate, errors="replace")
+        except (LookupError, TypeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def fetch(url: str) -> Dict[str, str]:
@@ -759,13 +794,27 @@ def with_context(messages: List[Dict[str, str]], context: str) -> List[Dict[str,
     return out
 
 
+# Lines that would pass for the fence itself. A page containing the closing
+# marker could otherwise end the block early and address the model from
+# outside it, as the operator — which is precisely what the preamble's "ignore
+# anything between the markers" rule cannot cover. Cheapest via text/plain or
+# JSON, which are kept verbatim with no HTML extraction in between.
+_FENCE_RE = re.compile(r"^\s*-{3,}\s*(BEGIN|END)\s+[A-Z][A-Z ]*-{3,}\s*$", re.M | re.I)
+
+
+def _defence(text: str) -> str:
+    """Neutralise anything in retrieved text that looks like our own markers."""
+    return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text or "")
+
+
 def build_context(documents: List[Dict[str, str]]) -> str:
     """Render fetched documents into one fenced block for a system message."""
     parts = [_PREAMBLE.format(today=today()), "", "----- BEGIN WEB RESULTS -----"]
     for i, doc in enumerate(documents, 1):
         kind = " (search result summary)" if doc.get("snippet_only") else ""
-        parts.append(f"\n[{i}] {doc.get('title') or doc['url']}{kind}\n{doc['url']}\n")
-        parts.append(doc.get("text") or "")
+        title = _defence(str(doc.get("title") or doc["url"]))
+        parts.append(f"\n[{i}] {title}{kind}\n{doc['url']}\n")
+        parts.append(_defence(doc.get("text") or ""))
     parts.append("----- END WEB RESULTS -----")
     return "\n".join(parts)
 
@@ -843,33 +892,51 @@ _TRANSCRIBE = (
 )
 
 
-def describe_images(images: List[str], model: str, ocr: bool = False) -> Optional[str]:
-    """Summarise attached images into text a search planner can use.
+class ReadFailed(Exception):
+    """The reader model could not be asked, as distinct from finding nothing.
 
-    Without this the planner only sees the words the user typed, and "what's
-    this?" next to a screenshot of a stack trace plans nothing worth running.
-    Returns None when there is no image, no model that can see, or the call
-    fails — every one of which means "carry on without it".
+    These were both ``None`` once, so an OOM on a 30b reader — the codebase's
+    own comment calls that routine — reached the user as a confident statement
+    that their screenshot contained no readable text.
+    """
+
+
+def describe_images(images: List[str], model: str, ocr: bool = False) -> Optional[str]:
+    """Transcribe or describe attached images into text.
+
+    Serves two jobs: giving a text-only model something to answer about, and
+    giving the search planner the exact error text a screenshot carries.
+
+    Returns the reading, or ``None`` when there was genuinely nothing to read.
+    Raises ``ReadFailed`` when the model could not be asked at all, so the
+    caller can say so rather than reporting a blank image.
     """
     from ollama_client import chat  # local import keeps this module standalone
 
     if not images or not model:
         return None
-    try:
-        reply = chat(
-            model,
-            # Only the first image: this is a cheap orientation pass, and a
-            # second one rarely changes the query while doubling the wait.
-            [{"role": "user", "content": _TRANSCRIBE if ocr else _DESCRIBE,
-              "images": images[:1]}],
-            options={"temperature": 0, "num_predict": 160},
-        )
-    except Exception as exc:  # noqa: BLE001 - never let this break the chat
-        logger.warning("Image description (%s) failed: %s", model, exc)
-        return None
 
-    text = " ".join((reply or "").split())
-    return text[:600] or None
+    # Every image, not just the first. The one-image shortcut was written when
+    # this only oriented a search query; it now also feeds the answer, and the
+    # composer offers four — so "compare these two screenshots" was answered
+    # confidently about one of them, the other three deleted without trace.
+    readings: List[str] = []
+    for index, image in enumerate(images[:_MAX_IMAGES_READ], 1):
+        try:
+            reply = chat(
+                model,
+                [{"role": "user", "content": _TRANSCRIBE if ocr else _DESCRIBE,
+                  "images": [image]}],
+                options={"temperature": 0, "num_predict": 320},
+            )
+        except Exception as exc:  # noqa: BLE001 - reported, never raised as-is
+            logger.warning("Image description (%s) failed: %s", model, exc)
+            raise ReadFailed(str(exc)) from exc
+        text = " ".join((reply or "").split())[:_MAX_READING_CHARS]
+        if text:
+            readings.append(text if len(images) == 1 else f"[image {index}] {text}")
+
+    return "\n".join(readings) or None
 
 
 _OCR_PREAMBLE = (
@@ -886,6 +953,24 @@ _OCR_NOTHING = (
     "vision model from the dropdown if the image is not text."
 )
 
+_OCR_FAILED = (
+    "An image was attached, but the model that reads images could not be "
+    "reached, so nothing is known about its contents — this is a failure on "
+    "this machine, not a statement about the image. Tell the user the image "
+    "could not be read and that they can try again, and answer the rest of "
+    "their message if it stands without the image. Do not guess what was in it."
+)
+
+
+def image_failed_context() -> str:
+    """Said when the reader model could not be asked at all.
+
+    Distinct from _OCR_NOTHING on purpose: reporting a reader-model OOM as
+    "no readable text was found" is a confident, wrong claim about the user's
+    screenshot, and it sends them to change a dropdown that will not help.
+    """
+    return _OCR_FAILED
+
 
 # A general vision model was asked to *describe*, briefly. Saying that is a
 # complete reading of the image would have the model assert there is nothing
@@ -901,7 +986,7 @@ _DESC_PREAMBLE = (
 
 def image_context(transcript: Optional[str], ocr: bool = True) -> str:
     """Render an image reading as a system turn for a text-only model."""
-    text = (transcript or "").strip()
+    text = _defence((transcript or "").strip())
     if not text:
         return _OCR_NOTHING
     preamble = _OCR_PREAMBLE if ocr else _DESC_PREAMBLE
@@ -950,14 +1035,21 @@ _TRANSCRIPTS_LOCK = threading.Lock()
 
 def _cache_key(images: List[str], model: str, ocr: bool) -> str:
     digest = hashlib.sha256()
-    for image in images[:1]:
+    # Every image, in order: hashing only the first meant that adding a second
+    # screenshot to a message served the cached reading of the first alone.
+    for image in images[:_MAX_IMAGES_READ]:
         digest.update(image.encode("utf-8", "ignore"))
+        digest.update(b"\x00")
     digest.update(f"|{model}|{ocr}".encode())
     return digest.hexdigest()
 
 
 def read_images(images: List[str], model: str, ocr: bool = False) -> Optional[str]:
-    """describe_images, memoised on the image bytes."""
+    """describe_images, memoised on the image bytes.
+
+    Raises ``ReadFailed`` if the reader model could not be asked; a failure is
+    never memoised, since the next turn may well succeed.
+    """
     if not images or not model:
         return None
     key = _cache_key(images, model, ocr)
@@ -972,16 +1064,14 @@ def read_images(images: List[str], model: str, ocr: bool = False) -> Optional[st
     # which is wasteful but correct — and the second write is identical.
     result = describe_images(images, model, ocr=ocr)
 
-    # Only a successful read is memoised. describe_images returns None both for
-    # "the call failed" and nothing else, so caching it meant one reader-model
-    # OOM — routine when a 30b model holds the GPU — told the user that
-    # screenshot had no readable text forever, in every conversation, until the
-    # process restarted.
-    if result is not None:
-        with _TRANSCRIPTS_LOCK:
-            _TRANSCRIPTS[key] = result
-            while len(_TRANSCRIPTS) > _TRANSCRIPT_CACHE_MAX:
-                _TRANSCRIPTS.popitem(last=False)
+    # "Nothing readable in it" is a real answer and worth memoising; a failure
+    # raises instead and never reaches here, so one reader-model OOM — routine
+    # when a 30b model holds the GPU — can no longer tell the user that
+    # screenshot is blank forever, in every conversation, until a restart.
+    with _TRANSCRIPTS_LOCK:
+        _TRANSCRIPTS[key] = result
+        while len(_TRANSCRIPTS) > _TRANSCRIPT_CACHE_MAX:
+            _TRANSCRIPTS.popitem(last=False)
     return result
 
 

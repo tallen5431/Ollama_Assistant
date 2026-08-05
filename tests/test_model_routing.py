@@ -303,6 +303,89 @@ class TestOcrInjection:
         assert system and "can't concat str to bytes" in system[0]["content"]
 
 
+class TestEveryImageIsRead:
+    """The composer offers four images per message; one used to be read.
+
+    describe_images sliced to images[:1] — written when it only oriented a
+    search query — while app.py stripped all four from the payload and the
+    preamble told the model the single reading "is all there is of it". So
+    "compare these two screenshots" was answered confidently about one.
+    """
+
+    def test_all_four_images_reach_the_reader(self, monkeypatch):
+        import web
+        seen = []
+
+        def capture(model, messages, options=None, think=None):
+            seen.append(messages[0]["images"])
+            return f"reading {len(seen)}"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        out = web.describe_images(["a", "b", "c", "d"], "glm-ocr:latest", ocr=True)
+        assert seen == [["a"], ["b"], ["c"], ["d"]], "each image read on its own"
+        for n in range(1, 5):
+            assert f"reading {n}" in out
+
+    def test_multiple_readings_are_labelled(self, monkeypatch):
+        import web
+        monkeypatch.setattr("ollama_client.chat",
+                            lambda *a, **k: "some text")
+        out = web.describe_images(["a", "b"], "glm-ocr:latest", ocr=True)
+        assert "[image 1]" in out and "[image 2]" in out
+
+    def test_a_single_image_is_not_labelled(self, monkeypatch):
+        import web
+        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "some text")
+        assert web.describe_images(["a"], "glm-ocr:latest", ocr=True) == "some text"
+
+    def test_adding_a_second_image_is_not_served_from_the_first_ones_cache(self, monkeypatch):
+        """The cache key hashed images[:1] too, so it collided."""
+        import web
+        calls = []
+        monkeypatch.setattr(web, "describe_images",
+                            lambda images, model, ocr=False: calls.append(tuple(images)) or "t")
+        web.read_images(["a"], "m", ocr=True)
+        web.read_images(["a", "b"], "m", ocr=True)
+        assert calls == [("a",), ("a", "b")], "the two-image message was served the one-image reading"
+
+
+class TestReadFailureIsNotAFactAboutTheImage:
+    def test_a_reader_failure_says_so_rather_than_claiming_the_image_is_blank(self, monkeypatch):
+        import importlib
+        import app as app_module
+        import ollama_client
+        import web
+
+        monkeypatch.delenv("WEB_VISION_MODEL", raising=False)
+        mod = importlib.reload(app_module)   # reload first, patch second
+        monkeypatch.setattr(ollama_client, "list_models", lambda: INSTALLED)
+        monkeypatch.setattr(mod, "list_models", lambda: INSTALLED)
+        monkeypatch.setattr(mod, "vision_models", oc.vision_models)
+        monkeypatch.setattr(mod, "ocr_models", oc.ocr_models)
+
+        seen = {}
+
+        def fake_stream(model, messages, options=None):
+            seen["messages"] = messages
+            yield '{"message": {"content": "ok"}, "done": true}'
+
+        monkeypatch.setattr(web, "describe_images",
+                            lambda *a, **k: (_ for _ in ()).throw(web.ReadFailed("OOM")))
+        monkeypatch.setattr(mod, "chat_stream", fake_stream)
+
+        body = mod.app.test_client().post("/api/chat", json={
+            "model": "qwen3-coder:30b",
+            "messages": [{"role": "user", "content": "what's wrong?", "images": ["aW1n"]}],
+        }).get_data(as_text=True)
+
+        system = [m for m in seen["messages"] if m["role"] == "system"][0]["content"]
+        assert "could not be reached" in system
+        assert "not a statement about the image" in system
+        assert "no readable text" not in system, "a failure was reported as a blank image"
+        # And the user is told, rather than only the log.
+        assert "could not read the image" in body
+
+
 class TestCapabilityPrecedence:
     """Ollama's capability list beats a family name where both are present."""
 
@@ -395,21 +478,34 @@ class TestTranscriptReuse:
     def test_a_failed_read_is_not_memoised(self, monkeypatch):
         """An OOM on the reader must not become that image's permanent answer.
 
-        describe_images returns None both for "the call failed" and for "no
-        text", so caching it meant one 30b model holding the GPU told the user
-        their screenshot was blank forever, in every conversation.
+        A 30b model holding the GPU is routine, and caching that failure told
+        the user their screenshot was unreadable forever, in every conversation.
         """
         import web
-        results = [None, "TypeError: x"]
         calls = []
-        monkeypatch.setattr(
-            web, "describe_images",
-            lambda images, model, ocr=False: calls.append(model) or results.pop(0),
-        )
+
+        def flaky(images, model, ocr=False):
+            calls.append(model)
+            if len(calls) == 1:
+                raise web.ReadFailed("model runner has exited")
+            return "TypeError: x"
+
+        monkeypatch.setattr(web, "describe_images", flaky)
+        with pytest.raises(web.ReadFailed):
+            web.read_images(["aW1n"], "glm-ocr:latest", ocr=True)
+        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
+        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
+        assert len(calls) == 2, f"expected one retry then a cache hit, got {len(calls)} calls"
+
+    def test_an_image_with_genuinely_no_text_is_memoised(self, monkeypatch):
+        """"Nothing readable in it" is a real answer, unlike a failure."""
+        import web
+        calls = []
+        monkeypatch.setattr(web, "describe_images",
+                            lambda images, model, ocr=False: calls.append(model) or None)
         assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) is None
-        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
-        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
-        assert len(calls) == 2, f"retried {len(calls)} times, expected 2"
+        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) is None
+        assert len(calls) == 1, "a blank image should not be re-read every turn"
 
     def test_the_cache_is_bounded(self, monkeypatch):
         import web

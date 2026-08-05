@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterator, List
 
 import requests
 
-from config import get_ollama_base, get_request_timeout, logger
+from config import get_ollama_base, get_timeouts, logger
 
 # Never route Ollama calls through a proxy — the server is on the local
 # network / tailnet and must be reached directly.
@@ -26,7 +26,11 @@ _NO_PROXY = {"http": None, "https": None}
 def get_ollama(path: str, timeout: float | None = None) -> Dict[str, Any]:
     """GET JSON from Ollama and return parsed JSON, or raise ValueError."""
     url = get_ollama_base() + path
-    timeout = get_request_timeout() if timeout is None else timeout
+    # (connect, read): a generous read budget is right for a model that
+    # thinks for minutes, but as a scalar it is also the connect budget —
+    # and a sleeping tailnet peer drops the SYN rather than refusing it, so
+    # the call hung for the whole five minutes before saying anything.
+    timeout = get_timeouts() if timeout is None else timeout
 
     try:
         resp = requests.get(url, timeout=timeout, proxies=_NO_PROXY)
@@ -40,7 +44,11 @@ def get_ollama(path: str, timeout: float | None = None) -> Dict[str, Any]:
 def post_ollama(path: str, payload: Dict[str, Any], timeout: float | None = None) -> Dict[str, Any]:
     """POST JSON to Ollama and return parsed JSON, or raise ValueError."""
     url = get_ollama_base() + path
-    timeout = get_request_timeout() if timeout is None else timeout
+    # (connect, read): a generous read budget is right for a model that
+    # thinks for minutes, but as a scalar it is also the connect budget —
+    # and a sleeping tailnet peer drops the SYN rather than refusing it, so
+    # the call hung for the whole five minutes before saying anything.
+    timeout = get_timeouts() if timeout is None else timeout
 
     try:
         resp = requests.post(url, json=payload, timeout=timeout, proxies=_NO_PROXY)
@@ -78,6 +86,20 @@ def list_models() -> List[Dict[str, Any]]:
     return models if isinstance(models, list) else []
 
 
+def _rejected_think(exc: Exception) -> bool:
+    """Whether this error is Ollama refusing the "think" field specifically.
+
+    A transport failure and a 400 both surface as ValueError from post_ollama,
+    and only the second is worth retrying. post_ollama puts the response body
+    in the message, so the check is on that; a build that words it differently
+    simply does not get the retry, which is the safe direction.
+    """
+    text = str(exc).lower()
+    if "could not reach ollama" in text:
+        return False
+    return "think" in text
+
+
 def chat(
     model: str,
     messages: List[Dict[str, str]],
@@ -102,8 +124,13 @@ def chat(
 
     try:
         data = post_ollama("/api/chat", payload)
-    except ValueError:
-        if think is None:
+    except ValueError as exc:
+        # Only an Ollama that refused *this field* earns a second attempt.
+        # Retrying on any ValueError meant an unreachable host — which raises
+        # the same type — was dialled twice, doubling an already long connect
+        # timeout on the one path (search planning) that runs before the user
+        # sees a single token, and logging a misleading reason for it.
+        if think is None or not _rejected_think(exc):
             raise
         logger.info("Ollama rejected think=%s for %s; retrying without it", think, model)
         payload.pop("think")
@@ -135,7 +162,7 @@ def chat_stream(
 
     try:
         resp = requests.post(
-            url, json=payload, stream=True, timeout=get_request_timeout(), proxies=_NO_PROXY
+            url, json=payload, stream=True, timeout=get_timeouts(), proxies=_NO_PROXY
         )
     except requests.RequestException as exc:
         logger.error("Error calling Ollama at %s: %s", url, exc)

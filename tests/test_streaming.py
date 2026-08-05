@@ -16,6 +16,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+import requests
 
 import app as app_module
 import ollama_client
@@ -225,3 +226,82 @@ class TestThinkCompatibility:
     def test_think_is_absent_when_not_asked_for(self, old_ollama):
         ollama_client.chat("m", [{"role": "user", "content": "hi"}])
         assert "think" not in old_ollama.requests[0]
+
+
+class TestTimeouts:
+    """A generous read budget must not become the connect budget.
+
+    The desktop holding the models sleeps. A sleeping tailnet peer drops the
+    SYN rather than refusing it, so a scalar timeout meant the connection
+    attempt hung for the whole 300 s before the user was told anything — and a
+    web-grounded turn paid it on every call it made.
+    """
+
+    def test_connect_and_read_are_separate(self, monkeypatch):
+        seen = {}
+
+        def capture(url, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
+            raise requests.RequestException("nope")
+
+        monkeypatch.setattr(requests, "get", capture)
+        with pytest.raises(ValueError):
+            ollama_client.get_ollama("/api/tags")
+        assert isinstance(seen["timeout"], tuple), "a scalar is also the connect timeout"
+        connect, read = seen["timeout"]
+        assert connect <= 15, "a sleeping host must be given up on quickly"
+        assert read >= 60, "a 30b model legitimately takes minutes to answer"
+
+    def test_the_streaming_call_gets_them_too(self, monkeypatch):
+        seen = {}
+
+        def capture(url, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
+            raise requests.RequestException("nope")
+
+        monkeypatch.setattr(requests, "post", capture)
+        with pytest.raises(ValueError):
+            list(ollama_client.chat_stream("m", [{"role": "user", "content": "hi"}]))
+        assert isinstance(seen["timeout"], tuple)
+
+    def test_the_connect_timeout_is_configurable(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_CONNECT_TIMEOUT", "9")
+        import config
+        assert config.get_timeouts()[0] == 9
+
+    def test_a_nonsense_setting_falls_back(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_CONNECT_TIMEOUT", "soon")
+        import config
+        assert config.get_timeouts()[0] == 5
+
+
+class TestThinkRetryIsNarrow:
+    def test_an_unreachable_host_is_not_dialled_twice(self, monkeypatch):
+        """Transport failure and a rejected field are both ValueError.
+
+        Retrying on either doubled an already long connect timeout, on the one
+        path that runs before the user sees a token.
+        """
+        calls = []
+
+        def capture(url, **kwargs):
+            calls.append(1)
+            raise requests.RequestException("timed out")
+
+        monkeypatch.setattr(requests, "post", capture)
+        with pytest.raises(ValueError):
+            ollama_client.chat("m", [{"role": "user", "content": "hi"}], think=False)
+        assert len(calls) == 1, f"dialled a dead host {len(calls)} times"
+
+    def test_an_unrelated_http_error_is_not_retried(self, monkeypatch):
+        calls = []
+
+        class R:
+            ok = False
+            status_code = 404
+            text = '{"error": "model \'nope\' not found"}'
+
+        monkeypatch.setattr(requests, "post", lambda url, **kw: calls.append(1) or R())
+        with pytest.raises(ValueError):
+            ollama_client.chat("nope", [{"role": "user", "content": "hi"}], think=False)
+        assert len(calls) == 1

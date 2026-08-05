@@ -50,11 +50,32 @@ def get_default_model() -> str:
 
 
 def get_request_timeout() -> float:
-    """Return the per-request timeout (seconds) for talking to Ollama."""
+    """Return the per-request read timeout (seconds) for talking to Ollama."""
     try:
         return float(os.getenv("OLLAMA_TIMEOUT", "300"))
     except (TypeError, ValueError):
         return 300.0
+
+
+def get_connect_timeout() -> float:
+    """How long to wait for the TCP connection to Ollama, separately.
+
+    A generous read timeout is right — a 30b model can take minutes to think —
+    but passing it as a scalar makes it the *connect* timeout too. When the
+    desktop holding the models is asleep it drops the SYN rather than refusing,
+    so the connection attempt hung for the full budget: over two minutes of
+    silence before the user was told anything, and a web turn paid it on every
+    call it made.
+    """
+    try:
+        return max(1.0, float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "5")))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def get_timeouts() -> tuple:
+    """(connect, read), the shape requests wants."""
+    return (get_connect_timeout(), get_request_timeout())
 
 
 def get_max_body_bytes() -> int:

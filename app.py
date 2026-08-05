@@ -287,13 +287,19 @@ def api_chat() -> Any:
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
                     yield _line({"status": f"Reading the image with {reader}…"})
-                    transcript = web.read_images(images, reader, ocr=is_ocr_reader)
+                    try:
+                        transcript = web.read_images(images, reader, ocr=is_ocr_reader)
+                        context = web.image_context(transcript, ocr=is_ocr_reader)
+                    except web.ReadFailed as exc:
+                        # A reader-model OOM is routine when a 30b model holds
+                        # the GPU. Reporting it as "no readable text was found"
+                        # is a confident, wrong claim about the user's image.
+                        logger.warning("Image read via %s failed: %s", reader, exc)
+                        yield _line({"status": f"{reader} could not read the image."})
+                        context = web.image_failed_context()
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
-                    convo = web.with_context(
-                        web.strip_images(messages),
-                        web.image_context(transcript, ocr=is_ocr_reader),
-                    )
+                    convo = web.with_context(web.strip_images(messages), context)
 
             if use_web:
                 documents: List[Dict[str, str]] = []
@@ -384,7 +390,12 @@ def _gather_web(
             reader, is_reader_ocr = _image_reader(model)
             if reader:
                 yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
-                image_note = web.read_images(images, reader, ocr=is_reader_ocr)
+                try:
+                    image_note = web.read_images(images, reader, ocr=is_reader_ocr)
+                except web.ReadFailed as exc:
+                    # Planning without the image beats not answering.
+                    logger.warning("Image read via %s failed: %s", reader, exc)
+                    yield _line({"status": "Could not read the image; searching without it."})
 
     yield _line({"status": "Working out what to search for…"})
     queries = web.plan_searches(messages, model, image_note=image_note)

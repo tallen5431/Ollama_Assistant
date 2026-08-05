@@ -145,3 +145,44 @@ class TestTranscribeValidation:
     def test_8bit_is_rejected(self):
         with pytest.raises(ValueError, match="16-bit mono"):
             voice.transcribe(make_wav(sampwidth=1, frames=b"\x00" * 100))
+
+
+class TestTranscribeNeverDownloads:
+    """The model id comes from the client, on a CORS-simple request.
+
+    Resolving it with downloads enabled meant a request naming an unfetched
+    model made the box pull 1.8 GB before reading an audio frame, holding a
+    server thread for the whole download — and concurrent requests each pulled
+    their own copy. /api/voice/download is the deliberate way to fetch one.
+    """
+
+    def test_an_unfetched_model_is_refused_rather_than_downloaded(self, models_dir, monkeypatch):
+        downloads = []
+        monkeypatch.setattr(voice, "_download", lambda mid: downloads.append(mid))
+        monkeypatch.delenv("VOSK_MODEL_PATH", raising=False)
+
+        with pytest.raises(ValueError, match="not downloaded"):
+            voice._get_model("es", download=False)
+        assert downloads == [], "a client request triggered a 1.8 GB download"
+
+    def test_the_explicit_download_path_still_downloads(self, models_dir, monkeypatch):
+        downloads = []
+        monkeypatch.setattr(voice, "_download",
+                            lambda mid: downloads.append(mid) or models_dir / "x")
+        monkeypatch.delenv("VOSK_MODEL_PATH", raising=False)
+
+        voice._resolve_dir("es", download=True)
+        assert downloads == ["es"]
+
+    def test_transcribe_asks_for_no_download(self, models_dir, monkeypatch):
+        """The whole point: the client-facing path never fetches."""
+        seen = {}
+        monkeypatch.setattr(voice, "_get_model",
+                            lambda mid, download=True: seen.update(download=download))
+        monkeypatch.setattr(voice, "_download",
+                            lambda mid: pytest.fail("transcribe must never download"))
+        try:
+            voice.transcribe(b"RIFF____WAVEfmt ", "es")
+        except Exception:
+            pass   # the fake WAV is rejected; we only care what was asked for
+        assert seen.get("download") is not True
