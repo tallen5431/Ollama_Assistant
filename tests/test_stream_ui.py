@@ -48,8 +48,11 @@ function el(tag) {
   };
 }
 const document = { createElement: el, createTextNode: (t) => ({ text: t }),
-                   createRange: () => ({ selectNodeContents() {} }) };
+                   createRange: () => ({ selectNodeContents() {} }),
+                   addEventListener() {}, visibilityState: "visible" };
 const window = { getSelection: () => ({ removeAllRanges() {}, addRange() {} }) };
+// No wakeLock and no share: the absence of an optional API must never break a
+// turn, which is what these tests would catch.
 const navigator = {};
 const chatEl = el("div"), inputEl = el("textarea"), hintEl = el("div");
 const sendBtn = el("button"), stopBtn = el("button"), modelEl = el("select");
@@ -121,7 +124,9 @@ def drive(script, abort_after=-1, typed="what is 2+2?", type_during=None):
         _DOM,
         _slice(page, "      function addUser", "      // ---- Image attachments"),
         _slice(page, "      // Split assistant text", "      function fmtUsage"),
-        _slice(page, "      async function send()", "      function stop()"),
+        # From the wake-lock helpers, which send() calls, through send() itself.
+        _slice(page, "      // Feature-detected, like isSecureContext elsewhere",
+               "      function stop()"),
         f"run({json.dumps(script)}, {abort_after}, {json.dumps(typed)}, "
         f"{json.dumps(type_during)})"
         ".then(r => process.stdout.write(JSON.stringify(r)));",

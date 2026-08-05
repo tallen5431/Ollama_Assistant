@@ -79,9 +79,14 @@ def _parse(resp: requests.Response, url: str) -> Dict[str, Any]:
     return data
 
 
-def list_models() -> List[Dict[str, Any]]:
-    """Return the list of installed models from Ollama's ``/api/tags``."""
-    data = get_ollama("/api/tags")
+def list_models(timeout: Any = None) -> List[Dict[str, Any]]:
+    """Return the list of installed models from Ollama's ``/api/tags``.
+
+    ``timeout`` is for callers on a latency-sensitive path — the health probe
+    runs on every page load and must not inherit the reply timeout, which is
+    sized for a 30b model thinking, not for listing tags.
+    """
+    data = get_ollama("/api/tags", timeout=timeout)
     models = data.get("models") or data.get("tags") or []
     return models if isinstance(models, list) else []
 

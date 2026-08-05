@@ -73,6 +73,11 @@ _PAGE = """<!doctype html>
       .role { font-size:0.68rem; text-transform:uppercase; letter-spacing:0.04em;
               color:var(--muted); margin:0 0.3rem 0.2rem; }
       .meta { font-size:0.7rem; color:var(--muted); margin:0.25rem 0.3rem 0; }
+      /* Quiet until you look for it — this sits under every reply. */
+      .replycopy { font-size:0.68rem; padding:0.15rem 0.45rem; margin:0.25rem 0.3rem 0;
+        background:transparent; color:var(--muted); border:1px solid var(--border);
+        border-radius:0.35rem; opacity:0.6; }
+      .replycopy:hover { opacity:1; color:var(--text); }
       .sources { font-size:0.72rem; color:var(--muted); margin:0.3rem 0.3rem 0; }
       .sources a { color:var(--muted); text-decoration:underline; }
       .sources a:hover { color:var(--text); }
@@ -797,7 +802,7 @@ _PAGE = """<!doctype html>
         // Model names come from the Ollama server — set as text, never markup.
         wrap.querySelector(".role").textContent = modelEl.value || "Assistant";
         chatEl.appendChild(wrap); scrollDown(true);
-        return {
+        const view = {
           root: wrap,
           bubble: wrap.querySelector(".bubble"),
           status: wrap.querySelector(".webstatus"),
@@ -805,7 +810,39 @@ _PAGE = """<!doctype html>
           thinkBody: wrap.querySelector(".think-body"),
           meta: wrap.querySelector(".meta"),
           sources: wrap.querySelector(".sources"),
+          raw: "",
         };
+        addReplyCopy(view);
+        return view;
+      }
+
+      // Copying a whole reply had no affordance at all — only individual code
+      // blocks did. The raw markdown, not the rendered text, because that is
+      // what pastes usefully into notes or an editor.
+      function addReplyCopy(view) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "replycopy";
+        btn.textContent = "Copy reply";
+        btn.hidden = true;
+        btn.addEventListener("click", async () => {
+          const text = view.raw || view.bubble.textContent || "";
+          if (!text) return;
+          // Share beats clipboard on a phone: it reaches the apps you would
+          // actually paste into, and works without a secure-context clipboard.
+          if (navigator.share && window.matchMedia &&
+              window.matchMedia("(pointer: coarse)").matches) {
+            try { await navigator.share({ text: text }); return; } catch (e) { /* fall through */ }
+          }
+          if (!navigator.clipboard) { btn.textContent = "Select and copy"; return; }
+          try {
+            await navigator.clipboard.writeText(text);
+            btn.textContent = "Copied";
+            setTimeout(() => { btn.textContent = "Copy reply"; }, 1200);
+          } catch (e) { btn.textContent = "Select and copy"; }
+        });
+        view.meta.parentElement.insertBefore(btn, view.meta.nextSibling);
+        view.copyBtn = btn;
       }
 
       // Render the pages a reply was grounded in, numbered to match the [n]
@@ -896,6 +933,12 @@ _PAGE = """<!doctype html>
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
           if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
+          // A default naming a model that has been deleted or renamed since is
+          // otherwise a silent failure on every turn until someone works it out.
+          if (data.ollama_reachable && data.model_count && !data.default_installed) {
+            hintEl.textContent = "The configured default model (" + data.default_model +
+              ") is not installed — pick one from the dropdown.";
+          }
           if (!data.voice) return;
           if (window.isSecureContext) {
             micBtn.hidden = false;
@@ -955,6 +998,28 @@ _PAGE = """<!doctype html>
           else { hintEl.textContent = "Ready — " + (j.label || id) + " downloaded."; await loadVoiceModels(); voiceSel.value = id; }
         } catch (e) { hintEl.textContent = "Download failed: " + e; }
         finally { voiceSel.disabled = false; micBtn.disabled = false; }
+      });
+
+      // Feature-detected, like isSecureContext elsewhere: Wake Lock is
+      // Chromium-and-Safari-only and secure-context gated, and it is a nicety —
+      // never let its absence, or a rejection, break a turn.
+      let wakeLock = null;
+      async function acquireWakeLock() {
+        if (wakeLock || !navigator.wakeLock) return;
+        try {
+          wakeLock = await navigator.wakeLock.request("screen");
+          wakeLock.addEventListener("release", () => { wakeLock = null; });
+        } catch (e) { wakeLock = null; }
+      }
+      function releaseWakeLock() {
+        if (!wakeLock) return;
+        try { wakeLock.release(); } catch (e) {}
+        wakeLock = null;
+      }
+      document.addEventListener("visibilitychange", () => {
+        // The browser drops the lock when the page is hidden; take it back if
+        // the turn is still running when we come into view again.
+        if (document.visibilityState === "visible" && busy) acquireWakeLock();
       });
 
       async function send() {
@@ -1017,6 +1082,12 @@ _PAGE = """<!doctype html>
         // five-minute timeout, which is what makes people give up and reload.
         // A grounding status line takes the slot over permanently when it
         // arrives, since it says something more useful than a stopwatch.
+        // Keep the screen on for the turn. A phone that locks mid-generation
+        // suspends the tab, and the answer the server already produced is lost
+        // when it resumes. Re-acquired on resume, since the lock is dropped
+        // whenever the page is hidden.
+        await acquireWakeLock();
+
         const waitingSince = Date.now();
         let waitTimer = setInterval(() => {
           if (started || view.statusOwned) return;
@@ -1096,6 +1167,8 @@ _PAGE = """<!doctype html>
           view.status.hidden = true;
           if (finalContent) {
             paintMarkdown(view.bubble, finalContent);
+            view.raw = finalContent;
+            if (view.copyBtn) view.copyBtn.hidden = false;
             if (messages === thread) messages.push({ role: "assistant", content: finalContent });
             commitTurn(finalContent, lastSources);
             if (usage) view.meta.textContent = fmtUsage(usage);
@@ -1147,6 +1220,7 @@ _PAGE = """<!doctype html>
           }
         } finally {
           stopWaitTimer();
+          releaseWakeLock();
           busy = false; sendBtn.disabled = false; stopBtn.hidden = true;
           controller = null;
           if (pendingAutoSend) {
@@ -1314,7 +1388,11 @@ _PAGE = """<!doctype html>
             messages.push(entry);
           } else {
             const view = addAssistant();
-            if (msg.content) paintMarkdown(view.bubble, msg.content);
+            if (msg.content) {
+              paintMarkdown(view.bubble, msg.content);
+              view.raw = msg.content;      // a reopened thread copies too
+              if (view.copyBtn) view.copyBtn.hidden = false;
+            }
             if (msg.sources) showSources(view, msg.sources);
             messages.push({ role: "assistant", content: msg.content });
           }
@@ -1635,6 +1713,15 @@ _PAGE = """<!doctype html>
       if (window.matchMedia("(min-width: 641px)").matches) {
         inputEl.placeholder = "Type a message…  (Enter to send, Shift+Enter for a new line)";
       }
+
+      // A tab resumed after a night in a pocket had checked the server exactly
+      // once, when it was opened — so a dead dot stayed dead and a model pulled
+      // since never appeared. Re-check on resume, but never mid-turn.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible" || busy) return;
+        loadModels();
+        checkVoice();
+      });
 
       loadModels();
       checkVoice();

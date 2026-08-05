@@ -121,12 +121,39 @@ def healthz() -> Any:
 
 @app.route("/api/health", methods=["GET"])
 def health() -> Any:
-    """JSON status: which Ollama host and default model are configured."""
+    """JSON status, including whether Ollama actually answers.
+
+    This used to echo the configured host without ever calling it, so nothing
+    outside the browser could tell "app up, Ollama dead" from "all well" — and
+    that is exactly the state the server-manager card shows. The probe uses a
+    short timeout of its own: this endpoint is on the page-load path, and a
+    sleeping desktop must not stall it.
+
+    /healthz is deliberately left alone; it is the manager's liveness check and
+    must keep measuring only whether this process is up.
+    """
+    reachable, detail, installed = True, "", []
+    try:
+        installed = [
+            m.get("name") or m.get("model")
+            for m in list_models(timeout=(3, 5))
+            if isinstance(m, dict)
+        ]
+    except Exception as exc:  # noqa: BLE001 - the whole point is to report it
+        reachable, detail = False, str(exc)
+
+    default = get_default_model()
     return jsonify(
         {
             "status": "ok",
             "ollama_host": get_ollama_base(),
-            "default_model": get_default_model(),
+            "ollama_reachable": reachable,
+            "ollama_error": detail,
+            "model_count": len(installed),
+            "default_model": default,
+            # A default naming a model that has been deleted or renamed since
+            # is a silent failure on every turn until someone notices.
+            "default_installed": bool(installed) and default in installed,
             "auth": AUTH_ENABLED,
             "voice": voice.voice_available(),
             "web": web_enabled(),

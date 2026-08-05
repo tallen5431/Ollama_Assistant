@@ -281,3 +281,54 @@ class TestReviewRegressions:
         monkeypatch.setattr(mod, "chat_stream", fake_stream)
         mod.app.test_client().post("/api/chat", json={"prompt": "hi"}).get_data()
         assert seen["options"]["num_ctx"] >= 4096
+
+
+class TestHealthProbesOllama:
+    """/api/health echoed the configured host without ever calling it.
+
+    So nothing outside the browser could tell "app up, Ollama dead" from "all
+    well" — which is exactly the state the server-manager card shows.
+    """
+
+    def test_an_unreachable_ollama_is_reported(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")   # nothing listening
+        mod = load_app(monkeypatch)
+        data = mod.app.test_client().get("/api/health").get_json()
+        assert data["ollama_reachable"] is False
+        assert data["model_count"] == 0
+        assert "127.0.0.1:1" in data["ollama_error"]
+
+    def test_a_working_ollama_is_reported_with_its_models(self, monkeypatch):
+        mod = load_app(monkeypatch)
+        monkeypatch.setattr(mod, "list_models",
+                            lambda timeout=None: [{"name": "llama3.1:8b"}, {"name": "qwen3.5:4b"}])
+        monkeypatch.setenv("OLLAMA_MODEL", "qwen3.5:4b")
+        data = mod.app.test_client().get("/api/health").get_json()
+        assert data["ollama_reachable"] is True
+        assert data["model_count"] == 2
+        assert data["default_installed"] is True
+
+    def test_a_default_that_is_no_longer_installed_is_flagged(self, monkeypatch):
+        """Renaming or deleting the default is otherwise silent on every turn."""
+        mod = load_app(monkeypatch)
+        monkeypatch.setattr(mod, "list_models", lambda timeout=None: [{"name": "llama3.1:8b"}])
+        monkeypatch.setenv("OLLAMA_MODEL", "deleted-model:7b")
+        data = mod.app.test_client().get("/api/health").get_json()
+        assert data["ollama_reachable"] is True
+        assert data["default_installed"] is False
+
+    def test_healthz_stays_a_liveness_check_only(self, monkeypatch):
+        """The manager polls it; it must not depend on a remote host."""
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+        mod = load_app(monkeypatch)
+        assert mod.app.test_client().get("/healthz").status_code == 200
+
+    def test_the_probe_does_not_inherit_the_reply_timeout(self, monkeypatch):
+        """It runs on every page load; a sleeping desktop must not stall it."""
+        mod = load_app(monkeypatch)
+        seen = {}
+        monkeypatch.setattr(mod, "list_models",
+                            lambda timeout=None: seen.update(timeout=timeout) or [])
+        mod.app.test_client().get("/api/health")
+        assert isinstance(seen["timeout"], tuple)
+        assert max(seen["timeout"]) <= 10, "health must not wait like a chat turn does"
