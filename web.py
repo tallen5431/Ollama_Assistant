@@ -73,6 +73,12 @@ _SNIPPET_MAX = 400
 _MAX_IMAGES_READ = 4
 _MAX_READING_CHARS = 600
 
+# A Wikipedia article points at hundreds of pages. Enough to show what a site
+# covers, few enough that the list itself does not become the context.
+_MAX_LINKS_KEPT = 120
+_MAX_LINKS_OFFERED = 40      # how many a model is asked to choose between
+_MAX_LINKS_IN_CONTEXT = 25   # how many are listed as "what else is here"
+
 # Elements with no closing tag, which must not be counted when tracking depth.
 _VOID_TAGS = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -232,28 +238,44 @@ class _Extractor(HTMLParser):
         self._parts: List[str] = []
         self._skip = 0
         self._in_title = False
+        # Links, in document order, with the words they were written as. Only
+        # those inside the readable body: nav, header, footer and aside are
+        # already skipped, which is most of what makes a link list useless.
+        self.links: List[Dict[str, str]] = []
+        self._link: Optional[Dict[str, str]] = None
 
     def handle_starttag(self, tag, attrs):
         if tag in self.SKIP:
             self._skip += 1
         elif tag == "title":
             self._in_title = True
-        elif tag in _BLOCK_TAGS:
-            self._parts.append("\n")
+        else:
+            if tag == "a" and not self._skip:
+                href = dict(attrs).get("href") or ""
+                if href and not href.startswith(("#", "javascript:", "mailto:", "tel:", "data:")):
+                    self._link = {"href": href, "text": ""}
+                    self.links.append(self._link)
+            if tag in _BLOCK_TAGS:
+                self._parts.append("\n")
 
     def handle_endtag(self, tag):
         if tag in self.SKIP:
             self._skip = max(0, self._skip - 1)
         elif tag == "title":
             self._in_title = False
-        elif tag in _BLOCK_TAGS:
-            self._parts.append("\n")
+        else:
+            if tag == "a":
+                self._link = None
+            if tag in _BLOCK_TAGS:
+                self._parts.append("\n")
 
     def handle_data(self, data):
         if self._in_title:
             self.title += data
         elif not self._skip:
             self._parts.append(data)
+            if self._link is not None:
+                self._link["text"] += data
 
     def text(self) -> str:
         raw = "".join(self._parts)
@@ -267,15 +289,63 @@ class _Extractor(HTMLParser):
         return "\n".join(out).strip()
 
 
-def html_to_text(html: str) -> Dict[str, str]:
-    """Return ``{"title", "text"}`` extracted from an HTML document."""
+def html_to_text(html: str, base_url: str = "") -> Dict[str, Any]:
+    """Return ``{"title", "text", "links"}`` extracted from an HTML document.
+
+    ``links`` is what the page points at, from its readable body only, with
+    absolute URLs and the words they were written as — enough for a model to
+    see what else the site covers without fetching any of it.
+    """
     parser = _Extractor()
     try:
         parser.feed(html)
         parser.close()
     except Exception:  # noqa: BLE001 - malformed markup shouldn't be fatal
         logger.debug("HTML parse ended early; using what was collected")
-    return {"title": " ".join(parser.title.split()), "text": parser.text()}
+    return {
+        "title": " ".join(parser.title.split()),
+        "text": parser.text(),
+        "links": _clean_links(parser.links, base_url),
+    }
+
+
+# Link text that is navigation rather than a topic. A page of these is what
+# makes a raw link list worthless to read.
+_LINK_NOISE = re.compile(
+    r"^(edit|edit source|\[\d+\]|\^|top|back|next|previous|home|index|contents|"
+    r"citation needed|permanent link|cite|jump to.*|read more|more|here|link)$",
+    re.I,
+)
+
+
+def _clean_links(raw: List[Dict[str, str]], base_url: str) -> List[Dict[str, str]]:
+    """Absolute, deduplicated, navigation stripped, in document order."""
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for link in raw:
+        text = " ".join((link.get("text") or "").split())
+        if not text or len(text) > 120 or _LINK_NOISE.match(text):
+            continue
+        try:
+            url = urljoin(base_url, link.get("href") or "") if base_url else link.get("href") or ""
+        except ValueError:
+            continue
+        url = url.split("#", 1)[0]
+        if not url.lower().startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        out.append({"url": url, "text": text})
+        if len(out) >= _MAX_LINKS_KEPT:
+            break
+    return out
+
+
+def same_site(a: str, b: str) -> bool:
+    """Whether two URLs share a registrable-ish host (ignoring a www prefix)."""
+    def host(url: str) -> str:
+        name = (urlparse(url).hostname or "").lower()
+        return name[4:] if name.startswith("www.") else name
+    return bool(host(a)) and host(a) == host(b)
 
 
 # ---------------------------------------------------------------------------
@@ -411,11 +481,16 @@ def fetch(url: str) -> Dict[str, str]:
     except requests.RequestException as exc:
         raise WebError(f"Could not fetch {url}: {exc}") from exc
 
+    final_url = resp.url if hasattr(resp, "url") else url
+    links: List[Dict[str, str]] = []
     if ctype.startswith("text/plain") or ctype.startswith("application/json"):
         title, text = url, body.strip()
     else:
-        parsed = html_to_text(body)
+        # Resolved against where we *landed*, not where we asked: a redirect
+        # moves the base, and relative links would otherwise point nowhere.
+        parsed = html_to_text(body, base_url=final_url)
         title, text = parsed["title"] or url, parsed["text"]
+        links = parsed["links"]
 
     if not text:
         raise WebError(f"No readable text found at {url}")
@@ -427,8 +502,9 @@ def fetch(url: str) -> Dict[str, str]:
     # "requested" is where we started, which is how a caller matches this back
     # to the search result it came from. A redirect makes the two differ.
     return {
-        "url": resp.url if hasattr(resp, "url") else url,
+        "url": final_url,
         "requested": url,
+        "links": links,
         "title": title,
         "text": text,
     }
@@ -818,6 +894,93 @@ def plan_searches(
     return _fallback_query(messages, image_note)
 
 
+_LINK_PICKER = (
+    "You choose which linked pages are worth reading to answer a question.\n\n"
+    "You are given a question and a numbered list of links found on a page the "
+    "user is already reading. Reply with the numbers of the links most likely "
+    "to contain the answer, best first, one per line, each as 'N'. Reply with "
+    "NONE if the page the user is on already covers it, or if none of the links "
+    "are clearly about the question.\n\n"
+    "Choose pages that go deeper on what was asked. Do not choose general "
+    "index, category, disambiguation or 'list of' pages, and do not choose a "
+    "link merely because its words appear in the question."
+)
+
+_PICK_RE = re.compile(r"^[^\S\n]*\[?(\d{1,2})\]?[.)]?[^\S\n]*$", re.M)
+
+
+def choose_links(
+    question: str,
+    links: List[Dict[str, str]],
+    model: str,
+    max_links: int = 2,
+) -> List[Dict[str, str]]:
+    """Pick the linked pages worth following, or [] to follow none.
+
+    A plain call, like the search planner: it works with every model, and a
+    poor answer costs a wasted fetch rather than a broken reply. Failures are
+    swallowed — following links is an enhancement, never a requirement.
+    """
+    from ollama_client import chat
+
+    question = " ".join((question or "").split())
+    if not question or not links or not model or max_links < 1:
+        return []
+
+    offered = links[:_MAX_LINKS_OFFERED]
+    listing = "\n".join(
+        f"{i}. {link['text']}" for i, link in enumerate(offered, 1)
+    )
+    try:
+        reply = chat(
+            model,
+            [
+                {"role": "system", "content": _LINK_PICKER},
+                {"role": "user", "content": f"Question: {question}\n\nLinks:\n{listing}"},
+            ],
+            options={"temperature": 0, "num_predict": 64},
+            think=False,
+            keep_alive=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - never let this break the turn
+        logger.warning("Link picker (%s) failed: %s", model, exc)
+        return []
+
+    reply = strip_thinking(reply or "")[:400]
+    if _NONE_RE.search(reply) and not _PICK_RE.search(reply):
+        return []
+    chosen: List[Dict[str, str]] = []
+    seen = set()
+    for match in _PICK_RE.finditer(reply):
+        index = int(match.group(1)) - 1
+        if 0 <= index < len(offered) and index not in seen:
+            seen.add(index)
+            chosen.append(offered[index])
+        if len(chosen) >= max_links:
+            break
+    return chosen
+
+
+def link_map(document: Dict[str, Any], limit: int = _MAX_LINKS_IN_CONTEXT) -> str:
+    """A short list of what else the page points at, as context.
+
+    Answers the common case without fetching anything: asked something the page
+    mentions only in passing, the model can say which page covers it instead of
+    guessing or claiming the page does not discuss it.
+    """
+    links = (document or {}).get("links") or []
+    here = document.get("url", "")
+    local = [l for l in links if same_site(here, l["url"])][:limit]
+    if not local:
+        return ""
+    lines = "\n".join(f"- {l['text']} — {l['url']}" for l in local)
+    return (
+        "Other pages linked from this one, not fetched. Use them to say where "
+        "something is covered, never to describe what they contain — you have "
+        "not read them.\n" + lines
+    )
+
+
 def merge_results(
     groups: List[List[Dict[str, str]]],
     limit: int,
@@ -893,16 +1056,41 @@ def _defence(text: str) -> str:
     return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text or "")
 
 
-def build_context(documents: List[Dict[str, str]]) -> str:
-    """Render fetched documents into one fenced block for a system message."""
+def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
+    """Render fetched documents into one fenced block for a system message.
+
+    ``char_budget`` caps the document text. The defaults can consume most of an
+    8192-token window before the conversation is added, at which point Ollama
+    silently drops the oldest turns — so turn three of a web conversation loses
+    its own history with nothing said. Trimming here is visible instead: each
+    document is truncated, and says it was.
+    """
     parts = [_PREAMBLE.format(today=today()), "", "----- BEGIN WEB RESULTS -----"]
+    share = int(char_budget / len(documents)) if char_budget and documents else 0
     for i, doc in enumerate(documents, 1):
         kind = " (search result summary)" if doc.get("snippet_only") else ""
         title = _defence(str(doc.get("title") or doc["url"]))
         parts.append(f"\n[{i}] {title}{kind}\n{doc['url']}\n")
-        parts.append(_defence(doc.get("text") or ""))
+        text = _defence(doc.get("text") or "")
+        if share and len(text) > share:
+            text = text[:share].rsplit(" ", 1)[0] + " …[trimmed to fit the context window]"
+        parts.append(text)
+        related = link_map(doc)
+        if related:
+            parts.append("\n" + related)
     parts.append("----- END WEB RESULTS -----")
     return "\n".join(parts)
+
+
+def context_budget(num_ctx: int, reserve_fraction: float = 0.45) -> int:
+    """Characters of page text that fit, leaving room for the conversation.
+
+    Roughly 3.7 characters per token for English prose — approximate on
+    purpose, since the alternative is a tokenizer round trip per turn and the
+    consequence of being a little wrong is a slightly shorter excerpt.
+    """
+    usable = max(0, int(num_ctx * reserve_fraction))
+    return max(1500, int(usable * 3.7))
 
 
 _NO_RESULTS = (

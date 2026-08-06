@@ -39,12 +39,12 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   text-only model is selected and an OCR model transcribes it for you, so a
   stack trace doesn't cost you `qwen3-coder:30b` mid-debug. Only if nothing can
   transcribe does the app switch you to a vision model.
-- 🌐 **Web access (optional)** — reads a link you paste, or has a small model
-  turn your message into search queries, then grounds the answer in the pages it
-  finds and cites them. Knows today's date, falls back to search snippets when a
-  page can't be read, and says so when it found nothing rather than answering
-  from memory as if it had. Only public addresses are ever fetched. Off by
-  default. See "Web access" below.
+- 🌐 **Web access (optional)** — reads a link you paste *and the pages it links
+  to*, or has a small model turn your message into search queries, then grounds
+  the answer in what it finds and cites it. Knows today's date, falls back to
+  search snippets when a page can't be read, and says so when it found nothing
+  rather than answering from memory as if it had. Only public addresses are ever
+  fetched. Off by default. See "Web access" below.
 - 🧠 **Pick your model** — a dropdown lists every model installed on your Ollama
   server; the configured default is pre-selected.
 - 🟢 **Connection status** — a dot shows whether the model server is reachable.
@@ -107,6 +107,7 @@ All settings are environment variables (the server manager injects them):
 | `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Unset falls back to DuckDuckGo HTML |
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
+| `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
 | `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
@@ -196,10 +197,28 @@ fetching and hands over text.
 
 Two paths:
 
-- **A link in your message is read.** Paste a URL and ask about it. This is the
-  best case for a local model: one clean document beats a pile of search
-  snippets, and it's far better than screenshotting a page for a vision model,
-  since the model gets real text instead of OCR'd pixels.
+- **A link in your message is read — and so is what it points at.** Paste a URL
+  and ask about it. This is the best case for a local model: one clean document
+  beats a pile of search snippets, and it's far better than screenshotting a
+  page for a vision model, since the model gets real text instead of OCR'd
+  pixels.
+
+  A page is rarely self-contained. A wiki article answers half your question
+  and links to the page with the other half, so the app collects the links in
+  the page's *readable body* — nav, footers, citations and "edit" links are
+  already excluded — and does two things with them:
+
+  1. **A link map** goes to the model as context: what else the site covers, and
+     where. It's marked as not-read, so the model can say "the hinge page covers
+     that" rather than inventing what's on it.
+  2. **A couple are actually opened.** A small model picks which links look like
+     they answer the question, and those pages are fetched too.
+
+  One hop, same site only, and every URL still goes through the address guard.
+  A link is chosen by a model out of content written by a stranger, so it gets
+  no more trust than a pasted URL does — following an arbitrary outbound link
+  would be a much larger surface for very little gain. `WEB_FOLLOW_LINKS=0`
+  turns the following off; the link map stays.
 - **Otherwise a planner turns your message into search queries.** A short,
   cheap, deterministic call replies with either `NONE` or up to three `Q: `
   lines — search-engine keywords, each attacking the topic from a different

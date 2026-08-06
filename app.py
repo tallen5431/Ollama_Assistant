@@ -43,7 +43,9 @@ from config import (
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
+    get_planner_model,
     get_vision_model,
+    get_web_follow_links,
     get_web_max_docs,
     logger,
     web_enabled,
@@ -412,8 +414,14 @@ def api_chat() -> Any:
                     # feature whose whole point is not guessing.
                     convo = web.with_context(convo, web.no_results_context())
                 if documents:
-                    # Layer the page context on whatever the image already added.
-                    convo = web.with_context(convo, web.build_context(documents))
+                    # Layer the page context on whatever the image already added,
+                    # bounded so the pages cannot crowd the conversation out of
+                    # the window — Ollama drops the oldest turns silently.
+                    convo = web.with_context(
+                        convo,
+                        web.build_context(documents,
+                                          char_budget=web.context_budget(get_num_ctx())),
+                    )
                     yield _line(
                         {"sources": [{"url": d["url"], "title": d["title"]} for d in documents]}
                     )
@@ -440,6 +448,40 @@ def _host_of(url: str) -> str:
         return url
 
 
+def _follow_links(
+    model: str,
+    question: str,
+    source: Dict[str, Any],
+    documents: List[Dict[str, str]],
+    budget: int,
+) -> Any:
+    """Open a couple of the pages ``source`` links to, if any look relevant.
+
+    Same-site only, one hop, and every URL still goes through the address guard
+    in fetch() — a link is chosen by a model from content written by a stranger,
+    so it gets no more trust than a pasted URL does.
+    """
+    candidates = [
+        link for link in (source.get("links") or [])
+        if web.same_site(source.get("url", ""), link["url"])
+        and link["url"] not in {d.get("url") for d in documents}
+        and link["url"] not in {d.get("requested") for d in documents}
+    ]
+    if not candidates:
+        return
+
+    picker = get_planner_model() or model
+    chosen = web.choose_links(question, candidates, picker, max_links=budget)
+    if not chosen:
+        return
+
+    yield _line({"status": "Following: " + " · ".join(c["text"][:40] for c in chosen)})
+    fetched, failures = _run_all(web.fetch, [c["url"] for c in chosen])
+    documents.extend(fetched)
+    if failures and not fetched:
+        yield _line({"status": "Could not read the linked pages."})
+
+
 def _gather_web(
     model: str,
     messages: List[Dict[str, str]],
@@ -460,7 +502,8 @@ def _gather_web(
     """
     if outcome is None:
         outcome = {}
-    urls = web.find_urls(web.last_user_text(messages))
+    question = web.last_user_text(messages)
+    urls = web.find_urls(question)
     if urls:
         outcome["attempted"] = True
         for url in urls[:2]:
@@ -469,6 +512,19 @@ def _gather_web(
                 documents.append(web.fetch(url))
             except web.WebError as exc:
                 yield _line({"status": str(exc)})
+
+        # A linked page is rarely self-contained: a wiki article answers half
+        # the question and points at the page with the other half. Ask a small
+        # model which of its links are worth opening, and follow a couple.
+        # Only from a page the *user* chose, and only within the same site —
+        # following a model's pick of an arbitrary outbound link is a much
+        # larger surface for very little gain.
+        budget = get_web_follow_links()
+        for source in list(documents):
+            if budget < 1:
+                break
+            yield from _follow_links(model, question, source, documents, budget)
+            budget = 0     # one hop, from the first page only
         return
 
     # An attached image usually carries the specifics worth searching for — the

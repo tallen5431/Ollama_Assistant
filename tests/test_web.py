@@ -1087,3 +1087,195 @@ class TestHelperModelsReleaseTheirVram:
                             answering_model="qwen3-coder:30b")
         # Held between images of the same message, released after the last.
         assert calls == [None, None, "0"]
+
+
+WIKI = """<!doctype html><html><head><title>Ada Lovelace - Wikipedia</title></head>
+<body>
+<nav><a href="/wiki/Main_Page">Main page</a></nav>
+<div id="content">
+<p>Known for her work on <a href="/wiki/Analytical_Engine">the Analytical Engine</a>,
+daughter of <a href="/wiki/Lord_Byron">Lord Byron</a>. Her notes contain the first
+<a href="/wiki/Computer_program">computer program</a><a href="#cite_note-1">[1]</a>.
+<a href="https://external.example/x">an outside link</a>
+<a href="/wiki/Ada?action=edit">edit</a></p>
+</div>
+<footer><a href="/wiki/Privacy">Privacy</a></footer>
+</body></html>"""
+
+BASE = "https://en.wikipedia.org/wiki/Ada_Lovelace"
+
+
+class TestLinkExtraction:
+    """A linked page is rarely self-contained: a wiki article answers half the
+    question and points at the page with the other half."""
+
+    def links(self):
+        return web.html_to_text(WIKI, base_url=BASE)["links"]
+
+    def test_body_links_are_found_and_made_absolute(self):
+        urls = [l["url"] for l in self.links()]
+        assert "https://en.wikipedia.org/wiki/Analytical_Engine" in urls
+        assert "https://en.wikipedia.org/wiki/Lord_Byron" in urls
+
+    def test_the_words_the_link_was_written_as_are_kept(self):
+        texts = [l["text"] for l in self.links()]
+        assert "the Analytical Engine" in texts
+
+    def test_navigation_and_chrome_are_excluded(self):
+        """nav/footer are already skipped for text; links follow the same rule."""
+        urls = " ".join(l["url"] for l in self.links())
+        assert "Main_Page" not in urls
+        assert "Privacy" not in urls
+
+    def test_citations_anchors_and_edit_links_are_dropped(self):
+        texts = [l["text"] for l in self.links()]
+        urls = [l["url"] for l in self.links()]
+        assert "[1]" not in texts
+        assert not any("#" in u for u in urls)
+        assert "edit" not in texts
+
+    def test_relative_links_resolve_against_where_we_landed(self):
+        """A redirect moves the base; relative links would point nowhere."""
+        links = web.html_to_text('<a href="b">B</a>', base_url="https://x.example/a/index")["links"]
+        assert links[0]["url"] == "https://x.example/a/b"
+
+    def test_a_page_with_no_base_url_yields_only_absolute_links(self):
+        links = web.html_to_text('<a href="/rel">R</a><a href="https://a.example/">A</a>')["links"]
+        assert [l["url"] for l in links] == ["https://a.example/"]
+
+    def test_the_list_is_bounded(self):
+        html = "".join(f'<p><a href="/p{i}">page {i}</a></p>' for i in range(400))
+        assert len(web.html_to_text(html, base_url=BASE)["links"]) <= web._MAX_LINKS_KEPT
+
+    def test_duplicates_are_dropped(self):
+        html = '<a href="/same">One</a><a href="/same">Two</a>'
+        assert len(web.html_to_text(html, base_url=BASE)["links"]) == 1
+
+    def test_fetch_reports_links(self, site):
+        doc = web.fetch(site + "/")
+        assert "links" in doc
+
+    def test_plain_text_documents_have_no_links(self):
+        """text/plain is kept verbatim; there is no markup to read."""
+        assert web.html_to_text("", base_url=BASE)["links"] == []
+
+
+class TestSameSite:
+    @pytest.mark.parametrize("a,b,expected", [
+        ("https://en.wikipedia.org/a", "https://en.wikipedia.org/b", True),
+        ("https://www.example.com/a", "https://example.com/b", True),
+        ("https://en.wikipedia.org/a", "https://de.wikipedia.org/b", False),
+        ("https://a.example/x", "https://evil.example/x", False),
+        ("", "https://a.example/", False),
+    ])
+    def test_host_comparison(self, a, b, expected):
+        assert web.same_site(a, b) is expected
+
+
+class TestLinkPicker:
+    LINKS = [
+        {"url": "https://x.example/hinge", "text": "new hinge design"},
+        {"url": "https://x.example/pricing", "text": "pricing page"},
+        {"url": "https://x.example/about", "text": "about us"},
+    ]
+
+    def test_it_returns_what_the_model_chose(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "1\n3")
+        chosen = web.choose_links("how strong is the hinge?", self.LINKS, "m", max_links=2)
+        assert [c["text"] for c in chosen] == ["new hinge design", "about us"]
+
+    def test_none_means_follow_nothing(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "NONE")
+        assert web.choose_links("q", self.LINKS, "m") == []
+
+    def test_it_respects_the_cap(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "1\n2\n3")
+        assert len(web.choose_links("q", self.LINKS, "m", max_links=1)) == 1
+
+    def test_an_out_of_range_number_is_ignored(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "9\n2")
+        assert [c["text"] for c in web.choose_links("q", self.LINKS, "m")] == ["pricing page"]
+
+    def test_a_model_failure_follows_nothing(self, monkeypatch):
+        """Following links is an enhancement; it must never break the turn."""
+        monkeypatch.setattr("ollama_client.chat",
+                            lambda *a, **k: (_ for _ in ()).throw(ValueError("no ollama")))
+        assert web.choose_links("q", self.LINKS, "m") == []
+
+    def test_reasoning_models_do_not_confuse_it(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat",
+                            lambda *a, **k: "thinking about link 3\n</think>\n2")
+        assert [c["text"] for c in web.choose_links("q", self.LINKS, "m")] == ["pricing page"]
+
+    def test_nothing_to_choose_from_costs_no_model_call(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: calls.append(1) or "1")
+        assert web.choose_links("q", [], "m") == []
+        assert web.choose_links("", self.LINKS, "m") == []
+        assert not calls
+
+
+class TestLinkMap:
+    """What else the site covers, without fetching any of it."""
+
+    DOC = {
+        "url": "https://en.wikipedia.org/wiki/Ada",
+        "links": [
+            {"url": "https://en.wikipedia.org/wiki/Engine", "text": "the engine"},
+            {"url": "https://external.example/x", "text": "somewhere else"},
+        ],
+    }
+
+    def test_it_lists_same_site_links_only(self):
+        out = web.link_map(self.DOC)
+        assert "the engine" in out
+        assert "somewhere else" not in out
+
+    def test_it_says_the_pages_were_not_read(self):
+        """Otherwise the model describes pages it has never seen."""
+        assert "not fetched" in web.link_map(self.DOC)
+        assert "you have not read them" in web.link_map(self.DOC)
+
+    def test_a_page_with_no_links_adds_nothing(self):
+        assert web.link_map({"url": "https://a.example/", "links": []}) == ""
+
+    def test_it_reaches_the_model(self):
+        ctx = web.build_context([{**self.DOC, "title": "Ada", "text": "body"}])
+        assert "the engine" in ctx
+
+
+class TestContextBudget:
+    """The defaults consume most of an 8192-token window before the
+    conversation is added, and Ollama then drops the oldest turns silently."""
+
+    def test_documents_are_trimmed_to_fit(self):
+        docs = [{"url": f"https://a.example/{i}", "title": f"T{i}", "text": "word " * 5000}
+                for i in range(3)]
+        ctx = web.build_context(docs, char_budget=6000)
+        assert len(ctx) < 12000, f"context was {len(ctx)} chars"
+        assert "trimmed to fit" in ctx
+
+    def test_every_document_still_appears(self):
+        docs = [{"url": f"https://a.example/{i}", "title": f"T{i}", "text": "word " * 5000}
+                for i in range(3)]
+        ctx = web.build_context(docs, char_budget=6000)
+        for i in range(3):
+            assert f"[{i + 1}] T{i}" in ctx
+
+    def test_short_documents_are_untouched(self):
+        ctx = web.build_context([{"url": "https://a.example/", "title": "T", "text": "brief"}],
+                                char_budget=6000)
+        assert "trimmed to fit" not in ctx
+        assert "brief" in ctx
+
+    def test_no_budget_means_no_trimming(self):
+        text = "word " * 5000
+        assert text.strip() in web.build_context(
+            [{"url": "https://a.example/", "title": "T", "text": text}])
+
+    def test_the_budget_leaves_room_for_the_conversation(self):
+        budget = web.context_budget(8192)
+        assert budget / 3.7 < 8192 * 0.5, "web context would crowd out the conversation"
+
+    def test_a_tiny_window_still_gets_something_usable(self):
+        assert web.context_budget(512) >= 1500

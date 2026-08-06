@@ -159,6 +159,16 @@ def get_web_max_bytes() -> int:
     return int(_number("WEB_MAX_BYTES", 2 * 1024 * 1024))
 
 
+def get_web_follow_links() -> int:
+    """How many pages linked from a page you pasted may also be read.
+
+    A wiki article often answers half the question and points at the page with
+    the other half. One hop, same site only, and a small model picks which
+    links are worth opening. 0 turns it off.
+    """
+    return max(0, min(4, int(_number("WEB_FOLLOW_LINKS", 2))))
+
+
 def get_image_turns() -> int:
     """How many recent image-bearing turns keep their attachments.
 

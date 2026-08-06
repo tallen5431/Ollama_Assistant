@@ -405,3 +405,106 @@ class TestFetchesDoNotWaitOnStragglers:
         docs, errors = app_module._run_all(fetch, ["a", "b"], enough=3)
         assert docs == [] and len(errors) == 2
         assert clock.monotonic() - started < 2
+
+
+class TestFollowingLinks:
+    """A wiki page answers half the question and links to the other half.
+
+    Reading only the page you pasted meant the model said the page did not
+    cover something the site covered one click away.
+    """
+
+    LINKED = """<html><head><title>Widget 5</title></head><body>
+    <p>Widget 5 shipped Tuesday. Its <a href="/hinge">new hinge design</a> is the change,
+    and <a href="https://elsewhere.example/x">an outside page</a> mentions it too.</p>
+    </body></html>"""
+
+    @pytest.fixture
+    def linked_site(self, rig, monkeypatch):
+        """Serve a page that links to a second page on the same host."""
+        import web as web_module
+        base = rig["site_url"].rsplit("/", 1)[0]
+
+        def fake_fetch(url):
+            if url.endswith("/hinge"):
+                return {"url": url, "requested": url, "title": "Hinge design",
+                        "text": "A titanium four-bar linkage rated to 200000 cycles.",
+                        "links": []}
+            parsed = web_module.html_to_text(self.LINKED, base_url=url)
+            return {"url": url, "requested": url, "title": parsed["title"],
+                    "text": parsed["text"], "links": parsed["links"]}
+
+        monkeypatch.setattr(web, "fetch", fake_fetch)
+        return rig, base
+
+    def ask(self, rig, base, question):
+        return rig["client"].post("/api/chat", json={
+            "messages": [{"role": "user", "content": f"{question} {base}/article"}],
+            "web": True,
+        })
+
+    def test_a_relevant_linked_page_is_read_too(self, linked_site, monkeypatch):
+        rig, base = linked_site
+        monkeypatch.setattr(web, "choose_links",
+                            lambda q, links, model, max_links=2: links[:1])
+        out = lines(self.ask(rig, base, "how strong is the hinge?"))
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        system = chat_call["messages"][0]["content"]
+
+        assert "titanium four-bar" in system, "the linked page was not read"
+        assert any("Following" in o.get("status", "") for o in out)
+
+    def test_only_same_site_links_are_offered(self, linked_site, monkeypatch):
+        """A model picking an arbitrary outbound link is a much larger surface."""
+        rig, base = linked_site
+        offered = {}
+        monkeypatch.setattr(web, "choose_links",
+                            lambda q, links, model, max_links=2: offered.update(links=links) or [])
+        self.ask(rig, base, "how strong is the hinge?").get_data()
+        assert offered["links"], "nothing was offered at all"
+        assert all("elsewhere.example" not in l["url"] for l in offered["links"])
+
+    def test_following_nothing_still_answers_from_the_page(self, linked_site, monkeypatch):
+        rig, base = linked_site
+        monkeypatch.setattr(web, "choose_links", lambda *a, **k: [])
+        out = lines(self.ask(rig, base, "when did it ship?"))
+        text = "".join(o.get("message", {}).get("content", "") for o in out)
+        assert text == "Widget 5 is out."
+        assert not any("Following" in o.get("status", "") for o in out)
+
+    def test_it_can_be_switched_off(self, linked_site, monkeypatch):
+        rig, base = linked_site
+        monkeypatch.setenv("WEB_FOLLOW_LINKS", "0")
+        called = []
+        monkeypatch.setattr(web, "choose_links", lambda *a, **k: called.append(1) or [])
+        self.ask(rig, base, "how strong is the hinge?").get_data()
+        assert not called
+
+    def test_a_picker_failure_does_not_break_the_turn(self, linked_site, monkeypatch):
+        rig, base = linked_site
+        monkeypatch.setattr(web, "choose_links",
+                            lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+        resp = self.ask(rig, base, "how strong is the hinge?")
+        out = lines(resp)
+        assert any("error" in o for o in out) or \
+            "".join(o.get("message", {}).get("content", "") for o in out) == "Widget 5 is out."
+
+    def test_the_link_map_reaches_the_model_even_without_following(self, linked_site, monkeypatch):
+        """So it can say where something is covered rather than guessing."""
+        rig, base = linked_site
+        monkeypatch.setattr(web, "choose_links", lambda *a, **k: [])
+        self.ask(rig, base, "when did it ship?").get_data()
+        chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
+        system = chat_call["messages"][0]["content"]
+        assert "new hinge design" in system
+        assert "not fetched" in system
+
+    def test_only_one_hop(self, linked_site, monkeypatch):
+        """Depth two explodes; the second page's links are not followed."""
+        rig, base = linked_site
+        rounds = []
+        monkeypatch.setattr(
+            web, "choose_links",
+            lambda q, links, model, max_links=2: rounds.append(1) or links[:1])
+        self.ask(rig, base, "how strong is the hinge?").get_data()
+        assert len(rounds) == 1
