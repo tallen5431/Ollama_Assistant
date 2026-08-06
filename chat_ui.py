@@ -589,7 +589,14 @@ _PAGE = """<!doctype html>
         // than blanked.
         if (!thinking) {
           const orphan = content.match(/^[^\\S\\n]*<\\/think>[^\\S\\n]*$/m);
-          if (orphan && orphan.index > 0) {
+          // Not inside a fenced code block. Ask a coder model what a reasoning
+          // model's output looks like and it shows you one — tag on its own
+          // line, inside ``` — and treating that as a real terminator threw
+          // away the half of the reply that explained it. An odd number of
+          // fences before the tag means we are inside one.
+          const fenced = orphan &&
+            (content.slice(0, orphan.index).match(/^[^\\S\\n]*```/gm) || []).length % 2 === 1;
+          if (orphan && orphan.index > 0 && !fenced) {
             const after = content.slice(orphan.index + orphan[0].length);
             if (after.trim()) {
               thinking = content.slice(0, orphan.index);
@@ -1075,6 +1082,11 @@ _PAGE = """<!doctype html>
       // never let its absence, or a rejection, break a turn.
       let wakeLock = null;
       let wakeLockPending = false;
+      // Bumped by every release. A request that resolves after its turn has
+      // already ended — the visibilitychange handler firing just as the reply
+      // lands — would otherwise store a sentinel that nothing goes on to
+      // release, and the phone screen stays on indefinitely.
+      let wakeLockEpoch = 0;
       async function acquireWakeLock() {
         // The in-flight guard matters for continuous voice, where turn N's
         // release and turn N+1's request overlap: without it a late release
@@ -1082,8 +1094,14 @@ _PAGE = """<!doctype html>
         // the phone screen then stayed on with nothing able to release it.
         if (wakeLock || wakeLockPending || !navigator.wakeLock) return;
         wakeLockPending = true;
+        const epoch = wakeLockEpoch;
         try {
           const sentinel = await navigator.wakeLock.request("screen");
+          if (epoch !== wakeLockEpoch) {
+            // Released while we were asking. Hand it straight back.
+            try { sentinel.release(); } catch (e) {}
+            return;
+          }
           sentinel.addEventListener("release", () => {
             if (wakeLock === sentinel) wakeLock = null;   // only its own handle
           });
@@ -1092,6 +1110,7 @@ _PAGE = """<!doctype html>
         finally { wakeLockPending = false; }
       }
       function releaseWakeLock() {
+        wakeLockEpoch += 1;
         const sentinel = wakeLock;
         wakeLock = null;
         if (!sentinel) return;

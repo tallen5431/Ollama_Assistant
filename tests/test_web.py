@@ -1279,3 +1279,30 @@ class TestContextBudget:
 
     def test_a_tiny_window_still_gets_something_usable(self):
         assert web.context_budget(512) >= 1500
+
+
+class TestProseDeclines:
+    """A small model writes "No search is needed" instead of the format it was
+    asked for. Reading that as an unusable reply meant leaving the web toggle
+    on ran a real search for "thanks!" — three round trips for nothing."""
+
+    @pytest.mark.parametrize("reply", [
+        "NONE",
+        "None needed.",
+        "No search is needed here.",
+        "This can be answered directly without looking anything up.",
+        "I don't need to search for that.",
+        "No lookup required.",
+    ])
+    def test_a_decline_however_it_is_phrased_searches_nothing(self, monkeypatch, reply):
+        monkeypatch.setattr("ollama_client.chat", planner(reply))
+        assert web.plan_searches([{"role": "user", "content": "thanks!"}], "m") == []
+
+    def test_a_query_containing_those_words_still_runs(self, monkeypatch):
+        """Only checked when nothing parsed, so a real query is unaffected."""
+        monkeypatch.setattr("ollama_client.chat", planner("Q: none of the above meaning"))
+        assert web.plan_searches(ASK, "m") == ["none of the above meaning"]
+
+    def test_a_genuinely_garbled_reply_still_falls_back(self, monkeypatch):
+        monkeypatch.setattr("ollama_client.chat", planner("uhh"))
+        assert web.plan_searches(ASK, "m") == ["what changed in the newest ollama?"]

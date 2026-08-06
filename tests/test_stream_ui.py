@@ -266,6 +266,23 @@ class TestSplitThink:
         assert out["thinking"] == ""
         assert out["content"] == "just an answer"
 
+    def test_a_fenced_example_of_reasoning_output_is_not_truncated(self):
+        """Ask a coder model what deepseek-r1 emits and it shows you one.
+
+        The tag is then alone on its line, inside ```, and treating it as a
+        real terminator threw away the half of the reply that explained it —
+        into a collapsed panel, and out of what reached the history database.
+        """
+        reply = "Models emit this:\n\n```\nreasoning\n</think>\nanswer\n```\n\nThat is all."
+        out = self.split(reply)
+        assert out["content"] == reply
+        assert out["thinking"] == ""
+
+    def test_a_real_orphan_after_a_closed_fence_still_works(self):
+        """The fence check must not disable the rule outright."""
+        out = self.split("```\ncode\n```\nreasoning here\n</think>\nthe answer")
+        assert out["content"].strip() == "the answer"
+
 
 class TestScrollFollowing:
     """Scrolling up to re-read the question during a long answer used to drag
@@ -411,3 +428,4 @@ class TestTheWaitCounterIsNotSuppressedByAnEmptyStatus:
     def test_a_real_status_does(self):
         assert self.owned_after([{"status": "Searching: x"}, {"message": {"content": "hi"}},
                                  {"done": True}]) is True
+

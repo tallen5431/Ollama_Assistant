@@ -728,7 +728,18 @@ _ORPHAN_THINK_RE = re.compile(
 # A decision not to search. Matched loosely on purpose: a small model writes
 # "None needed." as often as the documented bare NONE, and reading that as a
 # malformed query means searching "thanks!" every time the web toggle is left on.
-_NONE_RE = re.compile(r"\bNONE\b", re.I)
+# The phrasings are the ones models actually produce instead of the format they
+# were asked for — checked only when no queries parsed, so a genuine query
+# containing these words is unaffected.
+_NONE_RE = re.compile(
+    r"\bNONE\b"
+    r"|\bno (?:web )?(?:search|lookup)\b"
+    r"|\b(?:search|lookup|looking) (?:is )?not (?:needed|necessary|required)\b"
+    r"|\b(?:don't|do not|doesn't|does not) need to (?:search|look)\b"
+    r"|\banswered directly\b"
+    r"|\bwithout (?:searching|looking anything up|a search)\b",
+    re.I,
+)
 
 
 def strip_thinking(text: str) -> str:
