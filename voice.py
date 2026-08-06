@@ -254,14 +254,14 @@ def download_model(model_id: str) -> Dict[str, object]:
     return {"id": model_id, "label": CATALOG[model_id]["label"], "dir": path.name}
 
 
-def _get_model(model_id: Optional[str]):
+def _get_model(model_id: Optional[str], *, download: bool = True):
     """Load (and cache) the Vosk model for ``model_id``.
 
     Keyed on the resolved path so a relative VOSK_MODEL_PATH and its catalog
     equivalent don't load the same 1.8 GB model twice, and guarded by a lock
     because continuous mode can fire overlapping transcriptions on a cold cache.
     """
-    key = str(_resolve_dir(model_id).resolve())
+    key = str(_resolve_dir(model_id, download=download).resolve())
     cached = _models.get(key)
     if cached is not None:
         return cached
@@ -281,6 +281,12 @@ def _get_model(model_id: Optional[str]):
 def transcribe(wav_bytes: bytes, model_id: Optional[str] = None) -> str:
     """Transcribe 16-bit mono PCM WAV bytes to text with the chosen model.
 
+    Never downloads. The model id arrives from the client, so resolving with
+    downloads enabled meant a request naming an unfetched model made the box
+    pull 1.8 GB before reading a single audio frame — and several at once each
+    pulled their own copy while holding a server thread. /api/voice/download is
+    the explicit, deliberate way to fetch one.
+
     Raises ValueError on malformed audio / unknown model so the caller can
     return a 400.
     """
@@ -295,7 +301,7 @@ def transcribe(wav_bytes: bytes, model_id: Optional[str] = None) -> str:
 
         from vosk import KaldiRecognizer
 
-        rec = KaldiRecognizer(_get_model(model_id), wf.getframerate())
+        rec = KaldiRecognizer(_get_model(model_id, download=False), wf.getframerate())
         pieces = []
         while True:
             data = wf.readframes(4000)

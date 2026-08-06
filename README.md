@@ -26,21 +26,25 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   with [Vosk](https://alphacephei.com/vosk/) — nothing is sent to the cloud.
   *(Needs the app served over HTTPS; browsers only allow the mic on a secure
   origin. See "Voice input" below.)*
-- 🖼️ **Image input** — attach files with 📎, grab a 📸 screenshot, or paste one
-  in, then ask a vision model about it (`llava`, `*-vision`, `minicpm-v`,
-  `qwen2.5vl`, `moondream`, …). Images are downscaled in the browser before
-  upload. See "Vision models" below.
+- 🖼️ **Image input** — attach files with 📎, take a photo with 📷, grab a 📸
+  screenshot, or paste one in, then ask about it (`llava`, `*-vision`,
+  `minicpm-v`, `qwen2.5vl`, `moondream`, …). Images are downscaled in the
+  browser before upload. See "Vision models" below.
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
 - ✍️ **Formatted replies** — markdown is rendered, with labelled code blocks and
   a copy button. Matters most with the coder models.
-- 👁️ **Vision routing** — attach an image while a text-only model is selected
-  and the app switches to one that can actually see it.
-- 🌐 **Web access (optional)** — reads a link you paste, or has a small model
-  turn your message into search queries, then grounds the answer in the pages it
-  finds and cites them. Only public addresses are ever fetched. Off by default.
-  See "Web access" below.
+- 👁️ **Image reading without losing your model** — attach a screenshot while a
+  text-only model is selected and an OCR model transcribes it for you, so a
+  stack trace doesn't cost you `qwen3-coder:30b` mid-debug. Only if nothing can
+  transcribe does the app switch you to a vision model.
+- 🌐 **Web access (optional)** — reads a link you paste *and the pages it links
+  to*, or has a small model turn your message into search queries, then grounds
+  the answer in what it finds and cites it. Knows today's date, falls back to
+  search snippets when a page can't be read, and says so when it found nothing
+  rather than answering from memory as if it had. Only public addresses are ever
+  fetched. Off by default. See "Web access" below.
 - 🧠 **Pick your model** — a dropdown lists every model installed on your Ollama
   server; the configured default is pre-selected.
 - 🟢 **Connection status** — a dot shows whether the model server is reachable.
@@ -91,15 +95,19 @@ All settings are environment variables (the server manager injects them):
 | `PORT`              | `8070`                      | Port to listen on |
 | `OLLAMA_HOST`       | `http://127.0.0.1:11434`    | Where Ollama runs. Point at your **desktop's** LAN/Tailscale address (a trailing `/v1` is accepted). |
 | `OLLAMA_MODEL`      | `llama3.1:8b`               | Default model shown/selected in the UI |
-| `OLLAMA_TIMEOUT`    | `300`                       | Per-request timeout, in seconds |
+| `OLLAMA_TIMEOUT`    | `300`                       | How long to wait for a reply, in seconds — a 30b legitimately takes minutes |
+| `OLLAMA_CONNECT_TIMEOUT` | `5`                    | How long to wait to *connect*, separately. A sleeping desktop drops the packet rather than refusing it, so this is what stops a message hanging for the full reply timeout |
+| `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
+| `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
 | `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Unset falls back to DuckDuckGo HTML |
-| `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model |
+| `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
+| `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
 | `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
@@ -189,10 +197,28 @@ fetching and hands over text.
 
 Two paths:
 
-- **A link in your message is read.** Paste a URL and ask about it. This is the
-  best case for a local model: one clean document beats a pile of search
-  snippets, and it's far better than screenshotting a page for a vision model,
-  since the model gets real text instead of OCR'd pixels.
+- **A link in your message is read — and so is what it points at.** Paste a URL
+  and ask about it. This is the best case for a local model: one clean document
+  beats a pile of search snippets, and it's far better than screenshotting a
+  page for a vision model, since the model gets real text instead of OCR'd
+  pixels.
+
+  A page is rarely self-contained. A wiki article answers half your question
+  and links to the page with the other half, so the app collects the links in
+  the page's *readable body* — nav, footers, citations and "edit" links are
+  already excluded — and does two things with them:
+
+  1. **A link map** goes to the model as context: what else the site covers, and
+     where. It's marked as not-read, so the model can say "the hinge page covers
+     that" rather than inventing what's on it.
+  2. **A couple are actually opened.** A small model picks which links look like
+     they answer the question, and those pages are fetched too.
+
+  One hop, same site only, and every URL still goes through the address guard.
+  A link is chosen by a model out of content written by a stranger, so it gets
+  no more trust than a pasted URL does — following an arbitrary outbound link
+  would be a much larger surface for very little gain. `WEB_FOLLOW_LINKS=0`
+  turns the following off; the link map stays.
 - **Otherwise a planner turns your message into search queries.** A short,
   cheap, deterministic call replies with either `NONE` or up to three `Q: `
   lines — search-engine keywords, each attacking the topic from a different
@@ -204,19 +230,49 @@ Two paths:
   The planner sees the last few turns, not just your latest message, so a
   follow-up like *"what about the 14b one?"* still produces a usable query.
 
+  If it replies with something unusable — small models do ignore the format —
+  the app searches your message as typed rather than quietly skipping the
+  search, which from the outside looks identical to a search that found
+  nothing.
+
+Both the planner and the answering model are told today's date. A model's sense
+of "now" is its training cutoff, which is how *"the latest release"* gets
+answered with a version from two years ago and how the planner writes queries
+anchored to the wrong year.
+
 ### Planner model
 
 By default the answering model does the planning. Set `WEB_PLANNER_MODEL` to a
 small model to keep a large one from being invoked twice a turn:
 
 ```
-WEB_PLANNER_MODEL=qwen2.5-coder:0.5b
+WEB_PLANNER_MODEL=qwen3.5:4b
 ```
 
 Worth measuring rather than assuming: this is only faster if both models fit in
 VRAM at once. If they don't, Ollama swaps between them every turn and a small
 planner ends up *slower* than just reusing the model already loaded. Leave it
 unset if VRAM is tight.
+
+**Reasoning models make poor planners.** Planning is a routing decision with a
+short deterministic budget, and a reasoning model spends that whole budget on
+its scratchpad — so the reply comes back truncated mid-thought with no query in
+it. The app asks Ollama for `think: false` on the planner call and strips any
+`<think>` block that arrives anyway, so `deepseek-r1` works; it is still slower
+and no better than a small instruct model. Prefer one.
+
+### When a page can't be read
+
+Paywalls, JS-only pages and dead links are the normal case, not the exception.
+A result whose page can't be fetched still contributes its **search snippet**,
+labelled in the context as a summary rather than the page, so the model treats
+it as a lead instead of established fact. Results are also capped at two per
+host, so three angles on one topic don't come back as three pages of the same
+site wearing three hats.
+
+If retrieval produces nothing at all, the model is told so explicitly and asked
+to say it couldn't check. A failed search that reads like a successful one is
+the worst outcome for a feature whose whole point is not guessing.
 
 Progress appears live above the reply ("Searching for…", "Reading example.com…")
 and the pages used are listed underneath, numbered to match the `[n]` citations
@@ -275,9 +331,16 @@ doesn't litter the list.
 > kill switch, so auth is the control.
 
 Attached images are stored with their message so a reopened thread still makes
-sense, which means an image-heavy history grows the database. Delete old
-conversations to reclaim it; the file is plain SQLite if you'd rather prune it
-yourself.
+sense, which means an image-heavy history grows the database. The drawer shows
+what it currently costs, and deleting conversations genuinely gives the space
+back — the file is compacted when enough of it has become dead space, rather
+than only marking pages free.
+
+Only the most recent image-bearing turn re-sends its attachments to the model.
+Re-uploading every screenshot in a thread on every turn was slow over a phone
+connection and rarely what was meant; earlier turns keep their text, so the
+conversation still reads. Set `CHAT_IMAGE_TURNS` higher if you compare images
+across turns.
 
 ## Vision models
 
@@ -307,8 +370,12 @@ Only when there's no transcriber installed does the app switch models, picking
 the *smallest* general vision model — silently loading a 19 GB model because you
 pasted a screenshot is a poor surprise. You can always change the dropdown.
 
-If an image has no readable text and the model can't see it, the reply says so
-and suggests picking a vision model, rather than inventing an answer.
+If the OCR pass finds no text at all — a photo of a plant, not a screenshot —
+a general vision model describes the image instead, so you get an answer rather
+than advice to change a dropdown. Only if that also comes back empty does the
+reply say so and suggest picking a vision model, rather than inventing one. A
+reader model that could not be *reached* is reported as exactly that, never as
+a claim about what was in your picture.
 
 **Reading text out of an image**, when **Web access** is on. Before the search is
 planned, the image is transcribed so the exact error text, product names and

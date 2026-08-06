@@ -20,7 +20,9 @@ from __future__ import annotations
 import json
 import os
 import socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -37,10 +39,14 @@ from config import (
     get_app_title,
     get_default_model,
     get_host_port,
+    get_image_turns,
+    get_keep_alive,
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
+    get_planner_model,
     get_vision_model,
+    get_web_follow_links,
     get_web_max_docs,
     logger,
     web_enabled,
@@ -118,18 +124,64 @@ def healthz() -> Any:
     return "ok", 200
 
 
+def _names_match(wanted: str, installed: List[str]) -> bool:
+    """Whether ``wanted`` names one of ``installed``, Ollama's way.
+
+    Ollama treats ``X`` and ``X:latest`` as the same model — that is the form
+    ``ollama pull`` accepts and the form several of these models were installed
+    under. Exact string equality flagged a perfectly working default as missing
+    and told the owner to go pick a different one.
+    """
+    def canonical(name: str) -> str:
+        name = (name or "").strip()
+        return name[:-7] if name.endswith(":latest") else name
+
+    target = canonical(wanted)
+    return any(canonical(name) == target for name in installed if name)
+
+
 @app.route("/api/health", methods=["GET"])
 def health() -> Any:
-    """JSON status: which Ollama host and default model are configured."""
+    """JSON status, including whether Ollama actually answers.
+
+    This used to echo the configured host without ever calling it, so nothing
+    outside the browser could tell "app up, Ollama dead" from "all well" — and
+    that is exactly the state the server-manager card shows. The probe uses a
+    short timeout of its own: this endpoint is on the page-load path, and a
+    sleeping desktop must not stall it.
+
+    /healthz is deliberately left alone; it is the manager's liveness check and
+    must keep measuring only whether this process is up.
+    """
+    reachable, detail, installed = True, "", []
+    try:
+        installed = [
+            m.get("name") or m.get("model")
+            for m in list_models(timeout=(3, 5))
+            if isinstance(m, dict)
+        ]
+    except Exception as exc:  # noqa: BLE001 - the whole point is to report it
+        reachable, detail = False, str(exc)
+
+    default = get_default_model()
     return jsonify(
         {
             "status": "ok",
             "ollama_host": get_ollama_base(),
-            "default_model": get_default_model(),
+            "ollama_reachable": reachable,
+            "ollama_error": detail,
+            "model_count": len(installed),
+            "default_model": default,
+            # A default naming a model that has been deleted or renamed since
+            # is a silent failure on every turn until someone notices.
+            "default_installed": bool(installed) and _names_match(default, installed),
             "auth": AUTH_ENABLED,
             "voice": voice.voice_available(),
             "web": web_enabled(),
             "history": store.available(),
+            # The browser trims image payloads before sending, so it needs
+            # the same number the server would use.
+            "image_turns": get_image_turns(),
         }
     )
 
@@ -144,12 +196,15 @@ def api_models() -> Any:
     # Tag each model so the UI can route an attached image to something that can
     # actually see it — and away from the OCR specialists, which transcribe well
     # and reason poorly.
-    for model in models:
-        if isinstance(model, dict):
-            model["vision"] = has_vision(model)
-            model["ocr"] = is_ocr(model)
+    #
+    # Copies, not in-place: list_models memoises, so mutating what it returns
+    # would write these keys into the shared cache that every other caller reads.
+    tagged = [
+        {**m, "vision": has_vision(m), "ocr": is_ocr(m)} if isinstance(m, dict) else m
+        for m in models
+    ]
     return jsonify({
-        "models": models,
+        "models": tagged,
         "default": get_default_model(),
         # Smallest general vision model: loading 19 GB because someone pasted a
         # screenshot is a poor surprise, and the user can still pick another.
@@ -163,6 +218,38 @@ def api_models() -> Any:
 # -------------------------------------------------------------------
 # Conversation history
 # -------------------------------------------------------------------
+
+
+@app.errorhandler(sqlite3.Error)
+def _store_unavailable(exc: sqlite3.Error) -> Any:
+    """Report a database failure as JSON, not as an HTML 500.
+
+    None of the history routes caught sqlite3.Error, so a corrupt or full
+    database produced Flask's HTML error page — which the client parsed as a
+    failed fetch and then ignored, because saveMessage checked neither resp.ok
+    nor the body. History silently stopped accumulating while the chat carried
+    on working perfectly.
+
+    ProgrammingError and InterfaceError are ours, not the disk's: a bad query
+    or a wrong binding count would otherwise be reported to the user as a
+    corrupt database and logged as one line with no stack, which is exactly the
+    wrong place to start looking. Those get a traceback.
+    """
+    if isinstance(exc, (sqlite3.ProgrammingError, sqlite3.InterfaceError)):
+        logger.exception("Bug in a history query, not a database problem")
+        return jsonify({"error": "Internal error in the history layer."}), 500
+    logger.error("History database error: %s", exc)
+    return jsonify({
+        "error": "Conversation history is unavailable — the database could not "
+                 "be written. Chatting still works; nothing is being saved.",
+        "history": False,
+    }), 503
+
+
+@app.route("/api/conversations/stats", methods=["GET"])
+def api_conversation_stats() -> Any:
+    """What history is costing on disk, for the drawer to show."""
+    return jsonify(store.stats())
 
 
 @app.route("/api/conversations", methods=["GET"])
@@ -273,7 +360,12 @@ def api_chat() -> Any:
             # Always send num_ctx, not only on web turns: changing a model's
             # load options mid-conversation makes Ollama reload the runner and
             # throw away the KV cache.
-            convo, options = messages, {"num_ctx": get_num_ctx()}
+            # Only the most recent image-bearing turn keeps its payload. A
+            # vision model otherwise re-reads every screenshot in the thread on
+            # every turn, and turn six is almost never about turn one's image.
+            # Earlier turns keep their text, so the conversation still reads.
+            convo = web.keep_recent_images(messages, keep_turns=get_image_turns())
+            options = {"num_ctx": get_num_ctx()}
 
             # An image attached to a model that cannot see used to force a
             # switch, which meant giving up your best model exactly when you
@@ -287,25 +379,58 @@ def api_chat() -> Any:
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
                     yield _line({"status": f"Reading the image with {reader}…"})
-                    transcript = web.read_images(images, reader, ocr=is_ocr_reader)
+                    describing = not is_ocr_reader
+                    try:
+                        transcript = web.read_images(images, reader, ocr=is_ocr_reader,
+                                                     answering_model=model)
+                        # An OCR model that found nothing is not the end of it:
+                        # a photo of a plant has no text, and telling the user
+                        # to go change a dropdown while a vision model sits idle
+                        # is a poor answer to "what is this?".
+                        if transcript is None and is_ocr_reader:
+                            describer = _describing_model(model)
+                            if describer:
+                                yield _line({"status": f"No text in it — looking at it with {describer}…"})
+                                transcript = web.read_images(images, describer, ocr=False,
+                                                             answering_model=model)
+                                describing = True
+                        context = web.image_context(transcript, ocr=not describing)
+                    except web.ReadFailed as exc:
+                        # A reader-model OOM is routine when a 30b model holds
+                        # the GPU. Reporting it as "no readable text was found"
+                        # is a confident, wrong claim about the user's image.
+                        logger.warning("Image read via %s failed: %s", reader, exc)
+                        yield _line({"status": f"{reader} could not read the image."})
+                        context = web.image_failed_context()
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
-                    convo = web.with_context(
-                        web.strip_images(messages),
-                        web.image_context(transcript, ocr=is_ocr_reader),
-                    )
+                    convo = web.with_context(web.strip_images(messages), context)
 
             if use_web:
                 documents: List[Dict[str, str]] = []
-                for line in _gather_web(model, messages, documents, transcript):
+                outcome: Dict[str, bool] = {}
+                for line in _gather_web(model, messages, documents, transcript, outcome):
                     yield line
+                if not documents and outcome.get("attempted"):
+                    # Retrieval ran and produced nothing. Say so, or the answer
+                    # comes back from stale memory sounding exactly like a
+                    # sourced one — the worst possible failure mode for a
+                    # feature whose whole point is not guessing.
+                    convo = web.with_context(convo, web.no_results_context())
                 if documents:
-                    # Layer the page context on whatever the image already added.
-                    convo = web.with_context(convo, web.build_context(documents))
+                    # Layer the page context on whatever the image already added,
+                    # bounded so the pages cannot crowd the conversation out of
+                    # the window — Ollama drops the oldest turns silently.
+                    convo = web.with_context(
+                        convo,
+                        web.build_context(documents,
+                                          char_budget=web.context_budget(get_num_ctx())),
+                    )
                     yield _line(
                         {"sources": [{"url": d["url"], "title": d["title"]} for d in documents]}
                     )
-            for line in chat_stream(model, convo, options=options):
+            for line in chat_stream(model, convo, options=options,
+                                    keep_alive=get_keep_alive() or None):
                 yield line + "\n"
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
@@ -327,11 +452,51 @@ def _host_of(url: str) -> str:
         return url
 
 
+def _follow_links(
+    model: str,
+    question: str,
+    source: Dict[str, Any],
+    documents: List[Dict[str, str]],
+    budget: int,
+) -> Any:
+    """Open a couple of the pages ``source`` links to, if any look relevant.
+
+    Same-site only, one hop, and every URL still goes through the address guard
+    in fetch() — a link is chosen by a model from content written by a stranger,
+    so it gets no more trust than a pasted URL does.
+    """
+    candidates = [
+        link for link in (source.get("links") or [])
+        if web.same_site(source.get("url", ""), link["url"])
+        and link["url"] not in {d.get("url") for d in documents}
+        and link["url"] not in {d.get("requested") for d in documents}
+    ]
+    if not candidates:
+        return
+
+    picker = get_planner_model() or model
+    try:
+        chosen = web.choose_links(question, candidates, picker, max_links=budget,
+                                  answering_model=model)
+    except Exception as exc:  # noqa: BLE001 - an enhancement, never a requirement
+        logger.warning("Link picking failed: %s", exc)
+        return
+    if not chosen:
+        return
+
+    yield _line({"status": "Following: " + " · ".join(c["text"][:40] for c in chosen)})
+    fetched, failures = _run_all(web.fetch, [c["url"] for c in chosen])
+    documents.extend(fetched)
+    if failures and not fetched:
+        yield _line({"status": "Could not read the linked pages."})
+
+
 def _gather_web(
     model: str,
     messages: List[Dict[str, str]],
     documents: List[Dict[str, str]],
     transcript: Optional[str] = None,
+    outcome: Optional[Dict[str, bool]] = None,
 ) -> Any:
     """Collect web documents for this turn, yielding progress lines as it goes.
 
@@ -339,15 +504,36 @@ def _gather_web(
     an explicit instruction to read that page; otherwise the model is asked
     whether a search is warranted. Retrieval problems are reported and skipped —
     never fatal, since answering without the web beats not answering.
+
+    ``outcome["attempted"]`` records whether retrieval was actually tried, which
+    the caller needs to tell "searched and found nothing" apart from "decided no
+    search was needed" — identical from the outside, opposite in meaning.
     """
-    urls = web.find_urls(web.last_user_text(messages))
+    if outcome is None:
+        outcome = {}
+    question = web.last_user_text(messages)
+    urls = web.find_urls(question)
     if urls:
+        outcome["attempted"] = True
         for url in urls[:2]:
             yield _line({"status": f"Reading {_host_of(url)}…"})
             try:
                 documents.append(web.fetch(url))
             except web.WebError as exc:
                 yield _line({"status": str(exc)})
+
+        # A linked page is rarely self-contained: a wiki article answers half
+        # the question and points at the page with the other half. Ask a small
+        # model which of its links are worth opening, and follow a couple.
+        # Only from a page the *user* chose, and only within the same site —
+        # following a model's pick of an arbitrary outbound link is a much
+        # larger surface for very little gain.
+        budget = get_web_follow_links()
+        for source in list(documents):
+            if budget < 1:
+                break
+            yield from _follow_links(model, question, source, documents, budget)
+            budget = 0     # one hop, from the first page only
         return
 
     # An attached image usually carries the specifics worth searching for — the
@@ -369,7 +555,13 @@ def _gather_web(
             reader, is_reader_ocr = _image_reader(model)
             if reader:
                 yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
-                image_note = web.read_images(images, reader, ocr=is_reader_ocr)
+                try:
+                    image_note = web.read_images(images, reader, ocr=is_reader_ocr,
+                                                 answering_model=model)
+                except web.ReadFailed as exc:
+                    # Planning without the image beats not answering.
+                    logger.warning("Image read via %s failed: %s", reader, exc)
+                    yield _line({"status": "Could not read the image; searching without it."})
 
     yield _line({"status": "Working out what to search for…"})
     queries = web.plan_searches(messages, model, image_note=image_note)
@@ -380,6 +572,7 @@ def _gather_web(
         yield _line({"status": ""})
         return
 
+    outcome["attempted"] = True
     yield _line({"status": "Searching: " + " · ".join(queries)})
     # Concurrently: three searches then several fetches, run one after another,
     # each with its own timeout, is the sum of every round trip before the user
@@ -396,8 +589,16 @@ def _gather_web(
 
     urls = [r["url"] for r in results]
     yield _line({"status": "Reading " + ", ".join(_host_of(u) for u in urls[:max_docs]) + "…"})
-    fetched, _ = _run_all(web.fetch, urls)
+    fetched, _ = _run_all(web.fetch, urls, enough=max_docs)
     documents.extend(fetched[:max_docs])
+
+    # Paywalled, JS-only and dead pages are routine. Their search snippets are
+    # already paid for, so use them to fill out the budget rather than throwing
+    # away everything that query found. Labelled as summaries in the context.
+    if len(documents) < max_docs:
+        documents.extend(
+            web.snippet_documents(results, documents, limit=max_docs - len(documents))
+        )
 
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
@@ -447,28 +648,107 @@ def _image_reader(answering_model: str) -> Any:
         return "", False
 
 
-def _run_all(func: Any, items: List[Any]) -> Any:
+def _describing_model(answering_model: str) -> str:
+    """A general vision model to describe an image, or "" if none is installed.
+
+    Used only when the OCR pass found no text at all. Transcription is the
+    right first choice — it keeps the exact error string a screenshot carries,
+    which prose paraphrases away — but a photo of a plant has no text in it,
+    and the reply then told the user to change a dropdown while a perfectly
+    good vision model sat idle.
+
+    Smallest first, deliberately: silently loading 19 GB because someone
+    photographed their dinner is a poor surprise.
+    """
+    try:
+        vision = vision_models(include_ocr=False)
+    except Exception:  # noqa: BLE001 - Ollama unreachable
+        return ""
+    if answering_model in vision:
+        return answering_model
+    return next(iter(vision), "")
+
+
+# How long a better-ranked page may keep the turn waiting once enough others
+# have landed. Long enough to matter on a normal site, short enough that a slow
+# one cannot reintroduce the dead air the early return removed.
+_STRAGGLER_GRACE = 1.5
+
+
+def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
     """Run ``func`` over ``items`` concurrently, returning (results, errors).
 
     Order is preserved so interleaving and ranking stay deterministic; a WebError
     for one item is collected rather than raised, since one dead link must not
     cost the others.
+
+    ``enough`` stops waiting once that many have succeeded. Fetching six
+    candidates to keep three meant the turn waited for the slowest of six even
+    when three had long since landed — worst case two full timeouts of dead air
+    before the first token, since a pool of four also ran them in two waves.
     """
     if not items:
         return [], []
     results: List[Any] = [None] * len(items)
     errors: List[str] = []
-    with ThreadPoolExecutor(max_workers=min(4, len(items))) as pool:
+    done = 0
+    # These are pure I/O waits, so the pool can be as wide as the work — one
+    # wave rather than two, and a stuck fetch no longer delays a queued one.
+    #
+    # Not a `with` block: the context manager joins every worker on exit, which
+    # would undo the early return entirely — the turn would still wait for the
+    # slowest of six after the third had landed.
+    # thread_name_prefix marks these in a stack dump; more importantly, the
+    # abandoned ones are joined by concurrent.futures' interpreter-exit hook, so
+    # restarting the card mid-fetch would stall for the remaining budget. Each
+    # fetch is bounded by its own wall clock, so that wait is finite — but the
+    # deadline is what keeps it short, not the pool.
+    pool = ThreadPoolExecutor(max_workers=min(8, len(items)),
+                              thread_name_prefix="retrieval")
+    futures: Dict[Any, int] = {}
+    try:
         futures = {pool.submit(func, item): i for i, item in enumerate(items)}
-        for future in as_completed(futures):
+        def record(future: Any) -> bool:
             index = futures[future]
             try:
                 results[index] = future.result()
+                return True
             except web.WebError as exc:
                 errors.append(str(exc))
             except Exception as exc:  # noqa: BLE001 - one bad item, not the turn
                 logger.info("Retrieval failed for %r: %s", items[index], exc)
                 errors.append(str(exc))
+            return False
+
+        for future in as_completed(futures):
+            if record(future):
+                done += 1
+            if enough is not None and done >= enough:
+                break
+
+        # Enough have landed. Stopping dead here would select by completion
+        # order rather than by the ranking that chose these candidates — a fast
+        # low-ranked page beating a slow top-ranked one. Give any *better*
+        # ranked stragglers a short, bounded wait; the caller keeps the best few
+        # by rank, so whatever arrives in time simply improves the selection.
+        #
+        # A bounded wait(), not another pass over as_completed(): that blocks
+        # until the next completion whenever it is, which is not a grace period
+        # at all — it is the full wait the early return exists to avoid.
+        if enough is not None and done >= enough:
+            best_kept = max((i for i, r in enumerate(results) if r), default=-1)
+            better = [f for f, i in futures.items() if not f.done() and i < best_kept]
+            if better:
+                done_futures, _ = wait(better, timeout=_STRAGGLER_GRACE)
+                for future in done_futures:
+                    record(future)
+    finally:
+        # Drop what has not started; abandon what has. Each in-flight fetch is
+        # bounded by its own wall-clock deadline, so nothing runs forever.
+        # cancel() rather than shutdown(cancel_futures=...), which needs 3.9.
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False)
     return [r for r in results if r], errors
 
 

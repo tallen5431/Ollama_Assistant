@@ -18,6 +18,10 @@ _PAGE = """<!doctype html>
     <meta charset="utf-8">
     <title>__TITLE__</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <!-- Inline, so there is no favicon request to 404 on every page load, and a
+         home-screen shortcut on a phone gets an icon rather than a blank page. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 11h16M8 16h16M8 21h10' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+    <meta name="theme-color" content="#0b1120">
     <style>
       :root {
         --bg:#0b1120; --panel:#0f172a; --panel2:#111c33; --border:#1e293b;
@@ -73,6 +77,11 @@ _PAGE = """<!doctype html>
       .role { font-size:0.68rem; text-transform:uppercase; letter-spacing:0.04em;
               color:var(--muted); margin:0 0.3rem 0.2rem; }
       .meta { font-size:0.7rem; color:var(--muted); margin:0.25rem 0.3rem 0; }
+      /* Quiet until you look for it — this sits under every reply. */
+      .replycopy { font-size:0.68rem; padding:0.15rem 0.45rem; margin:0.25rem 0.3rem 0;
+        background:transparent; color:var(--muted); border:1px solid var(--border);
+        border-radius:0.35rem; opacity:0.6; }
+      .replycopy:hover { opacity:1; color:var(--text); }
       .sources { font-size:0.72rem; color:var(--muted); margin:0.3rem 0.3rem 0; }
       .sources a { color:var(--muted); text-decoration:underline; }
       .sources a:hover { color:var(--text); }
@@ -311,10 +320,36 @@ _PAGE = """<!doctype html>
       // scrollHeight on every token forces a synchronous re-wrap of the whole
       // reply, which is quadratic in its length.
       let scrollPending = false;
-      function scrollDown() {
+      // Follow the stream only while the user is already at the bottom.
+      // Scrolling up to re-read the question during a long answer used to drag
+      // you back on every token, and the only way out was to press Stop.
+      let stickBottom = true;
+      let lastAutoTop = -1;      // where our own last auto-scroll left it
+      function atBottom() {
+        return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 80;
+      }
+      chatEl.addEventListener("scroll", () => {
+        // Our own auto-follow fires this event too; reacting to it would reset
+        // the flag we are trying to honour. Only a scroll we did not cause
+        // counts as the user expressing a preference.
+        if (lastAutoTop >= 0 && Math.abs(chatEl.scrollTop - lastAutoTop) < 2) return;
+        stickBottom = atBottom();
+      }, { passive: true });
+
+      function scrollDown(force) {
+        if (force) stickBottom = true;
+        if (!stickBottom) return;
         if (scrollPending) return;
         scrollPending = true;
-        requestAnimationFrame(() => { scrollPending = false; chatEl.scrollTop = chatEl.scrollHeight; });
+        requestAnimationFrame(() => {
+          scrollPending = false;
+          // Re-checked here, not only above: a frame was already queued when
+          // the user scrolled away, and firing it blindly yanked them back and
+          // re-armed the follow — which is what made the first fix ineffective.
+          if (!stickBottom) return;
+          chatEl.scrollTop = chatEl.scrollHeight;
+          lastAutoTop = chatEl.scrollTop;
+        });
       }
 
 
@@ -493,6 +528,18 @@ _PAGE = """<!doctype html>
       }
 
       // Painted once the reply completes, not per token: a half-arrived fence
+      // Telling someone to press Ctrl+C is only useful if the text is selected.
+      function selectText(node) {
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        } catch (err) { /* selection is a nicety, never a failure */ }
+      }
+      const selectCode = selectText;
+
       // renders as garbage, and re-parsing every chunk is wasted work.
       function paintMarkdown(el, raw) {
         el.innerHTML = renderMarkdown(raw);
@@ -500,12 +547,18 @@ _PAGE = """<!doctype html>
         el.querySelectorAll("button.copy").forEach(function (btn) {
           btn.addEventListener("click", function () {
             const code = btn.parentElement.querySelector("code");
+            // The Clipboard API is [SecureContext]-gated, so it is undefined
+            // over plain http to the box by name or IP. Dereferencing it threw
+            // before any promise existed, which made the rejection fallback
+            // below unreachable — and invisible on localhost, which counts as
+            // a trustworthy origin.
+            if (!navigator.clipboard) { selectCode(code); btn.textContent = "Press Ctrl+C"; return; }
             navigator.clipboard.writeText(code.textContent).then(
               function () {
                 btn.textContent = "Copied";
                 setTimeout(function () { btn.textContent = "Copy"; }, 1200);
               },
-              function () { btn.textContent = "Press Ctrl+C"; }
+              function () { selectCode(code); btn.textContent = "Press Ctrl+C"; }
             );
           });
         });
@@ -521,6 +574,36 @@ _PAGE = """<!doctype html>
           last = m.index + m[0].length;
         }
         content += raw.slice(last);
+        // A closing tag with no opening one: Ollama's deepseek-r1 template opens
+        // <think> in the prompt, so the reply starts inside the scratchpad and
+        // only the closing tag comes back.
+        //
+        // The tag must be ALONE ON ITS LINE, which is how a template emits it.
+        // Matching it anywhere meant any reply that merely mentioned the tag —
+        // "use `</think>` to close it" — had everything before it moved into
+        // the reasoning panel and dropped from the answer, and the truncated
+        // text was what got written to history. Permanent and invisible.
+        //
+        // Only when no opening tag was found at all, and only when something
+        // follows: a reply that is nothing but scratchpad is better shown whole
+        // than blanked.
+        if (!thinking) {
+          const orphan = content.match(/^[^\\S\\n]*<\\/think>[^\\S\\n]*$/m);
+          // Not inside a fenced code block. Ask a coder model what a reasoning
+          // model's output looks like and it shows you one — tag on its own
+          // line, inside ``` — and treating that as a real terminator threw
+          // away the half of the reply that explained it. An odd number of
+          // fences before the tag means we are inside one.
+          const fenced = orphan &&
+            (content.slice(0, orphan.index).match(/^[^\\S\\n]*```/gm) || []).length % 2 === 1;
+          if (orphan && orphan.index > 0 && !fenced) {
+            const after = content.slice(orphan.index + orphan[0].length);
+            if (after.trim()) {
+              thinking = content.slice(0, orphan.index);
+              content = after;
+            }
+          }
+        }
         return { content, thinking };
       }
 
@@ -553,7 +636,8 @@ _PAGE = """<!doctype html>
           bubble.appendChild(el);
         }
         if (text) bubble.appendChild(document.createTextNode(text));
-        chatEl.appendChild(wrap); scrollDown();
+        chatEl.appendChild(wrap); scrollDown(true);   // your own message: always jump
+        return wrap;   // so a turn that produced nothing can be rolled back
       }
 
       // ---- Image attachments (for vision models: llava, *-vision, moondream…) ----
@@ -754,8 +838,8 @@ _PAGE = """<!doctype html>
           '</div></div>';
         // Model names come from the Ollama server — set as text, never markup.
         wrap.querySelector(".role").textContent = modelEl.value || "Assistant";
-        chatEl.appendChild(wrap); scrollDown();
-        return {
+        chatEl.appendChild(wrap); scrollDown(true);
+        const view = {
           root: wrap,
           bubble: wrap.querySelector(".bubble"),
           status: wrap.querySelector(".webstatus"),
@@ -763,7 +847,50 @@ _PAGE = """<!doctype html>
           thinkBody: wrap.querySelector(".think-body"),
           meta: wrap.querySelector(".meta"),
           sources: wrap.querySelector(".sources"),
+          raw: "",
         };
+        addReplyCopy(view);
+        return view;
+      }
+
+      // Copying a whole reply had no affordance at all — only individual code
+      // blocks did. The raw markdown, not the rendered text, because that is
+      // what pastes usefully into notes or an editor.
+      function addReplyCopy(view) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "replycopy";
+        btn.textContent = "Copy reply";
+        btn.hidden = true;
+        function flash(label) {
+          btn.textContent = label;
+          // Always restore. Both failure labels used to stick forever, so the
+          // only way back to a usable button was reloading the page.
+          setTimeout(() => { btn.textContent = "Copy reply"; }, 1600);
+        }
+        btn.addEventListener("click", async () => {
+          const text = view.raw || view.bubble.textContent || "";
+          if (!text) return;
+          // Share beats clipboard on a phone: it reaches the apps you would
+          // actually paste into, and works without a secure-context clipboard.
+          if (navigator.share && window.matchMedia &&
+              window.matchMedia("(pointer: coarse)").matches) {
+            try { await navigator.share({ text: text }); return; }
+            catch (e) {
+              // Dismissing the share sheet rejects too. That is not a failure
+              // to report — falling through to "select and copy" made cancel
+              // look like an error.
+              if (e && e.name === "AbortError") return;
+            }
+          }
+          if (!navigator.clipboard) { selectText(view.bubble); flash("Press Ctrl+C"); return; }
+          try {
+            await navigator.clipboard.writeText(text);
+            flash("Copied");
+          } catch (e) { selectText(view.bubble); flash("Press Ctrl+C"); }
+        });
+        view.meta.parentElement.insertBefore(btn, view.meta.nextSibling);
+        view.copyBtn = btn;
       }
 
       // Render the pages a reply was grounded in, numbered to match the [n]
@@ -789,13 +916,28 @@ _PAGE = """<!doctype html>
         wrap.innerHTML = '<div class="msg error"><div class="col"><div class="role">Error</div>' +
                          '<div class="bubble"></div></div></div>';
         wrap.querySelector(".bubble").textContent = msg;
-        chatEl.appendChild(wrap); scrollDown();
+        chatEl.appendChild(wrap); scrollDown(true);   // an error must not be missed
       }
 
       async function loadModels() {
         try {
           const resp = await fetch("api/models");
           const data = await resp.json();
+          // The 502 this endpoint returns when Ollama is unreachable is a
+          // perfectly well-formed JSON body, so parsing it without checking
+          // read as "connected, zero models" — green dot, a picker seeded with
+          // the configured default, and on a phone (#statusText is hidden
+          // there) the dot was the only signal and it was lying.
+          if (!resp.ok || data.error) {
+            modelEl.innerHTML = "";
+            const o = document.createElement("option");
+            o.textContent = data.default || "(no models)"; o.value = data.default || "";
+            modelEl.appendChild(o);
+            setStatus("bad", "no connection");
+            hintEl.textContent = data.error ||
+              "Could not reach the model server. Check Ollama is running and OLLAMA_HOST is set.";
+            return;
+          }
           modelVision = {};
           for (const m of (data.models || [])) {
             if (m && typeof m === "object") {
@@ -808,21 +950,41 @@ _PAGE = """<!doctype html>
           ocrAvailable = data.ocr_default || null;
           const list = (data.models || [])
             .map(m => (typeof m === "string" ? m : (m.name || m.model))).filter(Boolean);
+          // Read BEFORE emptying the <select> — clearing its options resets
+          // .value to "", which made the whole "keep what is selected" branch
+          // below dead code and let a tab resume switch models anyway.
+          const current = modelEl.value;
           modelEl.innerHTML = "";
           if (!list.length) {
             const o = document.createElement("option");
             o.textContent = data.default || "(no models found)"; o.value = data.default || "";
             modelEl.appendChild(o);
           } else {
+            // Whatever was selected wins: this runs again on every tab resume,
+            // and rebuilding from the remembered value silently discarded the
+            // model a loaded conversation had restored, or one an image
+            // auto-switch had chosen — both assign modelEl.value without
+            // firing "change". Then this device's remembered pick, then the
+            // server's default, which is one value for every device.
+            const preferred =
+              list.indexOf(current) >= 0 ? current
+              : list.indexOf(remembered("model")) >= 0 ? remembered("model")
+              : data.default;
             for (const name of list) {
               const o = document.createElement("option");
               o.value = name; o.textContent = name;
-              if (name === data.default) o.selected = true;
+              if (name === preferred) o.selected = true;
               modelEl.appendChild(o);
             }
           }
           setStatus("ok", "connected");
-          hintEl.textContent = list.length ? (list.length + " model(s) available") : "";
+          // Not over a live warning: this now runs on every tab resume, and
+          // overwriting the hint wiped the "history is not being saved" notice
+          // — which, because it only fires once, then never came back. That is
+          // the silent failure the notice exists to prevent.
+          if (!historyBroken) {
+            hintEl.textContent = list.length ? (list.length + " model(s) available") : "";
+          }
         } catch (err) {
           setStatus("bad", "no connection");
           hintEl.textContent = "Could not reach the model server. Check Ollama is running and OLLAMA_HOST is set.";
@@ -833,7 +995,14 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
+          if (typeof data.image_turns === "number") KEEP_IMAGE_TURNS = data.image_turns;
           if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
+          // A default naming a model that has been deleted or renamed since is
+          // otherwise a silent failure on every turn until someone works it out.
+          if (data.ollama_reachable && data.model_count && !data.default_installed) {
+            hintEl.textContent = "The configured default model (" + data.default_model +
+              ") is not installed — pick one from the dropdown.";
+          }
           if (!data.voice) return;
           if (window.isSecureContext) {
             micBtn.hidden = false;
@@ -859,11 +1028,15 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/voice/models")).json();
           if (data.error) return;
+          // This now re-runs on every tab resume, so a mid-session language
+          // pick would be rebuilt away. Keep what is selected, then what this
+          // device chose before, then the server's default.
+          const wanted = voiceSel.value || remembered("voice") || data.default;
           voiceSel.innerHTML = "";
           const seen = new Set();
           for (const m of (data.available || [])) {
             seen.add(m.id);
-            voiceSel.appendChild(new Option(m.label, m.id, false, m.id === data.default));
+            voiceSel.appendChild(new Option(m.label, m.id, false, m.id === wanted));
           }
           for (const m of (data.catalog || [])) {
             if (m.downloaded || seen.has(m.id)) continue;
@@ -872,12 +1045,21 @@ _PAGE = """<!doctype html>
             voiceSel.appendChild(o);
           }
           voiceBar.hidden = voiceSel.options.length === 0;
+          // On a fresh install nothing is downloaded, so every option is a
+          // catalog entry and the browser auto-selects the first — which fires
+          // no "change", so the download the picker relies on never happens and
+          // the mic can only return an error. Say what to do instead.
+          const chosen = voiceSel.selectedOptions[0];
+          if (chosen && chosen.dataset.download === "1") {
+            hintEl.textContent = "Pick a language to download it — the mic needs one first.";
+          }
         } catch (e) { /* leave picker hidden */ }
       }
 
       // Downloading a not-yet-present language happens on selection so the mic
       // is ready before you speak.
       voiceSel.addEventListener("change", async () => {
+        remember("voice", voiceSel.value);
         const opt = voiceSel.selectedOptions[0];
         if (!opt || opt.dataset.download !== "1") return;
         const id = opt.value;
@@ -895,13 +1077,82 @@ _PAGE = """<!doctype html>
         finally { voiceSel.disabled = false; micBtn.disabled = false; }
       });
 
+      // Feature-detected, like isSecureContext elsewhere: Wake Lock is
+      // Chromium-and-Safari-only and secure-context gated, and it is a nicety —
+      // never let its absence, or a rejection, break a turn.
+      let wakeLock = null;
+      let wakeLockPending = false;
+      // Bumped by every release. A request that resolves after its turn has
+      // already ended — the visibilitychange handler firing just as the reply
+      // lands — would otherwise store a sentinel that nothing goes on to
+      // release, and the phone screen stays on indefinitely.
+      let wakeLockEpoch = 0;
+      async function acquireWakeLock() {
+        // The in-flight guard matters for continuous voice, where turn N's
+        // release and turn N+1's request overlap: without it a late release
+        // event from the old sentinel nulled the handle for the new one, and
+        // the phone screen then stayed on with nothing able to release it.
+        if (wakeLock || wakeLockPending || !navigator.wakeLock) return;
+        wakeLockPending = true;
+        const epoch = wakeLockEpoch;
+        try {
+          const sentinel = await navigator.wakeLock.request("screen");
+          if (epoch !== wakeLockEpoch) {
+            // Released while we were asking. Hand it straight back.
+            try { sentinel.release(); } catch (e) {}
+            return;
+          }
+          sentinel.addEventListener("release", () => {
+            if (wakeLock === sentinel) wakeLock = null;   // only its own handle
+          });
+          wakeLock = sentinel;
+        } catch (e) { /* a nicety; never break a turn over it */ }
+        finally { wakeLockPending = false; }
+      }
+      function releaseWakeLock() {
+        wakeLockEpoch += 1;
+        const sentinel = wakeLock;
+        wakeLock = null;
+        if (!sentinel) return;
+        try { sentinel.release(); } catch (e) {}
+      }
+      document.addEventListener("visibilitychange", () => {
+        // The browser drops the lock when the page is hidden; take it back if
+        // the turn is still running when we come into view again.
+        if (document.visibilityState === "visible" && busy) acquireWakeLock();
+      });
+
+      // Send image bytes only for the most recent turn that has any. They were
+      // re-uploaded in full on every subsequent turn — measured at a 400 KB
+      // body for a message whose text was 714 bytes — over a phone connection,
+      // for a model that had already read them. The server applies the same
+      // rule; this just stops the bytes crossing the network at all.
+      // Server-configured (CHAT_IMAGE_TURNS), not hardcoded: the browser strips
+      // before the request leaves the phone, so a hardcoded 1 here left the
+      // documented knob with nothing to keep — raising it did nothing at all.
+      let KEEP_IMAGE_TURNS = 1;
+      function withRecentImages(list) {
+        const out = list.slice();
+        let kept = 0;
+        for (let i = out.length - 1; i >= 0; i--) {
+          if (!out[i] || !out[i].images || !out[i].images.length) continue;
+          kept += 1;
+          if (kept > KEEP_IMAGE_TURNS) {
+            const copy = Object.assign({}, out[i]);
+            delete copy.images;
+            out[i] = copy;
+          }
+        }
+        return out;
+      }
+
       async function send() {
         const text = inputEl.value.trim();
         const images = pendingImages.slice();
         if ((!text && !images.length) || busy) return;
         busy = true; sendBtn.disabled = true; stopBtn.hidden = false;
         pendingImages = []; renderThumbs();
-        addUser(text, images);
+        const userView = addUser(text, images);
         // Ollama takes images as bare base64 alongside the text, not as a data URL.
         const userMsg = { role: "user", content: text };
         if (images.length) userMsg.images = images.map(img => img.b64);
@@ -921,6 +1172,35 @@ _PAGE = """<!doctype html>
         // Stop press, or an error that still produced text. Never one without
         // the other, so the stored thread always alternates the way the live one
         // does. No-ops if this thread was abandoned meanwhile.
+        // Nothing was produced, so nothing is recorded — and you get your
+        // message back to edit and resend. Leaving the bubble on screen without
+        // it reaching the store meant the phone and the desktop disagreed about
+        // the conversation, and the next send posted two user turns in a row.
+        // Returns whether the message was actually handed back, so the caller
+        // does not claim it was when it wasn't.
+        function rollBackTurn() {
+          // Abandoned on purpose: newChat() and loadConversation() abort the
+          // request, and pushing the discarded message and its photos into the
+          // composer of a *different* conversation is not a rescue, it is a
+          // surprise. The view and messages[] are already guarded this way.
+          if (messages !== thread) return false;
+
+          if (messages.length && messages[messages.length - 1] === userMsg) messages.pop();
+          if (userView) userView.remove();
+          // Attachments come back either way. A photo of an error on a screen
+          // that has since changed cannot be retaken, and dropping it silently
+          // because the composer happened to be occupied was the worst outcome
+          // of the three.
+          if (images.length && !pendingImages.length) { pendingImages = images.slice(); renderThumbs(); }
+          // The text only if the composer is still empty — the user may have
+          // started typing the next message while this one was in flight, and
+          // overwriting that would be its own small disaster.
+          if (inputEl.value.trim()) return false;
+          inputEl.value = text;
+          autosize();
+          return true;
+        }
+
         let turnSaved = false;
         async function commitTurn(reply, sources) {
           if (turnSaved || messages !== thread) return;
@@ -933,13 +1213,37 @@ _PAGE = """<!doctype html>
         controller = new AbortController();
         let rawContent = "", thinkingField = "", started = false, usage = null, lastSources = null;
 
+        // Between Send and the first token there was no feedback at all. A cold
+        // 30b over Tailscale is half a minute of a motionless "…" against a
+        // five-minute timeout, which is what makes people give up and reload.
+        // A grounding status line takes the slot over permanently when it
+        // arrives, since it says something more useful than a stopwatch.
+        // Keep the screen on for the turn. A phone that locks mid-generation
+        // suspends the tab, and the answer the server already produced is lost
+        // when it resumes. Re-acquired on resume, since the lock is dropped
+        // whenever the page is hidden.
+        await acquireWakeLock();
+
+        const waitingSince = Date.now();
+        let waitTimer = setInterval(() => {
+          if (started || view.statusOwned) return;
+          const secs = Math.round((Date.now() - waitingSince) / 1000);
+          if (secs < 3) return;   // don't flicker on a warm model
+          view.status.textContent = "waiting for " + (modelEl.value || "the model") +
+                                    "… " + secs + "s";
+          view.status.hidden = false;
+        }, 1000);
+        function stopWaitTimer() {
+          if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+        }
+
         try {
           const resp = await fetch("api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               model: modelEl.value || undefined,
-              messages,
+              messages: withRecentImages(messages),
               web: webEl.checked || undefined,
             }),
             signal: controller.signal,
@@ -962,41 +1266,84 @@ _PAGE = """<!doctype html>
               if (!line) continue;
               const obj = JSON.parse(line);
               if (obj.error) throw new Error(obj.error);
-              // Web-grounding progress, emitted before the model starts.
+              // Web-grounding progress, emitted before the model starts. While
+              // one is on screen it says more than a stopwatch would, so the
+              // counter stays out of the way — but an empty status *clears*
+              // the line, which is what the server sends when the planner
+              // declines, and the wait that follows is the longest one there
+              // is. Ownership tracks the line's current state rather than
+              // latching, so "searching…" then "" hands the line back.
               if (obj.status !== undefined) {
+                view.statusOwned = !!obj.status;
                 view.status.textContent = obj.status;
                 view.status.hidden = !obj.status;
                 scrollDown();
                 continue;
               }
               if (obj.sources) { lastSources = obj.sources; showSources(view, obj.sources); scrollDown(); continue; }
-              if (obj.thinking) thinkingField += obj.thinking;
+              // /api/chat nests thinking under "message", the same as content.
+              // Reading only the top-level field — the /api/generate shape —
+              // meant that on any Ollama new enough to stream reasoning
+              // natively, the panel never opened and the bubble sat on its "…"
+              // placeholder for the whole scratchpad, looking hung.
+              const think = (obj.message && obj.message.thinking) || obj.thinking || "";
+              if (think) thinkingField += think;
               const piece = (obj.message && obj.message.content) || obj.content || "";
               if (piece) rawContent += piece;
               if (obj.done) usage = obj;
 
               const { content, thinking } = splitThink(rawContent);
               const allThink = thinkingField + thinking;
-              if (piece || obj.thinking) { started = true; view.bubble.textContent = content || "…"; }
+              if (piece || think) {
+                started = true;
+                stopWaitTimer();
+                if (!view.statusOwned) view.status.hidden = true;
+                view.bubble.textContent = content || "…";
+              }
               if (allThink) { view.think.hidden = false; view.thinkBody.textContent = allThink; }
               scrollDown();
             }
           }
           const finalContent = splitThink(rawContent).content;
           view.status.hidden = true;
-          if (finalContent) paintMarkdown(view.bubble, finalContent);
-          else view.bubble.textContent = "(empty response)";
-          if (finalContent && messages === thread) messages.push({ role: "assistant", content: finalContent });
-          if (finalContent) commitTurn(finalContent, lastSources);
-          if (usage) view.meta.textContent = fmtUsage(usage);
+          if (finalContent) {
+            paintMarkdown(view.bubble, finalContent);
+            view.raw = finalContent;
+            if (view.copyBtn) view.copyBtn.hidden = false;
+            if (messages === thread) messages.push({ role: "assistant", content: finalContent });
+            commitTurn(finalContent, lastSources);
+            if (usage) view.meta.textContent = fmtUsage(usage);
+          } else {
+            // The request completed but the model said nothing. Recording the
+            // question without an answer left the store disagreeing with the
+            // screen and made the next send post two user turns; roll the whole
+            // turn back and hand the message back so it can be retried.
+            view.root.remove();
+            const returned = rollBackTurn();
+            markError("The model returned an empty reply." +
+                      (returned ? " Your message is back in the box." : ""));
+          }
           setStatus("ok", "connected");
         } catch (err) {
           if (err.name === "AbortError") {
             const partial = splitThink(rawContent).content;
-            view.bubble.textContent = (partial || "") + "  ⏹ stopped";
-            if (partial && messages === thread) {
-              messages.push({ role: "assistant", content: partial });
+            if (partial) {
+              view.bubble.textContent = partial + "  ⏹ stopped";
+              if (messages === thread) messages.push({ role: "assistant", content: partial });
               commitTurn(partial, lastSources);   // Stop still produced an answer
+            } else {
+              // Stopped before any visible text — which for a reasoning model is
+              // the whole scratchpad, i.e. exactly when Stop gets pressed. The
+              // turn used to stay on screen and in messages[] while never being
+              // written, so the two devices diverged and the next send posted
+              // two user roles.
+              view.root.remove();
+              // Only claim the message came back if it did: with the composer
+              // already holding something else it is not restored, and saying
+              // otherwise sent people looking for a photo that had been dropped.
+              if (rollBackTurn()) {
+                hintEl.textContent = "Stopped before the model replied — your message is back in the box.";
+              }
             }
           } else {
             // An error can arrive mid-stream, after text is already on screen.
@@ -1012,13 +1359,14 @@ _PAGE = """<!doctype html>
               commitTurn(partial, lastSources);
             } else {
               view.root.remove();
-              if (messages === thread && messages.length &&
-                  messages[messages.length - 1].role === "user") messages.pop();
+              rollBackTurn();
               markError(err.message || String(err));
             }
             setStatus("bad", "error");
           }
         } finally {
+          stopWaitTimer();
+          releaseWakeLock();
           busy = false; sendBtn.disabled = false; stopBtn.hidden = true;
           controller = null;
           if (pendingAutoSend) {
@@ -1118,29 +1466,64 @@ _PAGE = """<!doctype html>
           row.appendChild(open); row.appendChild(ren); row.appendChild(del);
           convoListEl.appendChild(row);
         }
+        showHistoryCost();
+      }
+
+      // What history is costing on disk. Attached images are stored with their
+      // message, so an image-heavy history grows quickly and there was no way
+      // to see that short of looking at the file.
+      async function showHistoryCost() {
+        try {
+          const s = await (await fetch("api/conversations/stats")).json();
+          if (!s || typeof s.bytes !== "number") return;
+          const mb = s.bytes / (1024 * 1024);
+          const size = mb >= 1 ? mb.toFixed(1) + " MB" : Math.round(s.bytes / 1024) + " KB";
+          const note = document.createElement("p");
+          note.className = "convo-empty";
+          note.textContent = s.messages + " messages · " + size + " on disk";
+          convoListEl.appendChild(note);
+        } catch (e) { /* a footnote is never worth an error */ }
       }
 
       // Create on first use rather than on page load, so idly opening the app
       // does not litter the list with empty conversations.
+      // History failing is not worth blocking the chat over — but it is worth
+      // saying. Neither of these checked resp.ok, so a 503 from a full or
+      // corrupt database resolved normally, the catch never ran, and the
+      // conversation list quietly stopped growing while chatting looked fine.
+      let historyBroken = false;
+      function noteHistoryBroken(detail) {
+        if (historyBroken) return;
+        historyBroken = true;
+        hintEl.textContent = detail ||
+          "Conversations are no longer being saved — the history database could not be written.";
+      }
+
       async function ensureConversation(firstMessage) {
         if (!historyOn || currentConvoId) return currentConvoId;
         try {
           const resp = await fetch("api/conversations", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: firstMessage || "", model: modelEl.value || null }) });
-          currentConvoId = (await resp.json()).id;
-        } catch (e) { currentConvoId = null; }
+          const data = await resp.json();
+          if (!resp.ok || !data.id) { noteHistoryBroken(data.error); currentConvoId = null; }
+          else { currentConvoId = data.id; historyBroken = false; }
+        } catch (e) { noteHistoryBroken(); currentConvoId = null; }
         return currentConvoId;
       }
 
       async function saveMessage(role, content, images, sources) {
         if (!historyOn || !currentConvoId) return;
         try {
-          await fetch("api/conversations/" + currentConvoId + "/messages", {
+          const resp = await fetch("api/conversations/" + currentConvoId + "/messages", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ role: role, content: content,
                                    images: images || null, sources: sources || null }) });
-        } catch (e) { /* history is a convenience; never block the chat on it */ }
+          if (!resp.ok) {
+            const data = await resp.json().catch(function () { return {}; });
+            noteHistoryBroken(data.error);
+          } else { historyBroken = false; }
+        } catch (e) { noteHistoryBroken(); }
       }
 
       async function loadConversation(id) {
@@ -1168,7 +1551,11 @@ _PAGE = """<!doctype html>
             messages.push(entry);
           } else {
             const view = addAssistant();
-            if (msg.content) paintMarkdown(view.bubble, msg.content);
+            if (msg.content) {
+              paintMarkdown(view.bubble, msg.content);
+              view.raw = msg.content;      // a reopened thread copies too
+              if (view.copyBtn) view.copyBtn.hidden = false;
+            }
             if (msg.sources) showSources(view, msg.sources);
             messages.push({ role: "assistant", content: msg.content });
           }
@@ -1178,7 +1565,7 @@ _PAGE = """<!doctype html>
         }
         closeDrawer();
         refreshConversations();
-        scrollDown();
+        scrollDown(true);
       }
 
       function openDrawer() { drawerEl.hidden = false; backdropEl.hidden = false; refreshConversations(); }
@@ -1433,10 +1820,23 @@ _PAGE = """<!doctype html>
         return new Blob([buf], { type: "audio/wav" });
       }
 
+      // Remembered per device, because the right answer differs per device:
+      // the phone and the desktop want different models. Storage can throw in a
+      // locked-down browser, so every access is guarded.
+      function remembered(key) {
+        try { return localStorage.getItem("chat." + key) || ""; } catch (e) { return ""; }
+      }
+      function remember(key, value) {
+        try { localStorage.setItem("chat." + key, value); } catch (e) {}
+      }
+      // Only an explicit choice is stored. switchToVisionModel() and
+      // loadConversation() set modelEl.value programmatically, which does not
+      // fire "change" — so an automatic switch never overwrites your pick.
+      modelEl.addEventListener("change", () => remember("model", modelEl.value));
+
       // Remember the voice toggles — they describe your hardware and habits, not
       // this visit. Headphones defaults ON (see the checkbox in the markup);
-      // only an explicit stored choice overrides it. Storage can throw in a
-      // locked-down browser, so every access is guarded.
+      // only an explicit stored choice overrides it.
       function rememberToggle(el, key, dflt) {
         try {
           const saved = localStorage.getItem(key);
@@ -1476,6 +1876,15 @@ _PAGE = """<!doctype html>
       if (window.matchMedia("(min-width: 641px)").matches) {
         inputEl.placeholder = "Type a message…  (Enter to send, Shift+Enter for a new line)";
       }
+
+      // A tab resumed after a night in a pocket had checked the server exactly
+      // once, when it was opened — so a dead dot stayed dead and a model pulled
+      // since never appeared. Re-check on resume, but never mid-turn.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible" || busy) return;
+        loadModels();
+        checkVoice();
+      });
 
       loadModels();
       checkVoice();

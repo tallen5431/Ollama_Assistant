@@ -50,11 +50,32 @@ def get_default_model() -> str:
 
 
 def get_request_timeout() -> float:
-    """Return the per-request timeout (seconds) for talking to Ollama."""
+    """Return the per-request read timeout (seconds) for talking to Ollama."""
     try:
         return float(os.getenv("OLLAMA_TIMEOUT", "300"))
     except (TypeError, ValueError):
         return 300.0
+
+
+def get_connect_timeout() -> float:
+    """How long to wait for the TCP connection to Ollama, separately.
+
+    A generous read timeout is right — a 30b model can take minutes to think —
+    but passing it as a scalar makes it the *connect* timeout too. When the
+    desktop holding the models is asleep it drops the SYN rather than refusing,
+    so the connection attempt hung for the full budget: over two minutes of
+    silence before the user was told anything, and a web turn paid it on every
+    call it made.
+    """
+    try:
+        return max(1.0, float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "5")))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def get_timeouts() -> tuple:
+    """(connect, read), the shape requests wants."""
+    return (get_connect_timeout(), get_request_timeout())
 
 
 def get_max_body_bytes() -> int:
@@ -136,6 +157,38 @@ def get_web_max_chars() -> int:
 def get_web_max_bytes() -> int:
     """Hard cap on a downloaded document, before extraction."""
     return int(_number("WEB_MAX_BYTES", 2 * 1024 * 1024))
+
+
+def get_web_follow_links() -> int:
+    """How many pages linked from a page you pasted may also be read.
+
+    A wiki article often answers half the question and points at the page with
+    the other half. One hop, same site only, and a small model picks which
+    links are worth opening. 0 turns it off.
+    """
+    return max(0, min(4, int(_number("WEB_FOLLOW_LINKS", 2))))
+
+
+def get_image_turns() -> int:
+    """How many recent image-bearing turns keep their attachments.
+
+    A vision model re-reads every image in the thread on every turn, which is
+    slow and rarely intended. Raise CHAT_IMAGE_TURNS if you compare images
+    across turns ("here is before… here is after"); 0 sends none at all.
+    """
+    return max(0, int(_number("CHAT_IMAGE_TURNS", 1)))
+
+
+def get_keep_alive() -> str:
+    """How long Ollama should hold the answering model in VRAM after a turn.
+
+    Empty means "whatever Ollama is configured to do" (five minutes by
+    default). Set OLLAMA_KEEP_ALIVE to something like ``30m`` to keep a 30b
+    resident between turns and skip its load time — worth it only if the VRAM
+    is not wanted by anything else. Helper models are unloaded immediately
+    regardless; a one-shot planner call has no reason to squat.
+    """
+    return os.getenv("OLLAMA_KEEP_ALIVE", "").strip()
 
 
 def get_num_ctx() -> int:

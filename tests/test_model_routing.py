@@ -10,6 +10,12 @@ from __future__ import annotations
 
 import pytest
 
+# Imported here, at collection time, on purpose. app.py binds its dependencies
+# by value (`from ollama_client import list_models`), so importing it for the
+# first time from *inside* a test that has already stubbed one of them leaves
+# app holding that stub for the rest of the session — monkeypatch never patched
+# app, so it has nothing to restore.
+import app  # noqa: F401
 import ollama_client as oc
 
 # The models actually installed on the target machine.
@@ -137,7 +143,7 @@ class TestTranscriptionPrompt:
         import web
         seen = {}
 
-        def capture(model, messages, options=None):
+        def capture(model, messages, options=None, **kw):
             seen["prompt"] = messages[0]["content"]
             return "TypeError: can't concat str to bytes"
 
@@ -152,7 +158,7 @@ class TestTranscriptionPrompt:
         import web
         seen = {}
 
-        def capture(model, messages, options=None):
+        def capture(model, messages, options=None, think=None, keep_alive=None):
             seen["prompt"] = messages[-1]["content"]
             return "Q: TypeError concat str to bytes python"
 
@@ -180,21 +186,24 @@ class TestOcrInjection:
         import ollama_client
         import web
 
-        monkeypatch.setattr(ollama_client, "list_models", lambda: INSTALLED)
         monkeypatch.delenv("WEB_VISION_MODEL", raising=False)
+        # Reload first, patch second. The other order binds the stub into app's
+        # own global at import time, so monkeypatch records the *stub* as the
+        # original and restores it for the rest of the session.
         mod = importlib.reload(app_module)
+        monkeypatch.setattr(ollama_client, "list_models", lambda: INSTALLED)
         monkeypatch.setattr(mod, "list_models", lambda: INSTALLED)
         monkeypatch.setattr(mod, "vision_models", oc.vision_models)
         monkeypatch.setattr(mod, "ocr_models", oc.ocr_models)
 
         seen = {}
 
-        def fake_describe(images, model, ocr=False):
+        def fake_describe(images, model, ocr=False, **kw):
             seen["reader"] = model
             seen["ocr"] = ocr
             return "TypeError: can't concat str to bytes"
 
-        def fake_stream(model, messages, options=None):
+        def fake_stream(model, messages, options=None, **kw):
             seen["answering"] = model
             seen["messages"] = messages
             yield '{"message": {"content": "That is a bytes/str mix."}, "done": true}'
@@ -253,7 +262,7 @@ class TestOcrInjection:
         mod, seen = rig
         calls = []
 
-        def counting(images, model, ocr=False):
+        def counting(images, model, ocr=False, **kw):
             calls.append(model)
             return "TypeError: can't concat str to bytes"
 
@@ -292,6 +301,89 @@ class TestOcrInjection:
         # The answering model still gets it — that part is deliberate.
         system = [m for m in seen["messages"] if m["role"] == "system"]
         assert system and "can't concat str to bytes" in system[0]["content"]
+
+
+class TestEveryImageIsRead:
+    """The composer offers four images per message; one used to be read.
+
+    describe_images sliced to images[:1] — written when it only oriented a
+    search query — while app.py stripped all four from the payload and the
+    preamble told the model the single reading "is all there is of it". So
+    "compare these two screenshots" was answered confidently about one.
+    """
+
+    def test_all_four_images_reach_the_reader(self, monkeypatch):
+        import web
+        seen = []
+
+        def capture(model, messages, options=None, think=None, keep_alive=None):
+            seen.append(messages[0]["images"])
+            return f"reading {len(seen)}"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        out = web.describe_images(["a", "b", "c", "d"], "glm-ocr:latest", ocr=True)
+        assert seen == [["a"], ["b"], ["c"], ["d"]], "each image read on its own"
+        for n in range(1, 5):
+            assert f"reading {n}" in out
+
+    def test_multiple_readings_are_labelled(self, monkeypatch):
+        import web
+        monkeypatch.setattr("ollama_client.chat",
+                            lambda *a, **k: "some text")
+        out = web.describe_images(["a", "b"], "glm-ocr:latest", ocr=True)
+        assert "[image 1]" in out and "[image 2]" in out
+
+    def test_a_single_image_is_not_labelled(self, monkeypatch):
+        import web
+        monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "some text")
+        assert web.describe_images(["a"], "glm-ocr:latest", ocr=True) == "some text"
+
+    def test_adding_a_second_image_is_not_served_from_the_first_ones_cache(self, monkeypatch):
+        """The cache key hashed images[:1] too, so it collided."""
+        import web
+        calls = []
+        monkeypatch.setattr(web, "describe_images",
+                            lambda images, model, ocr=False, **kw: calls.append(tuple(images)) or "t")
+        web.read_images(["a"], "m", ocr=True)
+        web.read_images(["a", "b"], "m", ocr=True)
+        assert calls == [("a",), ("a", "b")], "the two-image message was served the one-image reading"
+
+
+class TestReadFailureIsNotAFactAboutTheImage:
+    def test_a_reader_failure_says_so_rather_than_claiming_the_image_is_blank(self, monkeypatch):
+        import importlib
+        import app as app_module
+        import ollama_client
+        import web
+
+        monkeypatch.delenv("WEB_VISION_MODEL", raising=False)
+        mod = importlib.reload(app_module)   # reload first, patch second
+        monkeypatch.setattr(ollama_client, "list_models", lambda: INSTALLED)
+        monkeypatch.setattr(mod, "list_models", lambda: INSTALLED)
+        monkeypatch.setattr(mod, "vision_models", oc.vision_models)
+        monkeypatch.setattr(mod, "ocr_models", oc.ocr_models)
+
+        seen = {}
+
+        def fake_stream(model, messages, options=None, **kw):
+            seen["messages"] = messages
+            yield '{"message": {"content": "ok"}, "done": true}'
+
+        monkeypatch.setattr(web, "describe_images",
+                            lambda *a, **k: (_ for _ in ()).throw(web.ReadFailed("OOM")))
+        monkeypatch.setattr(mod, "chat_stream", fake_stream)
+
+        body = mod.app.test_client().post("/api/chat", json={
+            "model": "qwen3-coder:30b",
+            "messages": [{"role": "user", "content": "what's wrong?", "images": ["aW1n"]}],
+        }).get_data(as_text=True)
+
+        system = [m for m in seen["messages"] if m["role"] == "system"][0]["content"]
+        assert "could not be reached" in system
+        assert "not a statement about the image" in system
+        assert "no readable text" not in system, "a failure was reported as a blank image"
+        # And the user is told, rather than only the log.
+        assert "could not read the image" in body
 
 
 class TestCapabilityPrecedence:
@@ -369,7 +461,7 @@ class TestTranscriptReuse:
         import web
         calls = []
         monkeypatch.setattr(web, "describe_images",
-                            lambda images, model, ocr=False: calls.append(model) or "TypeError: x")
+                            lambda images, model, ocr=False, **kw: calls.append(model) or "TypeError: x")
         for _ in range(4):
             assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
         assert len(calls) == 1, f"expected one model call, got {len(calls)}"
@@ -378,7 +470,7 @@ class TestTranscriptReuse:
         import web
         calls = []
         monkeypatch.setattr(web, "describe_images",
-                            lambda images, model, ocr=False: calls.append(images[0]) or "text")
+                            lambda images, model, ocr=False, **kw: calls.append(images[0]) or "text")
         web.read_images(["first"], "glm-ocr:latest", ocr=True)
         web.read_images(["second"], "glm-ocr:latest", ocr=True)
         assert calls == ["first", "second"]
@@ -386,25 +478,38 @@ class TestTranscriptReuse:
     def test_a_failed_read_is_not_memoised(self, monkeypatch):
         """An OOM on the reader must not become that image's permanent answer.
 
-        describe_images returns None both for "the call failed" and for "no
-        text", so caching it meant one 30b model holding the GPU told the user
-        their screenshot was blank forever, in every conversation.
+        A 30b model holding the GPU is routine, and caching that failure told
+        the user their screenshot was unreadable forever, in every conversation.
         """
         import web
-        results = [None, "TypeError: x"]
         calls = []
-        monkeypatch.setattr(
-            web, "describe_images",
-            lambda images, model, ocr=False: calls.append(model) or results.pop(0),
-        )
+
+        def flaky(images, model, ocr=False, **kw):
+            calls.append(model)
+            if len(calls) == 1:
+                raise web.ReadFailed("model runner has exited")
+            return "TypeError: x"
+
+        monkeypatch.setattr(web, "describe_images", flaky)
+        with pytest.raises(web.ReadFailed):
+            web.read_images(["aW1n"], "glm-ocr:latest", ocr=True)
+        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
+        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
+        assert len(calls) == 2, f"expected one retry then a cache hit, got {len(calls)} calls"
+
+    def test_an_image_with_genuinely_no_text_is_memoised(self, monkeypatch):
+        """"Nothing readable in it" is a real answer, unlike a failure."""
+        import web
+        calls = []
+        monkeypatch.setattr(web, "describe_images",
+                            lambda images, model, ocr=False, **kw: calls.append(model) or None)
         assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) is None
-        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
-        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) == "TypeError: x"
-        assert len(calls) == 2, f"retried {len(calls)} times, expected 2"
+        assert web.read_images(["aW1n"], "glm-ocr:latest", ocr=True) is None
+        assert len(calls) == 1, "a blank image should not be re-read every turn"
 
     def test_the_cache_is_bounded(self, monkeypatch):
         import web
-        monkeypatch.setattr(web, "describe_images", lambda images, model, ocr=False: "t")
+        monkeypatch.setattr(web, "describe_images", lambda images, model, ocr=False, **kw: "t")
         for i in range(web._TRANSCRIPT_CACHE_MAX + 20):
             web.read_images([f"image-{i}"], "m", ocr=True)
         assert len(web._TRANSCRIPTS) <= web._TRANSCRIPT_CACHE_MAX
@@ -420,3 +525,84 @@ class TestTranscriptReuse:
         assert "images" not in stripped[0]
         assert stripped[0]["content"] == "what's this?"
         assert thread[0]["images"] == ["aW1n"], "the original must not be mutated"
+
+
+class TestDescribeWhenThereIsNoTextToRead:
+    """An OCR model finding nothing is not the end of it.
+
+    _image_reader always prefers a transcriber, which is right — the exact
+    error string in a screenshot is what makes a good answer and a good search
+    query, and prose paraphrases it away. But a photo of a plant has no text,
+    and the reply then told the user to go change a dropdown while a perfectly
+    good vision model sat idle.
+    """
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        import importlib
+        import app as app_module
+        import ollama_client
+        import web
+
+        monkeypatch.delenv("WEB_VISION_MODEL", raising=False)
+        mod = importlib.reload(app_module)      # reload first, patch second
+        monkeypatch.setattr(ollama_client, "list_models", lambda **kw: INSTALLED)
+        monkeypatch.setattr(mod, "list_models", lambda **kw: INSTALLED)
+        monkeypatch.setattr(mod, "vision_models", oc.vision_models)
+        monkeypatch.setattr(mod, "ocr_models", oc.ocr_models)
+
+        seen = {"readers": []}
+
+        def fake_stream(model, messages, options=None, **kw):
+            seen["messages"] = messages
+            yield '{"message": {"content": "It is a fern."}, "done": true}'
+
+        monkeypatch.setattr(mod, "chat_stream", fake_stream)
+        return mod, seen, web
+
+    def send(self, mod):
+        return mod.app.test_client().post("/api/chat", json={
+            "model": "qwen3-coder:30b",
+            "messages": [{"role": "user", "content": "what is this?", "images": ["aW1n"]}],
+        }).get_data(as_text=True)
+
+    def test_a_photo_with_no_text_is_described_instead(self, rig, monkeypatch):
+        mod, seen, web = rig
+
+        def reader(images, model, ocr=False, **kw):
+            seen["readers"].append((model, ocr))
+            return None if ocr else "a potted fern on a windowsill"
+
+        monkeypatch.setattr(web, "describe_images", reader)
+        body = self.send(mod)
+
+        assert seen["readers"][0] == ("glm-ocr:latest", True), "OCR is still tried first"
+        assert seen["readers"][1][1] is False, "then a describing pass"
+        assert seen["readers"][1][0] != "glm-ocr:latest"
+
+        system = [m for m in seen["messages"] if m["role"] == "system"][0]["content"]
+        assert "potted fern" in system
+        assert "IMAGE DESCRIPTION" in system, "framed as a description, not a transcription"
+        assert "no readable text" not in system
+        assert "looking at it with" in body
+
+    def test_a_screenshot_with_text_takes_only_the_ocr_pass(self, rig, monkeypatch):
+        """The second pass must not cost anything when the first worked."""
+        mod, seen, web = rig
+        monkeypatch.setattr(
+            web, "describe_images",
+            lambda images, model, ocr=False, **kw:
+                seen["readers"].append((model, ocr)) or "TypeError: boom")
+        self.send(mod)
+        assert len(seen["readers"]) == 1
+
+    def test_both_passes_finding_nothing_still_says_so(self, rig, monkeypatch):
+        mod, seen, web = rig
+        monkeypatch.setattr(
+            web, "describe_images",
+            lambda images, model, ocr=False, **kw:
+                seen["readers"].append((model, ocr)) or None)
+        self.send(mod)
+        system = [m for m in seen["messages"] if m["role"] == "system"][0]["content"]
+        assert "no readable text" in system
+        assert len(seen["readers"]) == 2

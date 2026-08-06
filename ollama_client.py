@@ -12,24 +12,50 @@ for internet traffic must not swallow that direct call.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, List
+import threading
+import time
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 
-from config import get_ollama_base, get_request_timeout, logger
+from config import get_ollama_base, get_timeouts, logger
 
 # Never route Ollama calls through a proxy — the server is on the local
 # network / tailnet and must be reached directly.
 _NO_PROXY = {"http": None, "https": None}
 
+# One pooled session, as web.py does: every call goes to the same host, and on
+# a tailnet the TCP handshake is a meaningful share of a short request.
+_SESSION = requests.Session()
+
+# The installed-model list barely changes, and a single chat turn asks for it up
+# to five times — once per /api/models field, then again from inside the
+# streaming generator for vision routing. Each was a separate round trip to a
+# desktop that may be asleep. Cached briefly, so pulling a model still shows up
+# within seconds.
+_TAGS_TTL = 5.0
+_tags_cache: Optional[Tuple[float, List[Dict[str, Any]]]] = None
+_tags_lock = threading.Lock()
+
+
+def invalidate_models_cache() -> None:
+    """Forget the cached tag list — for tests, and after anything that changes it."""
+    global _tags_cache
+    with _tags_lock:
+        _tags_cache = None
+
 
 def get_ollama(path: str, timeout: float | None = None) -> Dict[str, Any]:
     """GET JSON from Ollama and return parsed JSON, or raise ValueError."""
     url = get_ollama_base() + path
-    timeout = get_request_timeout() if timeout is None else timeout
+    # (connect, read): a generous read budget is right for a model that
+    # thinks for minutes, but as a scalar it is also the connect budget —
+    # and a sleeping tailnet peer drops the SYN rather than refusing it, so
+    # the call hung for the whole five minutes before saying anything.
+    timeout = get_timeouts() if timeout is None else timeout
 
     try:
-        resp = requests.get(url, timeout=timeout, proxies=_NO_PROXY)
+        resp = _SESSION.get(url, timeout=timeout, proxies=_NO_PROXY)
     except requests.RequestException as exc:
         logger.error("Error calling Ollama at %s: %s", url, exc)
         raise ValueError(f"Could not reach Ollama at {get_ollama_base()}: {exc}") from exc
@@ -40,10 +66,14 @@ def get_ollama(path: str, timeout: float | None = None) -> Dict[str, Any]:
 def post_ollama(path: str, payload: Dict[str, Any], timeout: float | None = None) -> Dict[str, Any]:
     """POST JSON to Ollama and return parsed JSON, or raise ValueError."""
     url = get_ollama_base() + path
-    timeout = get_request_timeout() if timeout is None else timeout
+    # (connect, read): a generous read budget is right for a model that
+    # thinks for minutes, but as a scalar it is also the connect budget —
+    # and a sleeping tailnet peer drops the SYN rather than refusing it, so
+    # the call hung for the whole five minutes before saying anything.
+    timeout = get_timeouts() if timeout is None else timeout
 
     try:
-        resp = requests.post(url, json=payload, timeout=timeout, proxies=_NO_PROXY)
+        resp = _SESSION.post(url, json=payload, timeout=timeout, proxies=_NO_PROXY)
     except requests.RequestException as exc:
         logger.error("Error calling Ollama at %s: %s", url, exc)
         raise ValueError(f"Could not reach Ollama at {get_ollama_base()}: {exc}") from exc
@@ -71,23 +101,93 @@ def _parse(resp: requests.Response, url: str) -> Dict[str, Any]:
     return data
 
 
-def list_models() -> List[Dict[str, Any]]:
-    """Return the list of installed models from Ollama's ``/api/tags``."""
-    data = get_ollama("/api/tags")
+def list_models(timeout: Any = None, fresh: bool = False) -> List[Dict[str, Any]]:
+    """Return the list of installed models from Ollama's ``/api/tags``.
+
+    Memoised for a few seconds. A single chat turn asked for this up to five
+    times — three fields of /api/models, then vision routing from inside the
+    streaming generator — and each was its own round trip to a machine that may
+    be asleep. Pass ``fresh=True`` to force a call.
+
+    ``timeout`` is for callers on a latency-sensitive path: the health probe
+    runs on every page load and must not inherit the reply timeout, which is
+    sized for a 30b model thinking, not for listing tags.
+
+    A failure is not cached: the desktop waking up should show models on the
+    next attempt, not after the TTL.
+    """
+    global _tags_cache
+    if not fresh:
+        cached = _tags_cache
+        if cached is not None and (time.monotonic() - cached[0]) < _TAGS_TTL:
+            return cached[1]
+
+    data = get_ollama("/api/tags", timeout=timeout)
     models = data.get("models") or data.get("tags") or []
-    return models if isinstance(models, list) else []
+    models = models if isinstance(models, list) else []
+    with _tags_lock:
+        _tags_cache = (time.monotonic(), models)
+    return models
+
+
+def _rejected_think(exc: Exception) -> bool:
+    """Whether this error is Ollama refusing the "think" field specifically.
+
+    A transport failure and a 400 both surface as ValueError from post_ollama,
+    and only the second is worth retrying. post_ollama puts the response body
+    in the message, so the check is on that; a build that words it differently
+    simply does not get the retry, which is the safe direction.
+    """
+    text = str(exc).lower()
+    if "could not reach ollama" in text:
+        return False
+    return "think" in text
 
 
 def chat(
     model: str,
     messages: List[Dict[str, str]],
     options: Dict[str, Any] | None = None,
+    think: bool | None = None,
+    keep_alive: Any = None,
 ) -> str:
-    """Send a chat completion (non-streaming) and return the reply text."""
+    """Send a chat completion (non-streaming) and return the reply text.
+
+    ``think=False`` asks a reasoning model to skip its scratchpad. For a short
+    structured reply — a routing decision, a transcription — the reasoning is
+    pure cost: it burns the token budget before the answer starts, so the reply
+    comes back truncated mid-thought with nothing usable in it.
+
+    ``keep_alive="0"`` unloads the model as soon as it replies. Helper models —
+    the search planner, the image reader — otherwise sit in VRAM for Ollama's
+    default five minutes after a one-shot call, which on a single-GPU desktop
+    is VRAM the answering model wanted.
+
+    Ollama only learned ``think`` in 0.9, and older builds reject an unknown
+    key, so a rejection retries once without it rather than failing the call.
+    """
     payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": False}
     if options:
         payload["options"] = options
-    data = post_ollama("/api/chat", payload)
+    if think is not None:
+        payload["think"] = think
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+
+    try:
+        data = post_ollama("/api/chat", payload)
+    except ValueError as exc:
+        # Only an Ollama that refused *this field* earns a second attempt.
+        # Retrying on any ValueError meant an unreachable host — which raises
+        # the same type — was dialled twice, doubling an already long connect
+        # timeout on the one path (search planning) that runs before the user
+        # sees a single token, and logging a misleading reason for it.
+        if think is None or not _rejected_think(exc):
+            raise
+        logger.info("Ollama rejected think=%s for %s; retrying without it", think, model)
+        payload.pop("think")
+        data = post_ollama("/api/chat", payload)
+
     message = data.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     return content or data.get("response") or ""
@@ -97,6 +197,7 @@ def chat_stream(
     model: str,
     messages: List[Dict[str, str]],
     options: Dict[str, Any] | None = None,
+    keep_alive: Any = None,
 ) -> Iterator[str]:
     """Stream a chat completion, yielding raw NDJSON lines from Ollama.
 
@@ -104,6 +205,10 @@ def chat_stream(
     chunks (and ``"thinking"`` for reasoning models), ending with a
     ``{"done": true, "eval_count": ..., "eval_duration": ...}`` summary that
     carries the token-usage stats.
+
+    ``keep_alive`` is how long Ollama holds the model in VRAM afterwards — set
+    OLLAMA_KEEP_ALIVE to keep a big answering model resident between turns and
+    skip its load time, at the cost of the VRAM.
     """
     url = get_ollama_base() + "/api/chat"
     payload: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
@@ -111,10 +216,12 @@ def chat_stream(
         # e.g. {"num_ctx": 8192} — Ollama's default window is small, and an
         # attached web page will silently push the conversation out of it.
         payload["options"] = options
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
 
     try:
-        resp = requests.post(
-            url, json=payload, stream=True, timeout=get_request_timeout(), proxies=_NO_PROXY
+        resp = _SESSION.post(
+            url, json=payload, stream=True, timeout=get_timeouts(), proxies=_NO_PROXY
         )
     except requests.RequestException as exc:
         logger.error("Error calling Ollama at %s: %s", url, exc)
