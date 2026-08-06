@@ -21,7 +21,8 @@ import json
 import os
 import socket
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -178,6 +179,9 @@ def health() -> Any:
             "voice": voice.voice_available(),
             "web": web_enabled(),
             "history": store.available(),
+            # The browser trims image payloads before sending, so it needs
+            # the same number the server would use.
+            "image_turns": get_image_turns(),
         }
     )
 
@@ -471,7 +475,12 @@ def _follow_links(
         return
 
     picker = get_planner_model() or model
-    chosen = web.choose_links(question, candidates, picker, max_links=budget)
+    try:
+        chosen = web.choose_links(question, candidates, picker, max_links=budget,
+                                  answering_model=model)
+    except Exception as exc:  # noqa: BLE001 - an enhancement, never a requirement
+        logger.warning("Link picking failed: %s", exc)
+        return
     if not chosen:
         return
 
@@ -660,6 +669,12 @@ def _describing_model(answering_model: str) -> str:
     return next(iter(vision), "")
 
 
+# How long a better-ranked page may keep the turn waiting once enough others
+# have landed. Long enough to matter on a normal site, short enough that a slow
+# one cannot reintroduce the dead air the early return removed.
+_STRAGGLER_GRACE = 1.5
+
+
 def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
     """Run ``func`` over ``items`` concurrently, returning (results, errors).
 
@@ -693,18 +708,40 @@ def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
     futures: Dict[Any, int] = {}
     try:
         futures = {pool.submit(func, item): i for i, item in enumerate(items)}
-        for future in as_completed(futures):
+        def record(future: Any) -> bool:
             index = futures[future]
             try:
                 results[index] = future.result()
-                done += 1
+                return True
             except web.WebError as exc:
                 errors.append(str(exc))
             except Exception as exc:  # noqa: BLE001 - one bad item, not the turn
                 logger.info("Retrieval failed for %r: %s", items[index], exc)
                 errors.append(str(exc))
+            return False
+
+        for future in as_completed(futures):
+            if record(future):
+                done += 1
             if enough is not None and done >= enough:
                 break
+
+        # Enough have landed. Stopping dead here would select by completion
+        # order rather than by the ranking that chose these candidates — a fast
+        # low-ranked page beating a slow top-ranked one. Give any *better*
+        # ranked stragglers a short, bounded wait; the caller keeps the best few
+        # by rank, so whatever arrives in time simply improves the selection.
+        #
+        # A bounded wait(), not another pass over as_completed(): that blocks
+        # until the next completion whenever it is, which is not a grace period
+        # at all — it is the full wait the early return exists to avoid.
+        if enough is not None and done >= enough:
+            best_kept = max((i for i, r in enumerate(results) if r), default=-1)
+            better = [f for f, i in futures.items() if not f.done() and i < best_kept]
+            if better:
+                done_futures, _ = wait(better, timeout=_STRAGGLER_GRACE)
+                for future in done_futures:
+                    record(future)
     finally:
         # Drop what has not started; abandon what has. Each in-flight fetch is
         # bounded by its own wall-clock deadline, so nothing runs forever.

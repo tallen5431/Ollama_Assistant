@@ -147,6 +147,37 @@ class TestTranscribeValidation:
             voice.transcribe(make_wav(sampwidth=1, frames=b"\x00" * 100))
 
 
+@pytest.fixture
+def fake_vosk(monkeypatch):
+    """vosk is optional and not installed here, and transcribe() imports it
+    before resolving the model — so without this the test never reaches the
+    line it is about."""
+    import sys
+    import types
+    module = types.ModuleType("vosk")
+    module.Model = lambda path: object()
+    module.KaldiRecognizer = lambda model, rate: types.SimpleNamespace(
+        AcceptWaveform=lambda data: False,
+        Result=lambda: '{"text": ""}',
+        FinalResult=lambda: '{"text": ""}',
+    )
+    monkeypatch.setitem(sys.modules, "vosk", module)
+    return module
+
+
+def _silent_wav(frames=160):
+    """A real 16-bit mono PCM WAV — wave.open rejects anything less."""
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * frames)
+    return buf.getvalue()
+
+
 class TestTranscribeNeverDownloads:
     """The model id comes from the client, on a CORS-simple request.
 
@@ -174,15 +205,29 @@ class TestTranscribeNeverDownloads:
         voice._resolve_dir("es", download=True)
         assert downloads == ["es"]
 
-    def test_transcribe_asks_for_no_download(self, models_dir, monkeypatch):
-        """The whole point: the client-facing path never fetches."""
+    def test_transcribe_asks_for_no_download(self, models_dir, monkeypatch, fake_vosk):
+        """The whole point: the client-facing path never fetches.
+
+        This has to reach _get_model, which means real audio — a stub WAV is
+        rejected by wave.open before transcribe() gets that far, which is how
+        the first version of this test passed with the fix fully reverted.
+        """
         seen = {}
         monkeypatch.setattr(voice, "_get_model",
                             lambda mid, download=True: seen.update(download=download))
         monkeypatch.setattr(voice, "_download",
                             lambda mid: pytest.fail("transcribe must never download"))
-        try:
-            voice.transcribe(b"RIFF____WAVEfmt ", "es")
-        except Exception:
-            pass   # the fake WAV is rejected; we only care what was asked for
-        assert seen.get("download") is not True
+        voice.transcribe(_silent_wav(), "es")
+        assert seen.get("download") is False, (
+            "transcribe resolved the model with downloads enabled — a client-"
+            "supplied id could make the box pull 1.8 GB"
+        )
+
+    def test_a_client_supplied_id_cannot_trigger_a_download_end_to_end(
+            self, models_dir, monkeypatch, fake_vosk):
+        """No stubbing of _get_model: the real resolution path must refuse."""
+        monkeypatch.setattr(voice, "_download",
+                            lambda mid: pytest.fail("a request triggered a 1.8 GB download"))
+        monkeypatch.delenv("VOSK_MODEL_PATH", raising=False)
+        with pytest.raises(ValueError, match="not downloaded"):
+            voice.transcribe(_silent_wav(), "es")

@@ -943,20 +943,22 @@ _PAGE = """<!doctype html>
           ocrAvailable = data.ocr_default || null;
           const list = (data.models || [])
             .map(m => (typeof m === "string" ? m : (m.name || m.model))).filter(Boolean);
+          // Read BEFORE emptying the <select> — clearing its options resets
+          // .value to "", which made the whole "keep what is selected" branch
+          // below dead code and let a tab resume switch models anyway.
+          const current = modelEl.value;
           modelEl.innerHTML = "";
           if (!list.length) {
             const o = document.createElement("option");
             o.textContent = data.default || "(no models found)"; o.value = data.default || "";
             modelEl.appendChild(o);
           } else {
-            // Whatever is selected right now wins: this runs again on every tab
-            // resume, and rebuilding the <select> from the remembered value
-            // silently discarded the model a loaded conversation had restored,
-            // or one an image auto-switch had chosen — both of which assign
-            // modelEl.value without firing "change".
-            // Then this device's remembered pick, then the server's default,
-            // which is one value for every device.
-            const current = modelEl.value;
+            // Whatever was selected wins: this runs again on every tab resume,
+            // and rebuilding from the remembered value silently discarded the
+            // model a loaded conversation had restored, or one an image
+            // auto-switch had chosen — both assign modelEl.value without
+            // firing "change". Then this device's remembered pick, then the
+            // server's default, which is one value for every device.
             const preferred =
               list.indexOf(current) >= 0 ? current
               : list.indexOf(remembered("model")) >= 0 ? remembered("model")
@@ -986,6 +988,7 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
+          if (typeof data.image_turns === "number") KEEP_IMAGE_TURNS = data.image_turns;
           if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
           // A default naming a model that has been deleted or renamed since is
           // otherwise a silent failure on every turn until someone works it out.
@@ -1105,7 +1108,10 @@ _PAGE = """<!doctype html>
       // body for a message whose text was 714 bytes — over a phone connection,
       // for a model that had already read them. The server applies the same
       // rule; this just stops the bytes crossing the network at all.
-      const KEEP_IMAGE_TURNS = 1;
+      // Server-configured (CHAT_IMAGE_TURNS), not hardcoded: the browser strips
+      // before the request leaves the phone, so a hardcoded 1 here left the
+      // documented knob with nothing to keep — raising it did nothing at all.
+      let KEEP_IMAGE_TURNS = 1;
       function withRecentImages(list) {
         const out = list.slice();
         let kept = 0;
@@ -1241,14 +1247,15 @@ _PAGE = """<!doctype html>
               if (!line) continue;
               const obj = JSON.parse(line);
               if (obj.error) throw new Error(obj.error);
-              // Web-grounding progress, emitted before the model starts. A
-              // real one says more than a stopwatch, so it owns the line from
-              // here on — but only a real one. The server also yields an empty
-              // status to *clear* the line (when the planner declines), and
-              // latching on that suppressed the wait counter on exactly the
-              // turns that are slowest.
+              // Web-grounding progress, emitted before the model starts. While
+              // one is on screen it says more than a stopwatch would, so the
+              // counter stays out of the way — but an empty status *clears*
+              // the line, which is what the server sends when the planner
+              // declines, and the wait that follows is the longest one there
+              // is. Ownership tracks the line's current state rather than
+              // latching, so "searching…" then "" hands the line back.
               if (obj.status !== undefined) {
-                if (obj.status) view.statusOwned = true;
+                view.statusOwned = !!obj.status;
                 view.status.textContent = obj.status;
                 view.status.hidden = !obj.status;
                 scrollDown();

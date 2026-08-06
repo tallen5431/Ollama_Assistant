@@ -360,16 +360,33 @@ class TestModelListCaching:
             with pytest.raises(ValueError):
                 ollama_client.list_models()
 
-    def test_the_cache_is_not_shared_mutable_state(self, fake_ollama):
-        """Callers tag the dicts; that must not write into the cache."""
+    def test_the_cache_hands_back_shared_dicts(self, fake_ollama):
+        """Documenting the hazard, not endorsing it.
+
+        A memoised list returns the same dict objects to every caller, so any
+        caller that tags them in place writes into what the next reader sees.
+        That is why /api/models copies — see the test below, which is the one
+        that would fail if it stopped.
+        """
         ollama_client.invalidate_models_cache()
-        first = ollama_client.list_models()
-        first[0]["vision"] = True
-        # A caller that mutates in place would corrupt the next reader; the app
-        # copies before tagging, and this documents why it must.
-        assert "vision" in ollama_client.list_models()[0], (
-            "list_models returns shared dicts — callers must copy before tagging"
+        ollama_client.list_models()[0]["poked"] = True
+        assert "poked" in ollama_client.list_models()[0]
+
+    def test_api_models_does_not_tag_the_shared_cache(self, fake_ollama):
+        """The actual fix. Tagging in place wrote vision/ocr into the cache
+        that every other caller — including vision routing — then read."""
+        import importlib
+        import app as app_module
+        mod = importlib.reload(app_module)
+        ollama_client.invalidate_models_cache()
+
+        mod.app.test_client().get("/api/models")
+        cached = ollama_client.list_models()
+        assert cached, "nothing was cached"
+        assert "vision" not in cached[0], (
+            "/api/models tagged the memoised dicts in place"
         )
+        assert "ocr" not in cached[0]
 
 
 class TestKeepAlive:

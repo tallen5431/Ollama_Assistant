@@ -372,7 +372,10 @@ class TestFetchesDoNotWaitOnStragglers:
             fetch, ["fast1", "slow1", "fast2", "slow2", "fast3", "slow3"], enough=3)
         elapsed = clock.monotonic() - started
 
-        assert len(docs) == 3
+        # Three or four: a better-ranked straggler is given a bounded grace
+        # period, and the caller keeps the best few by rank, so anything that
+        # arrives in time improves the selection rather than delaying it.
+        assert 3 <= len(docs) <= 4
         assert elapsed < 2, f"waited {elapsed:.1f}s for stragglers"
 
     def test_six_candidates_run_in_one_wave_not_two(self):
@@ -396,6 +399,36 @@ class TestFetchesDoNotWaitOnStragglers:
         docs, _ = app_module._run_all(
             lambda u: {"url": u, "title": u, "text": "b"}, ["a", "b", "c"])
         assert len(docs) == 3
+
+    def test_a_better_ranked_straggler_is_not_lost_to_a_faster_one(self):
+        """Selecting purely by completion order means the answer is grounded in
+        the fastest pages, not the best-ranked ones the search chose."""
+        import time as clock
+
+        def fetch(url):
+            clock.sleep(0.6 if url == "rank0" else 0.05)
+            return {"url": url, "title": url, "text": "body"}
+
+        started = clock.monotonic()
+        docs, _ = app_module._run_all(
+            fetch, ["rank0", "rank1", "rank2", "rank3"], enough=3)
+        assert "rank0" in [d["url"] for d in docs], "the top-ranked page was dropped"
+        assert clock.monotonic() - started < 2
+
+    def test_a_hopeless_straggler_does_not_hold_the_turn(self):
+        """The grace period is bounded; a genuinely slow page is still dropped."""
+        import time as clock
+
+        def fetch(url):
+            clock.sleep(10 if url == "rank0" else 0.05)
+            return {"url": url, "title": url, "text": "body"}
+
+        started = clock.monotonic()
+        docs, _ = app_module._run_all(
+            fetch, ["rank0", "rank1", "rank2", "rank3"], enough=3)
+        elapsed = clock.monotonic() - started
+        assert "rank0" not in [d["url"] for d in docs]
+        assert elapsed < 4, f"waited {elapsed:.1f}s on a hopeless straggler"
 
     def test_fewer_successes_than_wanted_does_not_hang(self):
         import time as clock
@@ -446,7 +479,7 @@ class TestFollowingLinks:
     def test_a_relevant_linked_page_is_read_too(self, linked_site, monkeypatch):
         rig, base = linked_site
         monkeypatch.setattr(web, "choose_links",
-                            lambda q, links, model, max_links=2: links[:1])
+                            lambda q, links, model, max_links=2, **kw: links[:1])
         out = lines(self.ask(rig, base, "how strong is the hinge?"))
         chat_call = [r for r in rig["ollama"].requests if r.get("stream")][-1]
         system = chat_call["messages"][0]["content"]
@@ -459,7 +492,7 @@ class TestFollowingLinks:
         rig, base = linked_site
         offered = {}
         monkeypatch.setattr(web, "choose_links",
-                            lambda q, links, model, max_links=2: offered.update(links=links) or [])
+                            lambda q, links, model, max_links=2, **kw: offered.update(links=links) or [])
         self.ask(rig, base, "how strong is the hinge?").get_data()
         assert offered["links"], "nothing was offered at all"
         assert all("elsewhere.example" not in l["url"] for l in offered["links"])
@@ -484,10 +517,9 @@ class TestFollowingLinks:
         rig, base = linked_site
         monkeypatch.setattr(web, "choose_links",
                             lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
-        resp = self.ask(rig, base, "how strong is the hinge?")
-        out = lines(resp)
-        assert any("error" in o for o in out) or \
-            "".join(o.get("message", {}).get("content", "") for o in out) == "Widget 5 is out."
+        out = lines(self.ask(rig, base, "how strong is the hinge?"))
+        assert not [o for o in out if "error" in o], "a picker failure broke the turn"
+        assert "".join(o.get("message", {}).get("content", "") for o in out) == "Widget 5 is out."
 
     def test_the_link_map_reaches_the_model_even_without_following(self, linked_site, monkeypatch):
         """So it can say where something is covered rather than guessing."""
@@ -505,6 +537,6 @@ class TestFollowingLinks:
         rounds = []
         monkeypatch.setattr(
             web, "choose_links",
-            lambda q, links, model, max_links=2: rounds.append(1) or links[:1])
+            lambda q, links, model, max_links=2, **kw: rounds.append(1) or links[:1])
         self.ask(rig, base, "how strong is the hinge?").get_data()
         assert len(rounds) == 1

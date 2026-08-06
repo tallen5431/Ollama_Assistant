@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import importlib
 import sys
 from pathlib import Path
 
@@ -15,6 +17,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # was live when app was reloaded becomes app's permanent "original" and
 # monkeypatch dutifully restores it forever.
 _WATCHED = ("app", "ollama_client", "web", "store", "voice")
+
+
+def _is_test_stub(value: object) -> bool:
+    """Whether a callable came from a test rather than from the app.
+
+    __module__ alone is not enough: a unittest.mock object reports "unittest.mock"
+    and a functools.partial has no __module__ at all, so both slipped past the
+    first version of this check.
+
+    Anything that objects to being inspected is not a stub. app.py's namespace
+    holds Flask's ``request``, a proxy that raises "working outside of request
+    context" the moment an attribute is read from it.
+    """
+    try:
+        return _classify(value)
+    except Exception:  # noqa: BLE001 - an object that resists inspection is not ours
+        return False
+
+
+def _classify(value: object) -> bool:
+    module = getattr(value, "__module__", None) or ""
+    if module.startswith("test_") or module == "conftest":
+        return True
+    if module.startswith("unittest.mock") or type(value).__module__.startswith("unittest.mock"):
+        return True
+    if isinstance(value, functools.partial):
+        return _classify(value.func)
+    # A closure defined in a test module: the function object itself may report
+    # the app's module after a reload, but its code object cannot lie about the
+    # file it was compiled from.
+    code = getattr(value, "__code__", None)
+    filename = getattr(code, "co_filename", "") if code else ""
+    return "/tests/" in filename.replace("\\", "/")
 
 
 @pytest.fixture(autouse=True)
@@ -41,17 +76,31 @@ def no_stub_left_behind():
     unrelated module reload happened to sit in between.
     """
     yield
+    leaked = []
     for name in _WATCHED:
         module = sys.modules.get(name)
         if module is None:
             continue
         for attr, value in list(vars(module).items()):
-            if attr.startswith("_") or not callable(value):
+            # Dunders only. Private names are exactly the ones these tests patch
+            # (_is_public, _get_model, _download), so skipping them missed the
+            # leak wherever it was most likely.
+            if attr.startswith("__"):
                 continue
-            origin = getattr(value, "__module__", None) or ""
-            if origin.startswith("test_") or origin == "conftest":
-                pytest.fail(
-                    f"{name}.{attr} is still a stub from {origin} after this test. "
-                    "Patch the reloaded app module, not the dependency it imported "
-                    "from — otherwise every later test in the session inherits it."
-                )
+            try:
+                if not callable(value):
+                    continue
+            except Exception:  # noqa: BLE001 - a proxy that needs a request context
+                continue
+            if _is_test_stub(value):
+                leaked.append(f"{name}.{attr}")
+    if leaked:
+        # Reported, not repaired: reloading a module during teardown to undo the
+        # leak takes the rest of the session with it, which is worse than the
+        # problem. Downstream tests may fail too — the *first* failure is the
+        # one to read.
+        pytest.fail(
+            f"{', '.join(leaked)} still held a test stub after this test. Patch the "
+            "reloaded app module, not the dependency it imported from — otherwise "
+            "every later test in the session inherits it."
+        )

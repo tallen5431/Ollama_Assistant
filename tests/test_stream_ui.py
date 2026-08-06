@@ -74,8 +74,10 @@ function refreshConversations() {}
 let lastView = null;
 function addAssistant() {
   const root = el("div"); chatEl.children.push(root);
+  const think = el("details");
+  think.hidden = true;      // as the real markup ships it: <details ... hidden>
   lastView = { root, bubble: el("div"), status: el("div"), meta: el("div"),
-               think: el("div"), thinkBody: el("div") };
+               think, thinkBody: el("div") };
   return lastView;
 }
 class AbortController { constructor() { this.signal = {}; } abort() {} }
@@ -396,6 +398,15 @@ class TestTheWaitCounterIsNotSuppressedByAnEmptyStatus:
     def test_an_empty_status_does_not_take_over_the_line(self):
         assert self.owned_after([{"status": ""}, {"message": {"content": "hi"}},
                                  {"done": True}]) is False
+
+    def test_a_status_that_is_then_cleared_hands_the_line_back(self):
+        """The real sequence when the planner declines: _gather_web always
+        yields "Working out what to search for…" first, then "" to clear it.
+        Latching on the first left the counter suppressed for the whole of the
+        longest wait there is — a cold 30b with the web toggle left on."""
+        assert self.owned_after([{"status": "Working out what to search for…"},
+                                 {"status": ""},
+                                 {"message": {"content": "hi"}}, {"done": True}]) is False
 
     def test_a_real_status_does(self):
         assert self.owned_after([{"status": "Searching: x"}, {"message": {"content": "hi"}},

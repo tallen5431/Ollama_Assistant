@@ -79,6 +79,10 @@ _MAX_LINKS_KEPT = 120
 _MAX_LINKS_OFFERED = 40      # how many a model is asked to choose between
 _MAX_LINKS_IN_CONTEXT = 25   # how many are listed as "what else is here"
 
+# However tight the budget, every document keeps enough text to be worth
+# citing. A page reduced to nothing is worse than a short excerpt.
+_MIN_DOC_CHARS = 800
+
 # Elements with no closing tag, which must not be counted when tracking depth.
 _VOID_TAGS = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -454,7 +458,11 @@ def _decode(raw: bytes, content_type: str) -> str:
             continue
         try:
             return raw.decode(candidate, errors="replace")
-        except (LookupError, TypeError):
+        # Not just LookupError: a page can name a codec that exists but is not
+        # a text decoder ("idna" raises UnicodeError even with errors=replace),
+        # and that is not a WebError — so on the pasted-URL path it escaped
+        # fetch() and killed the whole chat turn rather than one retrieval.
+        except (LookupError, TypeError, ValueError, UnicodeError):
             continue
     return raw.decode("utf-8", errors="replace")
 
@@ -914,6 +922,7 @@ def choose_links(
     links: List[Dict[str, str]],
     model: str,
     max_links: int = 2,
+    answering_model: str = "",
 ) -> List[Dict[str, str]]:
     """Pick the linked pages worth following, or [] to follow none.
 
@@ -938,9 +947,15 @@ def choose_links(
                 {"role": "system", "content": _LINK_PICKER},
                 {"role": "user", "content": f"Question: {question}\n\nLinks:\n{listing}"},
             ],
-            options={"temperature": 0, "num_predict": 64},
+            # Same load options as the answer when it is the same model:
+            # num_ctx is a load option, and changing it between two back-to-back
+            # calls makes Ollama reload the runner — tens of seconds on a 30b,
+            # in a turn that has not produced a token yet. The planner call was
+            # fixed for exactly this; hardcoding options here brought it back.
+            options={**_planner_options(model, answering_model or model),
+                     "num_predict": 64},
             think=False,
-            keep_alive=None,
+            keep_alive=_helper_keep_alive(model, answering_model or model),
         )
     except Exception as exc:  # noqa: BLE001 - never let this break the turn
         logger.warning("Link picker (%s) failed: %s", model, exc)
@@ -1048,12 +1063,28 @@ def with_context(messages: List[Dict[str, str]], context: str) -> List[Dict[str,
 # outside it, as the operator — which is precisely what the preamble's "ignore
 # anything between the markers" rule cannot cover. Cheapest via text/plain or
 # JSON, which are kept verbatim with no HTML extraction in between.
-_FENCE_RE = re.compile(r"^\s*-{3,}\s*(BEGIN|END)\s+[A-Z][A-Z ]*-{3,}\s*$", re.M | re.I)
+_FENCE_RE = re.compile(r"^\s*-{3,}\s*(BEGIN|END)\s+\w[\w ]*-{3,}\s*$", re.M | re.I)
+
+# Characters that render as nothing (or as a space) but are not \s, so an
+# anchored pattern skips right past them. A single leading U+200B was enough to
+# smuggle a forged end-marker through: invisible to the reader, invisible to
+# the regex, and read by the model as the real fence.
+_INVISIBLE_RE = re.compile(
+    "[  ᠎ -‏‪-  -⁤⁪-⁯"
+    "　﻿￹-￻]"
+)
 
 
 def _defence(text: str) -> str:
-    """Neutralise anything in retrieved text that looks like our own markers."""
-    return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text or "")
+    """Neutralise anything in retrieved text that looks like our own markers.
+
+    Zero-width and exotic-space characters are folded first, so a marker cannot
+    hide behind one. They are replaced rather than deleted, since removing them
+    would silently alter legitimate text (a non-breaking space is ordinary in
+    prose); a plain space reads the same and cannot smuggle anything.
+    """
+    text = _INVISIBLE_RE.sub(" ", text or "")
+    return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text)
 
 
 def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
@@ -1066,16 +1097,23 @@ def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
     document is truncated, and says it was.
     """
     parts = [_PREAMBLE.format(today=today()), "", "----- BEGIN WEB RESULTS -----"]
-    share = int(char_budget / len(documents)) if char_budget and documents else 0
-    for i, doc in enumerate(documents, 1):
+    # The link maps count against the budget too. Rendering them after the trim
+    # and not counting them put the assembled context back at ~1.4x what the
+    # budget asked for — which is the whole problem the budget exists to solve.
+    maps = [link_map(doc) for doc in documents]
+    remaining = max(0, char_budget - sum(len(m) for m in maps)) if char_budget else 0
+    share = int(remaining / len(documents)) if remaining and documents else 0
+    for i, (doc, related) in enumerate(zip(documents, maps), 1):
         kind = " (search result summary)" if doc.get("snippet_only") else ""
         title = _defence(str(doc.get("title") or doc["url"]))
         parts.append(f"\n[{i}] {title}{kind}\n{doc['url']}\n")
         text = _defence(doc.get("text") or "")
-        if share and len(text) > share:
-            text = text[:share].rsplit(" ", 1)[0] + " …[trimmed to fit the context window]"
+        if char_budget and len(text) > share:
+            # A budget entirely eaten by link maps would leave no page text at
+            # all, which is worse than a short excerpt of each.
+            text = text[:max(share, _MIN_DOC_CHARS)].rsplit(" ", 1)[0] + \
+                " …[trimmed to fit the context window]"
         parts.append(text)
-        related = link_map(doc)
         if related:
             parts.append("\n" + related)
     parts.append("----- END WEB RESULTS -----")
