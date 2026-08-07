@@ -256,6 +256,12 @@ _PAGE = """<!doctype html>
           </label>
           <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
         </div>
+        <div class="voicebar" id="exifbar" hidden>
+          <label class="voicebar-check" title="Read the date, camera and GPS position a photo carries, and tell the model. Off by default: the app re-encodes images, which strips this, so leaving it off means the location never leaves your phone at all.">
+            <input type="checkbox" id="exif"> 📍 Photo details
+          </label>
+          <span class="voicebar-label" id="exifnote">date, camera and location from the photo itself</span>
+        </div>
         <div class="thumbs" id="thumbs" hidden></div>
         <div class="composer">
           <textarea id="input" rows="1" placeholder="Type a message…"></textarea>
@@ -286,6 +292,12 @@ _PAGE = """<!doctype html>
       const continuousEl = document.getElementById("continuous");
       const webEl    = document.getElementById("web");
       const webBar   = document.getElementById("webbar");
+      const exifEl   = document.getElementById("exif");
+      const exifBar  = document.getElementById("exifbar");
+      // Declared with the element, not with the toggle wiring further down:
+      // toAttachment() reads it, and a "let" below its use is a temporal
+      // dead zone waiting for someone to call that function earlier.
+      let exifOn = false;
       const insecureNote = document.getElementById("insecureNote");
       const drawerEl = document.getElementById("drawer");
       const backdropEl = document.getElementById("backdrop");
@@ -658,6 +670,135 @@ _PAGE = """<!doctype html>
         });
       }
 
+      // ---- EXIF ----
+      // Read before the canvas re-encode, which is the only chance: drawing an
+      // image onto a canvas and reading it back produces clean pixels with no
+      // metadata at all, so nothing downstream could recover this.
+      //
+      // Hand-rolled rather than a library: this is a few hundred bytes at the
+      // front of a JPEG, the app ships no build step and loads nothing from a
+      // CDN, and the alternative is a dependency for six tags.
+      const EXIF_HEAD_BYTES = 256 * 1024;   // EXIF lives at the very front
+
+      function readExif(file) {
+        if (!file || !file.slice || !window.DataView) return Promise.resolve(null);
+        return file.slice(0, EXIF_HEAD_BYTES).arrayBuffer()
+          .then(buf => parseExif(new DataView(buf)))
+          .catch(() => null);
+      }
+
+      function parseExif(view) {
+        if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return null;   // not a JPEG
+        // Walk the marker segments looking for APP1 with an "Exif\\0\\0" payload.
+        let offset = 2;
+        while (offset + 4 <= view.byteLength) {
+          if (view.getUint8(offset) !== 0xff) return null;   // desynchronised
+          const marker = view.getUint8(offset + 1);
+          if (marker === 0xda || marker === 0xd9) return null;   // image data starts
+          const size = view.getUint16(offset + 2);
+          if (size < 2) return null;
+          if (marker === 0xe1 && offset + 10 <= view.byteLength &&
+              view.getUint32(offset + 4) === 0x45786966) {
+            return readTiff(view, offset + 10);
+          }
+          offset += 2 + size;
+        }
+        return null;
+      }
+
+      function readTiff(view, base) {
+        if (base + 8 > view.byteLength) return null;
+        const order = view.getUint16(base);
+        if (order !== 0x4949 && order !== 0x4d4d) return null;
+        const le = order === 0x4949;                       // "II" is little-endian
+        if (view.getUint16(base + 2, le) !== 0x002a) return null;
+
+        const out = {};
+        const ifd0 = readIfd(view, base, base + view.getUint32(base + 4, le), le);
+        if (!ifd0) return null;
+
+        const make = ifd0[0x010f], model = ifd0[0x0110];
+        const camera = [make, model].filter(Boolean).join(" ").trim();
+        // "Google Pixel 8" rather than "Google Google Pixel 8": makers often
+        // repeat the brand in the model.
+        if (camera) out.camera = model && make && model.indexOf(make) === 0 ? model : camera;
+
+        if (ifd0[0x8769] !== undefined) {
+          const exif = readIfd(view, base, base + ifd0[0x8769], le) || {};
+          // DateTimeOriginal is when the shutter fired; DateTime is when the
+          // file was last written, which an edit or a copy can change.
+          const stamp = exif[0x9003] || exif[0x9004] || ifd0[0x0132];
+          if (stamp) out.taken = String(stamp).trim();
+        }
+
+        if (ifd0[0x8825] !== undefined) {
+          const gps = readIfd(view, base, base + ifd0[0x8825], le) || {};
+          const lat = dms(gps[0x0002], gps[0x0001]);
+          const lon = dms(gps[0x0004], gps[0x0003]);
+          if (lat !== null && lon !== null) { out.lat = lat; out.lon = lon; }
+          if (typeof gps[0x0006] === "number") {
+            out.altitude = Math.round(gps[0x0006] * (gps[0x0005] === 1 ? -1 : 1));
+          }
+        }
+        return Object.keys(out).length ? out : null;
+      }
+
+      // One IFD as {tag: value}. Only the types these tags actually use.
+      function readIfd(view, base, at, le) {
+        if (at + 2 > view.byteLength) return null;
+        const count = view.getUint16(at, le);
+        const out = {};
+        for (let i = 0; i < count; i++) {
+          const entry = at + 2 + i * 12;
+          if (entry + 12 > view.byteLength) break;
+          const tag = view.getUint16(entry, le);
+          const type = view.getUint16(entry + 2, le);
+          const length = view.getUint32(entry + 4, le);
+          const width = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 }[type];
+          if (!width) continue;
+          const bytes = width * length;
+          // Values of four bytes or fewer are stored in the entry itself.
+          const at2 = bytes <= 4 ? entry + 8 : base + view.getUint32(entry + 8, le);
+          if (at2 < 0 || at2 + bytes > view.byteLength) continue;
+          out[tag] = readValue(view, at2, type, length, le);
+        }
+        return out;
+      }
+
+      function readValue(view, at, type, length, le) {
+        if (type === 2) {                                   // ASCII
+          let s = "";
+          for (let i = 0; i < length; i++) {
+            const c = view.getUint8(at + i);
+            if (!c) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        }
+        if (type === 5 || type === 10) {                    // RATIONAL
+          const read = (o) => type === 5
+            ? view.getUint32(o, le) / (view.getUint32(o + 4, le) || 1)
+            : view.getInt32(o, le) / (view.getInt32(o + 4, le) || 1);
+          if (length === 1) return read(at);
+          const out = [];
+          for (let i = 0; i < length; i++) out.push(read(at + i * 8));
+          return out;
+        }
+        if (type === 3) return view.getUint16(at, le);
+        if (type === 4 || type === 9) return view.getUint32(at, le);
+        if (type === 1 || type === 7) return view.getUint8(at);
+        return null;
+      }
+
+      // Degrees/minutes/seconds plus a N/S/E/W reference, to a signed decimal.
+      function dms(parts, ref) {
+        if (!Array.isArray(parts) || parts.length < 3) return null;
+        const value = parts[0] + parts[1] / 60 + parts[2] / 3600;
+        if (!isFinite(value)) return null;
+        const sign = /^[SW]/i.test(String(ref || "")) ? -1 : 1;
+        return Math.round(value * sign * 1e6) / 1e6;
+      }
+
       function loadBitmap(file) {
         // imageOrientation honours EXIF so phone photos aren't sent sideways.
         if (window.createImageBitmap) {
@@ -721,11 +862,16 @@ _PAGE = """<!doctype html>
       }
 
       async function toAttachment(file, maxDim = IMG_MAX_DIM) {
+        // Before the canvas: re-encoding produces clean pixels with no metadata,
+        // so this is the only point at which it still exists.
+        const meta = exifOn ? await readExif(file) : null;
         const bmp = await loadBitmap(file);
         const canvas = toCanvas(bmp, bmp.width || bmp.naturalWidth,
                                      bmp.height || bmp.naturalHeight, maxDim);
         if (bmp.close) bmp.close();
-        return encodeAttachment(canvas);
+        const att = encodeAttachment(canvas);
+        if (meta) att.meta = meta;
+        return att;
       }
 
       function addAttachment(att) {
@@ -995,6 +1141,7 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
+          exifBar.hidden = false;
           if (typeof data.image_turns === "number") KEEP_IMAGE_TURNS = data.image_turns;
           if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
           // A default naming a model that has been deleted or renamed since is
@@ -1140,6 +1287,7 @@ _PAGE = """<!doctype html>
           if (kept > KEEP_IMAGE_TURNS) {
             const copy = Object.assign({}, out[i]);
             delete copy.images;
+            delete copy.image_meta;   // it describes photos that are no longer here
             out[i] = copy;
           }
         }
@@ -1155,7 +1303,13 @@ _PAGE = """<!doctype html>
         const userView = addUser(text, images);
         // Ollama takes images as bare base64 alongside the text, not as a data URL.
         const userMsg = { role: "user", content: text };
-        if (images.length) userMsg.images = images.map(img => img.b64);
+        if (images.length) {
+          userMsg.images = images.map(img => img.b64);
+          // Parallel to images[], so the server can pair them up. Only sent
+          // when at least one photo actually carried any.
+          const meta = images.map(img => img.meta || null);
+          if (meta.some(Boolean)) userMsg.image_meta = meta;
+        }
         messages.push(userMsg);
         inputEl.value = ""; autosize();
         // Deliberately not saved yet: a failed turn is rolled back on screen and
@@ -1206,7 +1360,8 @@ _PAGE = """<!doctype html>
           if (turnSaved || messages !== thread) return;
           turnSaved = true;
           await ensureConversation(text);
-          await saveMessage("user", text, userMsg.images || null, null);
+          await saveMessage("user", text, userMsg.images || null, null,
+                            userMsg.image_meta || null);
           if (reply) await saveMessage("assistant", reply, null, sources || null);
           refreshConversations();
         }
@@ -1512,13 +1667,14 @@ _PAGE = """<!doctype html>
         return currentConvoId;
       }
 
-      async function saveMessage(role, content, images, sources) {
+      async function saveMessage(role, content, images, sources, meta) {
         if (!historyOn || !currentConvoId) return;
         try {
           const resp = await fetch("api/conversations/" + currentConvoId + "/messages", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ role: role, content: content,
-                                   images: images || null, sources: sources || null }) });
+                                   images: images || null, sources: sources || null,
+                                   image_meta: meta || null }) });
           if (!resp.ok) {
             const data = await resp.json().catch(function () { return {}; });
             noteHistoryBroken(data.error);
@@ -1548,6 +1704,7 @@ _PAGE = """<!doctype html>
             addUser(msg.content, imgs);
             const entry = { role: "user", content: msg.content };
             if (imgs.length) entry.images = imgs.map(function (i) { return i.b64; });
+            if (imgs.length && msg.image_meta) entry.image_meta = msg.image_meta;
             messages.push(entry);
           } else {
             const view = addAssistant();
@@ -1850,6 +2007,12 @@ _PAGE = """<!doctype html>
       rememberToggle(autoSendEl, "chatAutoSend", false);
       rememberToggle(continuousEl, "chatContinuous", false);
       rememberToggle(webEl, "chatWeb", false);
+      // Off by default. The app strips this by re-encoding, so leaving it
+      // off means a photo's GPS position never leaves the phone at all —
+      // that is a property worth having to opt out of, not into.
+      rememberToggle(exifEl, "chatExif", false);
+      exifOn = exifEl.checked;
+      exifEl.addEventListener("change", () => { exifOn = exifEl.checked; });
 
       menuBtn.addEventListener("click", openDrawer);
       document.getElementById("drawerClose").addEventListener("click", closeDrawer);

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content         TEXT NOT NULL,
     images          TEXT,
     sources         TEXT,
+    image_meta      TEXT,
     created_at      REAL NOT NULL
 );
 
@@ -54,6 +55,11 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation
 CREATE INDEX IF NOT EXISTS idx_conversations_updated
     ON conversations (updated_at DESC);
 """
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
+# existing table at whatever shape it already had, so without this an in-place
+# upgrade keeps the old columns and every read of a new one raises.
+_ADDED_COLUMNS = (("messages", "image_meta", "TEXT"),)
 
 _TITLE_MAX = 60
 
@@ -77,10 +83,26 @@ def _connect() -> Iterator[sqlite3.Connection]:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any column a database written by an earlier version is missing.
+
+    ALTER TABLE ADD COLUMN is cheap — sqlite rewrites no rows, it only edits the
+    stored schema — so running the check on every connection costs a schema
+    lookup, not a table scan.
+    """
+    for table, column, kind in _ADDED_COLUMNS:
+        names = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        # An empty set means the table does not exist, which _SCHEMA has just
+        # ruled out; adding a column to nothing would raise.
+        if names and column not in names:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 def available() -> bool:
@@ -169,7 +191,7 @@ def get(convo_id: str) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
         messages = conn.execute(
-            "SELECT role, content, images, sources FROM messages"
+            "SELECT role, content, images, sources, image_meta FROM messages"
             " WHERE conversation_id = ? ORDER BY seq",
             (convo_id,),
         ).fetchall()
@@ -181,6 +203,9 @@ def get(convo_id: str) -> Optional[Dict[str, Any]]:
             "content": m["content"],
             "images": json.loads(m["images"]) if m["images"] else None,
             "sources": json.loads(m["sources"]) if m["sources"] else None,
+            # Reopening a thread and asking "where was that taken?" should get
+            # the same answer as asking it the first time round.
+            "image_meta": json.loads(m["image_meta"]) if m["image_meta"] else None,
         }
         for m in messages
     ]
@@ -193,6 +218,7 @@ def add_message(
     content: str,
     images: Optional[List[str]] = None,
     sources: Optional[List[Dict[str, str]]] = None,
+    image_meta: Optional[List[Optional[Dict[str, Any]]]] = None,
 ) -> bool:
     """Append a message. Returns False when the conversation is gone.
 
@@ -213,8 +239,9 @@ def add_message(
         ).fetchone()
         try:
             conn.execute(
-                "INSERT INTO messages (conversation_id, seq, role, content, images, sources, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO messages"
+                " (conversation_id, seq, role, content, images, sources, image_meta, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     convo_id,
                     seq_row["next"],
@@ -222,6 +249,9 @@ def add_message(
                     content or "",
                     json.dumps(images) if images else None,
                     json.dumps(sources) if sources else None,
+                    # `any` rather than truthiness: [None, {...}] is a real
+                    # entry for a second photo, [None, None] is nothing at all.
+                    json.dumps(image_meta) if image_meta and any(image_meta) else None,
                     now,
                 ),
             )

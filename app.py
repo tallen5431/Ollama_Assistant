@@ -311,7 +311,9 @@ def api_conversation_add_message(convo_id: str) -> Any:
         return jsonify({"error": "'role' must be 'user' or 'assistant'"}), 400
     images = body.get("images") if isinstance(body.get("images"), list) else None
     sources = body.get("sources") if isinstance(body.get("sources"), list) else None
-    if not store.add_message(convo_id, role, str(body.get("content") or ""), images, sources):
+    meta = body.get("image_meta") if isinstance(body.get("image_meta"), list) else None
+    if not store.add_message(convo_id, role, str(body.get("content") or ""), images,
+                             sources, meta):
         return jsonify({"error": "No such conversation"}), 404
     return jsonify({"ok": True})
 
@@ -343,7 +345,7 @@ def api_chat() -> Any:
     # Non-streaming path — single JSON object.
     if body.get("stream") is False:
         try:
-            reply = ollama_chat(model, messages)
+            reply = ollama_chat(model, web.strip_image_meta(messages))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 502
         return jsonify({"model": model, "reply": reply})
@@ -360,12 +362,26 @@ def api_chat() -> Any:
             # Always send num_ctx, not only on web turns: changing a model's
             # load options mid-conversation makes Ollama reload the runner and
             # throw away the KV cache.
+            options = {"num_ctx": get_num_ctx()}
+
+            # A photo's own record of when and where it was taken. Even a
+            # vision model needs telling: the browser re-encodes every upload
+            # through a canvas, so the pixels that arrive here carry no EXIF at
+            # all and no model, however good its eyes, can read it off them.
+            #
+            # Read it once and then take it off the messages, so that from here
+            # on the only thing holding the user's coordinates is the answering
+            # model's own context. In particular the search path below must not
+            # have them: it turns the conversation into queries and sends those
+            # to a search engine.
+            meta_context = web.image_metadata(web.conversation_image_meta(messages))
+            turns = web.strip_image_meta(messages)
+
             # Only the most recent image-bearing turn keeps its payload. A
             # vision model otherwise re-reads every screenshot in the thread on
             # every turn, and turn six is almost never about turn one's image.
             # Earlier turns keep their text, so the conversation still reads.
-            convo = web.keep_recent_images(messages, keep_turns=get_image_turns())
-            options = {"num_ctx": get_num_ctx()}
+            convo = web.keep_recent_images(turns, keep_turns=get_image_turns())
 
             # An image attached to a model that cannot see used to force a
             # switch, which meant giving up your best model exactly when you
@@ -374,7 +390,7 @@ def api_chat() -> Any:
             transcript = None
             # Any image still in the thread, not only a newly attached one, so a
             # follow-up question about the same screenshot keeps its context.
-            images = web.conversation_images(messages)
+            images = web.conversation_images(turns)
             if images and not _model_has_vision(model):
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
@@ -404,12 +420,15 @@ def api_chat() -> Any:
                         context = web.image_failed_context()
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
-                    convo = web.with_context(web.strip_images(messages), context)
+                    convo = web.with_context(web.strip_images(turns), context)
+
+            if meta_context:
+                convo = web.with_context(convo, meta_context)
 
             if use_web:
                 documents: List[Dict[str, str]] = []
                 outcome: Dict[str, bool] = {}
-                for line in _gather_web(model, messages, documents, transcript, outcome):
+                for line in _gather_web(model, turns, documents, transcript, outcome):
                     yield line
                 if not documents and outcome.get("attempted"):
                     # Retrieval ran and produced nothing. Say so, or the answer
