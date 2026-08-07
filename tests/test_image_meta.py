@@ -392,25 +392,28 @@ class TestItReachesTheModel:
         assert all("image_meta" not in m for m in blocking["messages"])
 
 
-class TestItDoesNotReachTheInternet:
-    """Web search is the one path in this app that talks to a stranger.
+class TestTheSearchPlannerCanUseIt:
+    """"What's this building?" is a different search from a known position.
 
-    The planner turns the conversation into queries, and those queries go to a
-    search engine. Coordinates read off the user's own photos must not be in
-    them: the metadata turn is added to ``convo``, which the planner is never
-    given. These pin that down at the seam rather than by looking for the
-    numbers downstream, because the planner truncates its input — a leak can be
-    real and still not show up in the query.
+    The planner runs on the same machine as everything else, so it may have the
+    photo's facts — but what it *writes* is sent to a search engine, which makes
+    this the one place the position can leave the house. Hence its own switch.
     """
 
-    def _run(self, rig, monkeypatch):
+    def _run(self, rig, monkeypatch, **env):
         monkeypatch.setenv("WEB_ENABLED", "1")
-        seen, searched = {}, []
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        seen, searched = {"planner": [], "given": None}, []
         monkeypatch.setattr(web, "search", lambda q, limit=3: searched.append(q) or [])
+
+        def planner(model, messages, **kw):
+            seen["planner"].append(json.dumps(messages))
+            return "Q: nearby landmarks"
+
         # The planner imports ollama_client.chat itself, so patching app's
         # reference does not reach it.
-        monkeypatch.setattr("ollama_client.chat",
-                            lambda model, messages, **kw: "SEARCH: what is at this place")
+        monkeypatch.setattr("ollama_client.chat", planner)
 
         real = app_module._gather_web
 
@@ -423,26 +426,95 @@ class TestItDoesNotReachTheInternet:
             {"role": "user", "content": "what is near here?", "images": ["ZmFrZQ=="],
              "image_meta": [FULL]}]})
         resp.get_data()
-        assert "given" in seen, "the web path did not run"
-        return seen["given"], searched
+        assert seen["given"] is not None, "the web path did not run"
+        assert seen["planner"], "the planner did not run"
+        return seen, searched
 
-    def test_the_search_path_is_handed_the_conversation_unchanged(self, rig, monkeypatch):
-        given, _ = self._run(rig, monkeypatch)
-        assert "51.51" not in given and "0.1275" not in given
-        assert "camera recorded" not in given, "the metadata turn must not be in it"
-        assert "image_meta" not in given
+    def test_the_planner_is_told_where_and_when(self, rig, monkeypatch):
+        seen, _ = self._run(rig, monkeypatch)
+        prompt = seen["planner"][0]
+        assert "51.510000" in prompt and "-0.127500" in prompt
+        assert "14 July 2026" in prompt
 
-    def test_no_coordinate_reaches_the_search_engine(self, rig, monkeypatch):
-        _, searched = self._run(rig, monkeypatch)
+    def test_it_arrives_as_a_note_not_as_the_fenced_system_turn(self, rig, monkeypatch):
+        """The planner gets a few hundred characters; a preamble would eat them."""
+        seen, _ = self._run(rig, monkeypatch)
+        prompt = seen["planner"][0]
+        assert "the photo records:" in prompt
+        assert "not instructions" not in prompt, "the long preamble must not be here"
+
+    def test_the_conversation_itself_still_carries_no_raw_payload(self, rig, monkeypatch):
+        """It travels as prose put somewhere deliberately, not as a JSON field."""
+        seen, _ = self._run(rig, monkeypatch)
+        assert "image_meta" not in seen["given"]
+
+    def test_the_switch_keeps_the_date_and_drops_the_position(self, rig, monkeypatch):
+        seen, _ = self._run(rig, monkeypatch, WEB_SHARE_LOCATION="0")
+        prompt = seen["planner"][0]
+        assert "51.510000" not in prompt and "-0.127500" not in prompt
+        assert "14 July 2026" in prompt, "the date is not the sensitive part"
+        assert "Google Pixel 8" in prompt
+
+    def test_with_the_switch_off_no_coordinate_reaches_the_search_engine(self, rig, monkeypatch):
+        _, searched = self._run(rig, monkeypatch, WEB_SHARE_LOCATION="0")
         assert searched, "nothing was searched"
         for query in searched:
             assert "51.51" not in query and "0.1275" not in query
 
-    def test_the_answering_model_still_gets_it_on_a_web_turn(self, rig, monkeypatch):
-        """Withholding it from search must not withhold it from the answer."""
-        self._run(rig, monkeypatch)
+    def test_the_answering_model_gets_the_full_version_regardless(self, rig, monkeypatch):
+        self._run(rig, monkeypatch, WEB_SHARE_LOCATION="0")
         system = [m for m in _sent(rig["ollama"]) if m["role"] == "system"]
-        assert any("51.510000" in m["content"] for m in system)
+        assert any("51.510000" in m["content"] for m in system), \
+            "withholding it from search must not withhold it from the answer"
+
+    def test_a_stale_photo_stops_steering_later_searches(self, rig, monkeypatch):
+        """Same gate as the transcription: only an image attached to this turn."""
+        monkeypatch.setenv("WEB_ENABLED", "1")
+        monkeypatch.setattr(web, "search", lambda q, limit=3: [])
+        prompts = []
+        monkeypatch.setattr("ollama_client.chat",
+                            lambda model, messages, **kw: prompts.append(json.dumps(messages))
+                            or "Q: paris weather")
+        resp = rig["client"].post("/api/chat", json={"web": True, "messages": [
+            {"role": "user", "content": "what is this?", "images": ["ZmFrZQ=="],
+             "image_meta": [FULL]},
+            {"role": "assistant", "content": "A building."},
+            {"role": "user", "content": "what is the weather in Paris?"},
+        ]})
+        resp.get_data()
+        assert prompts, "the planner did not run"
+        assert "51.510000" not in prompts[0]
+
+
+class TestTheDeploymentPicksTheDefault:
+    """A fresh browser follows the server; one that has chosen keeps its choice."""
+
+    def _health(self, rig, monkeypatch, **env):
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr(app_module, "list_models", lambda **kw: [])
+        return rig["client"].get("/api/health").get_json()
+
+    def test_on_by_default(self, rig, monkeypatch):
+        assert self._health(rig, monkeypatch)["photo_meta"] is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+    def test_the_operator_can_turn_it_round(self, rig, monkeypatch, value):
+        assert self._health(rig, monkeypatch, PHOTO_META=value)["photo_meta"] is False
+
+    def test_the_page_starts_it_off_and_lets_health_turn_it_on(self):
+        """Off first, then on — never the reverse.
+
+        A page that started it on and waited to be corrected would read a
+        photo's position anyway in the window before /api/health answered,
+        which is exactly what PHOTO_META=0 is meant to prevent.
+        """
+        page = chat_ui.render_page("t")
+        assert 'rememberToggle(exifEl, "chatExif", false)' in page
+        at = page.index("exifBar.hidden = false")
+        applied = page.index("data.photo_meta", at)
+        assert applied - at < 500, "health must apply the default right there"
+        assert 'chosen("chatExif")' in page, "a real choice must not be overridden"
 
 
 # --------------------------------------------------------------------------

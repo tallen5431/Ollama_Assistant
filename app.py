@@ -44,7 +44,9 @@ from config import (
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
+    get_photo_meta_default,
     get_planner_model,
+    get_share_photo_location,
     get_vision_model,
     get_web_follow_links,
     get_web_max_docs,
@@ -182,6 +184,9 @@ def health() -> Any:
             # The browser trims image payloads before sending, so it needs
             # the same number the server would use.
             "image_turns": get_image_turns(),
+            # Whether a browser that has never touched the toggle starts with
+            # photo details on, so the deployment decides rather than the page.
+            "photo_meta": get_photo_meta_default(),
         }
     )
 
@@ -369,12 +374,17 @@ def api_chat() -> Any:
             # through a canvas, so the pixels that arrive here carry no EXIF at
             # all and no model, however good its eyes, can read it off them.
             #
-            # Read it once and then take it off the messages, so that from here
-            # on the only thing holding the user's coordinates is the answering
-            # model's own context. In particular the search path below must not
-            # have them: it turns the conversation into queries and sends those
-            # to a search engine.
-            meta_context = web.image_metadata(web.conversation_image_meta(messages))
+            # Read it once and then take it off the messages, so that after this
+            # point the facts travel as prose that was deliberately put
+            # somewhere, rather than as a JSON field riding along everywhere.
+            photo_meta = web.conversation_image_meta(messages)
+            meta_context = web.image_metadata(photo_meta)
+            # The planner gets a shorter version. It runs on your own hardware,
+            # but what it writes is sent to a search engine — so the position is
+            # the one part of this that can leave the house, and it has its own
+            # switch (WEB_SHARE_LOCATION).
+            photo_note = web.metadata_note(photo_meta,
+                                           with_location=get_share_photo_location())
             turns = web.strip_image_meta(messages)
 
             # Only the most recent image-bearing turn keeps its payload. A
@@ -428,7 +438,8 @@ def api_chat() -> Any:
             if use_web:
                 documents: List[Dict[str, str]] = []
                 outcome: Dict[str, bool] = {}
-                for line in _gather_web(model, turns, documents, transcript, outcome):
+                for line in _gather_web(model, turns, documents, transcript, outcome,
+                                        photo_note=photo_note):
                     yield line
                 if not documents and outcome.get("attempted"):
                     # Retrieval ran and produced nothing. Say so, or the answer
@@ -516,6 +527,7 @@ def _gather_web(
     documents: List[Dict[str, str]],
     transcript: Optional[str] = None,
     outcome: Optional[Dict[str, bool]] = None,
+    photo_note: str = "",
 ) -> Any:
     """Collect web documents for this turn, yielding progress lines as it goes.
 
@@ -583,7 +595,11 @@ def _gather_web(
                     yield _line({"status": "Could not read the image; searching without it."})
 
     yield _line({"status": "Working out what to search for…"})
-    queries = web.plan_searches(messages, model, image_note=image_note)
+    # Only alongside an image attached to *this* turn, for the same reason the
+    # transcription is gated that way: last week's photo should not still be
+    # steering today's queries.
+    queries = web.plan_searches(messages, model, image_note=image_note,
+                                photo_note=photo_note if images else "")
     if queries is None:
         yield _line({"status": "Could not plan a search; answering without one."})
         return

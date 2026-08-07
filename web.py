@@ -825,6 +825,7 @@ def plan_searches(
     model: str,
     max_queries: int = 3,
     image_note: Optional[str] = None,
+    photo_note: str = "",
 ) -> Optional[List[str]]:
     """Turn the latest turn into search queries.
 
@@ -843,7 +844,7 @@ def plan_searches(
     # hitting send with no caption is the normal way to ask about something on
     # a phone, and refusing to plan there disabled image-informed search for
     # exactly the case that needs it most.
-    if not last_user_text(messages).strip() and not image_note:
+    if not last_user_text(messages).strip() and not image_note and not photo_note:
         return []
 
     planner_model = get_planner_model() or model
@@ -852,6 +853,11 @@ def plan_searches(
         # The planner is text-only, so what the image showed has to be told to
         # it — otherwise "what's this?" beside a screenshot plans nothing.
         prompt = f"{prompt}\n\n[the user attached an image showing: {image_note}]"
+    if photo_note:
+        # "What's this building?" is a different search when the photo says it
+        # was taken at 51.51, -0.13 on a Tuesday evening. Only what the file
+        # already recorded — the app never asks the browser for a live fix.
+        prompt = f"{prompt}\n\n[the photo records: {_defence(photo_note)}]"
     try:
         reply = chat(
             planner_model,
@@ -1359,13 +1365,11 @@ def _meta_number(value: Any, limit: float) -> Optional[float]:
     return number
 
 
-def image_metadata(entries: List[Optional[Dict[str, Any]]]) -> str:
-    """Render EXIF facts from attached photos as a system turn.
-
-    Read in the browser before the image is re-encoded, which is the only
-    chance: drawing to a canvas produces clean pixels with no metadata, so by
-    the time an attachment reaches here the original data is long gone.
-    """
+def _metadata_lines(
+    entries: List[Optional[Dict[str, Any]]],
+    with_location: bool = True,
+) -> List[str]:
+    """One line per photo that had anything readable, in the order attached."""
     lines: List[str] = []
     for index, meta in enumerate(entries or [], 1):
         if not isinstance(meta, dict):
@@ -1376,7 +1380,7 @@ def image_metadata(entries: List[Optional[Dict[str, Any]]]) -> str:
             parts.append(f"taken {taken}")
         lat = _meta_number(meta.get("lat"), 90)
         lon = _meta_number(meta.get("lon"), 180)
-        if lat is not None and lon is not None:
+        if with_location and lat is not None and lon is not None:
             parts.append(f"at {lat:.6f}, {lon:.6f}")
             # Anything past this is not a place on Earth; the deepest mine and
             # the highest cruising altitude both sit well inside it.
@@ -1387,11 +1391,45 @@ def image_metadata(entries: List[Optional[Dict[str, Any]]]) -> str:
         if camera:
             parts.append(f"on a {camera}")
         if parts:
+            # Numbered whenever there is more than one slot, so "Image 2" means
+            # the second photo attached even if the first carried nothing —
+            # a routine that compares two photos depends on that lining up.
             label = "Photo" if len(entries) == 1 else f"Image {index}"
             lines.append(f"- {label}: " + ", ".join(parts))
+    return lines
+
+
+def image_metadata(entries: List[Optional[Dict[str, Any]]]) -> str:
+    """Render EXIF facts from attached photos as a system turn.
+
+    Read in the browser before the image is re-encoded, which is the only
+    chance: drawing to a canvas produces clean pixels with no metadata, so by
+    the time an attachment reaches here the original data is long gone.
+    """
+    lines = _metadata_lines(entries)
     if not lines:
         return ""
     return f"{_META_PREAMBLE}\n\n" + "\n".join(lines)
+
+
+def metadata_note(
+    entries: List[Optional[Dict[str, Any]]],
+    with_location: bool = True,
+    max_chars: int = 220,
+) -> str:
+    """The same facts as one short line, for the search planner.
+
+    The planner gets a few hundred characters of conversation and turns them
+    into queries, so the fenced system turn would crowd out the actual question.
+    No preamble, no list: just the facts, capped.
+
+    ``with_location=False`` keeps the date and camera and drops the position.
+    The planner itself runs on your own hardware — but what it writes is sent to
+    a search engine, which makes this the one place a photo's coordinates can
+    leave the house.
+    """
+    lines = [line.lstrip("- ") for line in _metadata_lines(entries, with_location)]
+    return "; ".join(lines)[:max_chars]
 
 
 def _readable_timestamp(raw: Any) -> str:

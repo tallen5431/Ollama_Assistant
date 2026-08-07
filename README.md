@@ -39,8 +39,8 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   taken; the picture itself doesn't show it and re-encoding on upload throws it
   away. Turn **📍 Photo details** on and the date, time of day, camera and
   coordinates are read in the browser and sent alongside, so you can ask "where
-  was this?" or "was this the morning?". **Off by default**, and never included
-  in a web search. See "Photo details" below.
+  was this?" or "was this the morning?". On by default; `PHOTO_META=0` turns
+  that round. See "Photo details" below.
 - 👁️ **Image reading without losing your model** — attach a screenshot while a
   text-only model is selected and an OCR model transcribes it for you, so a
   stack trace doesn't cost you `qwen3-coder:30b` mid-debug. Only if nothing can
@@ -105,6 +105,7 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_CONNECT_TIMEOUT` | `5`                    | How long to wait to *connect*, separately. A sleeping desktop drops the packet rather than refusing it, so this is what stops a message hanging for the full reply timeout |
 | `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
 | `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
+| `PHOTO_META`        | `1`                         | Whether a browser that has never touched the toggle starts with **📍 Photo details** on. `0` makes off the default |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
@@ -114,6 +115,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
 | `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
+| `WEB_SHARE_LOCATION` | `1`                        | Whether a photo's GPS position may inform a search query. `0` keeps the date and camera and drops the position — see "Photo details" |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
 | `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
@@ -471,21 +473,33 @@ permission is off. It's rendered into a sentence rather than passed as raw
 fields, with the day of the week and the time of day named, because "was that
 the morning?" is the question people actually ask.
 
-**It is off by default.** The app already strips this by re-encoding, so leaving
-the toggle alone means a photo's coordinates never leave your phone at all —
-that's a property worth having to opt *out* of. The setting is remembered per
-browser.
+**On by default**, because on a box only you can reach — over Tailscale, say —
+that's the useful setting. Set `PHOTO_META=0` on the server and a fresh browser
+starts with it off instead. Either way the toggle is yours to flip, and your
+choice is remembered per browser; the server default only applies to a browser
+that has never touched it. The page starts it *off* and lets `/api/health` turn
+it on rather than the reverse, so `PHOTO_META=0` has no window in which a
+position is read anyway.
 
-**It never reaches a search engine.** When **Web access** is on, the planner
-turns your message into queries and those queries go to DuckDuckGo or your
-SearxNG. The photo's location is deliberately withheld from that path — it is
-added to the answering model's context only, after the search has been planned.
-So "what's near here?" with a geotagged photo will search for whatever you typed,
-not for your coordinates. If you want the location searched, type it.
+**Web search is the one place it can leave the house.** The planner turns your
+message into queries and those go to DuckDuckGo or your SearxNG. The planner
+itself runs on your own hardware, so it's told the photo's date, camera and
+position — "what's this building?" is a much better search when the file says
+you were at 51.51, -0.13. But what it writes is sent onward, so a query *could*
+carry your location. If that's not what you want:
+
+```
+WEB_SHARE_LOCATION=0     # the planner keeps the date and camera, loses the position
+```
+
+The answering model gets the full version regardless — turning this off shapes
+the search, not the answer. And a photo only informs the search on the turn it
+was attached to; last week's photo stops steering today's queries.
 
 Where it goes:
 
 - to the model you're chatting with, on your own machine, as one system turn;
+- to the search planner, also on your machine, as a short note — see above;
 - into the conversation history, so reopening the thread and asking again works;
 - nowhere else.
 

@@ -257,7 +257,7 @@ _PAGE = """<!doctype html>
           <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
         </div>
         <div class="voicebar" id="exifbar" hidden>
-          <label class="voicebar-check" title="Read the date, camera and GPS position a photo carries, and tell the model. Off by default: the app re-encodes images, which strips this, so leaving it off means the location never leaves your phone at all.">
+          <label class="voicebar-check" title="Read the date, camera and GPS position a photo carries, and tell the model. The app re-encodes images, which strips this, so turning it off means the location never leaves your phone at all. Set PHOTO_META=0 on the server to make off the default.">
             <input type="checkbox" id="exif"> 📍 Photo details
           </label>
           <span class="voicebar-label" id="exifnote">date, camera and location from the photo itself</span>
@@ -1142,6 +1142,13 @@ _PAGE = """<!doctype html>
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
           exifBar.hidden = false;
+          // The deployment picks the default, not the page: on a box only you
+          // can reach this is plainly useful on, and PHOTO_META=0 turns it
+          // round. A browser that has used the toggle keeps its own answer.
+          if (!chosen("chatExif") && typeof data.photo_meta === "boolean") {
+            exifEl.checked = data.photo_meta;
+            exifOn = data.photo_meta;
+          }
           if (typeof data.image_turns === "number") KEEP_IMAGE_TURNS = data.image_turns;
           if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
           // A default naming a model that has been deleted or renamed since is
@@ -1994,6 +2001,12 @@ _PAGE = """<!doctype html>
       // Remember the voice toggles — they describe your hardware and habits, not
       // this visit. Headphones defaults ON (see the checkbox in the markup);
       // only an explicit stored choice overrides it.
+      // Whether this browser has ever touched a toggle, so a server-supplied
+      // default can apply to a fresh browser without overriding a real choice.
+      function chosen(key) {
+        try { return localStorage.getItem(key) !== null; } catch (e) { return false; }
+      }
+
       function rememberToggle(el, key, dflt) {
         try {
           const saved = localStorage.getItem(key);
@@ -2007,9 +2020,9 @@ _PAGE = """<!doctype html>
       rememberToggle(autoSendEl, "chatAutoSend", false);
       rememberToggle(continuousEl, "chatContinuous", false);
       rememberToggle(webEl, "chatWeb", false);
-      // Off by default. The app strips this by re-encoding, so leaving it
-      // off means a photo's GPS position never leaves the phone at all —
-      // that is a property worth having to opt out of, not into.
+      // Starts off and is turned on by /api/health if the server says so —
+      // rather than the other way round, so a deployment that wants this off
+      // never has a window in which a photo's position is read anyway.
       rememberToggle(exifEl, "chatExif", false);
       exifOn = exifEl.checked;
       exifEl.addEventListener("change", () => { exifOn = exifEl.checked; });
