@@ -245,8 +245,10 @@ def _store_unavailable(exc: sqlite3.Error) -> Any:
         return jsonify({"error": "Internal error in the history layer."}), 500
     logger.error("History database error: %s", exc)
     return jsonify({
-        "error": "Conversation history is unavailable — the database could not "
-                 "be written. Chatting still works; nothing is being saved.",
+        # "Saved data", not "conversation history": routines live in the same
+        # file behind the same write probe, and this is what they report too.
+        "error": "Saved data is unavailable — the database could not be "
+                 "written. Chatting still works; nothing is being saved.",
         "history": False,
     }), 503
 
@@ -320,6 +322,93 @@ def api_conversation_add_message(convo_id: str) -> Any:
     if not store.add_message(convo_id, role, str(body.get("content") or ""), images,
                              sources, meta):
         return jsonify({"error": "No such conversation"}), 404
+    return jsonify({"ok": True})
+
+
+# -------------------------------------------------------------------
+# Routines — saved prompts
+# -------------------------------------------------------------------
+
+# What a PATCH is allowed to change. Membership is tested against the request
+# body rather than read with .get(), because null is a real value here: absent
+# means "leave it alone", explicit null means "stop forcing this toggle".
+_ROUTINE_FIELDS = ("name", "body", "photos", "web", "photo_meta")
+
+
+def _tri(value: Any) -> Optional[bool]:
+    """Three-state: absent or null means leave the toggle where the user has it."""
+    return None if value is None else bool(value)
+
+
+def _count(value: Any) -> int:
+    """A photo count from a request body. The store clamps the range."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+@app.route("/api/routines", methods=["GET"])
+def api_routines() -> Any:
+    """Every saved routine, in strip order."""
+    return jsonify({"routines": store.list_routines()})
+
+
+@app.route("/api/routines", methods=["POST"])
+def api_routine_create() -> Any:
+    """Save a routine and return its record."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    name = str(body.get("name") or "").strip()
+    text = str(body.get("body") or "").strip()
+    if not name:
+        return jsonify({"error": "Missing 'name'"}), 400
+    if not text:
+        return jsonify({"error": "Missing 'body'"}), 400
+    return jsonify(store.create_routine(
+        name, text, _count(body.get("photos")),
+        _tri(body.get("web")), _tri(body.get("photo_meta")),
+    ))
+
+
+@app.route("/api/routines/starters", methods=["POST"])
+def api_routine_starters() -> Any:
+    """Install the shipped routines, skipping any name already taken."""
+    return jsonify({"routines": store.create_starters()})
+
+
+@app.route("/api/routines/<routine_id>", methods=["PATCH"])
+def api_routine_update(routine_id: str) -> Any:
+    """Change some of a routine, returning the whole normalised record."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    fields: Dict[str, Any] = {}
+    for field in _ROUTINE_FIELDS:
+        if field not in body:
+            continue
+        if field in ("name", "body"):
+            fields[field] = str(body[field] or "").strip()
+        elif field == "photos":
+            fields[field] = _count(body[field])
+        else:
+            fields[field] = _tri(body[field])
+    if not fields:
+        return jsonify({"error": "Nothing to update"}), 400
+    if not fields.get("name", "x") or not fields.get("body", "x"):
+        return jsonify({"error": "A routine needs a name and a prompt"}), 400
+    routine = store.update_routine(routine_id, fields)
+    if routine is None:
+        return jsonify({"error": "No such routine"}), 404
+    return jsonify({"ok": True, "routine": routine})
+
+
+@app.route("/api/routines/<routine_id>", methods=["DELETE"])
+def api_routine_delete(routine_id: str) -> Any:
+    """Remove a routine."""
+    if not store.delete_routine(routine_id):
+        return jsonify({"error": "No such routine"}), 404
     return jsonify({"ok": True})
 
 

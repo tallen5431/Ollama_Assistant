@@ -510,11 +510,16 @@ class TestTheDeploymentPicksTheDefault:
         which is exactly what PHOTO_META=0 is meant to prevent.
         """
         page = chat_ui.render_page("t")
-        assert 'rememberToggle(exifEl, "chatExif", false)' in page
-        at = page.index("exifBar.hidden = false")
-        applied = page.index("data.photo_meta", at)
-        assert applied - at < 500, "health must apply the default right there"
-        assert 'chosen("chatExif")' in page, "a real choice must not be overridden"
+        assert 'rememberToggle(exifEl, "chatExif", false)' in page, \
+            "the page's own default must be off"
+        # The server's answer is applied inside checkVoice, after the bar is
+        # shown and before anything else in that response is acted on.
+        window = page[page.index("exifBar.hidden = false"):
+                      page.index("if (data.history)")]
+        assert "data.photo_meta" in window, "health must apply the default here"
+        assert 'chosen("chatExif")' in window, "a real choice must not be overridden"
+        assert "pendingRoutine" in window, \
+            "a tab resume must not lower the toggle underneath an armed routine"
 
 
 # --------------------------------------------------------------------------

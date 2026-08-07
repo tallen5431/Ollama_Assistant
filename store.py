@@ -50,18 +50,42 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at      REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS routines (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    photos      INTEGER NOT NULL DEFAULT 0,
+    web         INTEGER,
+    photo_meta  INTEGER,
+    position    REAL NOT NULL,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages (conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated
     ON conversations (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_routines_position
+    ON routines (position, created_at);
 """
 
 # Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
 # existing table at whatever shape it already had, so without this an in-place
 # upgrade keeps the old columns and every read of a new one raises.
+#
+# A whole new *table* needs no entry here — executescript runs the schema on
+# every connection, so an existing database grows it on the next request. Only
+# a new column in an existing table does.
 _ADDED_COLUMNS = (("messages", "image_meta", "TEXT"),)
 
 _TITLE_MAX = 60
+
+_ROUTINE_NAME_MAX = 40        # a chip that still fits across a phone
+# The body becomes an ordinary user turn and is re-sent with every later turn of
+# that thread, so a stray paste must not quietly own the context window.
+_ROUTINE_BODY_MAX = 4000
+_ROUTINE_PHOTOS_MAX = 4       # what the composer accepts and web._MAX_IMAGES_READ reads
 
 
 def db_path() -> Path:
@@ -295,6 +319,235 @@ def delete(convo_id: str) -> bool:
         # is enough dead space to be worth the rewrite.
         compact()
     return deleted
+
+
+# -------------------------------------------------------------------
+# Routines — saved prompts you tap instead of typing
+# -------------------------------------------------------------------
+#
+# A routine is a name, a body of prompt text, and three things it declares
+# about the turn it is used on: how many photos it expects, and whether web
+# access and photo details should be forced on or off. Those two are
+# three-state on purpose — NULL means "leave the toggle where the user has it",
+# which is a real third answer. Making every routine assert a position on the
+# web is how you end up with routines that are landmines.
+
+
+def _routine_name(text: str) -> str:
+    """A chip label: one line, trimmed to something that fits."""
+    clean = " ".join((text or "").split())
+    return clean[:_ROUTINE_NAME_MAX]
+
+
+def _tri_column(value: Any) -> Optional[bool]:
+    """A three-state column back into a bool or None.
+
+    ``bool(row["web"])`` on its own is wrong here: it collapses NULL and 0 into
+    False, which turns "no opinion" into "force it off" on the first read.
+    """
+    return None if value is None else bool(value)
+
+
+def _routine_row(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "body": row["body"],
+        "photos": int(row["photos"] or 0),
+        "web": _tri_column(row["web"]),
+        "photo_meta": _tri_column(row["photo_meta"]),
+        "position": row["position"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def create_routine(
+    name: str,
+    body: str,
+    photos: int = 0,
+    web: Optional[bool] = None,
+    photo_meta: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Save a routine and return its record."""
+    now = time.time()
+    rid = uuid.uuid4().hex
+    name = _routine_name(name)
+    body = (body or "")[:_ROUTINE_BODY_MAX]
+    photos = max(0, min(_ROUTINE_PHOTOS_MAX, int(photos or 0)))
+    with _connect() as conn:
+        # New ones go on the end of the strip. Ordering by "recently used" would
+        # move a tap target that a thumb has learned where to find.
+        position = conn.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 AS next FROM routines"
+        ).fetchone()["next"]
+        conn.execute(
+            "INSERT INTO routines"
+            " (id, name, body, photos, web, photo_meta, position, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rid, name, body, photos,
+             None if web is None else int(web),
+             None if photo_meta is None else int(photo_meta),
+             position, now, now),
+        )
+    return {"id": rid, "name": name, "body": body, "photos": photos,
+            "web": web, "photo_meta": photo_meta, "position": position,
+            "created_at": now, "updated_at": now}
+
+
+def list_routines(limit: int = 100) -> List[Dict[str, Any]]:
+    """Every routine, in the order they appear on the strip."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM routines ORDER BY position, created_at LIMIT ?", (limit,)
+        ).fetchall()
+    return [_routine_row(row) for row in rows]
+
+
+# Only these may be written, and the SET clause is built from this tuple rather
+# than from anything the request said — the column names are never interpolated
+# from input.
+_ROUTINE_COLUMNS = ("name", "body", "photos", "web", "photo_meta", "position")
+
+
+def update_routine(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Change some of a routine. None when there is no such routine.
+
+    Takes a dict rather than a row of optional parameters because ``None`` is a
+    meaningful *value* for ``web`` and ``photo_meta``, so there is no sentinel
+    that would tell "not supplied" from "set to nothing" apart.
+
+    Returns the whole updated record, not a bool: the caller re-renders the chip
+    from it, and the store is where the name gets truncated and the photo count
+    clamped, so the client has to be told what was actually kept.
+    """
+    updates: Dict[str, Any] = {}
+    for column in _ROUTINE_COLUMNS:
+        if column not in fields:
+            continue
+        value = fields[column]
+        if column == "name":
+            updates[column] = _routine_name(value)
+        elif column == "body":
+            updates[column] = (value or "")[:_ROUTINE_BODY_MAX]
+        elif column == "photos":
+            updates[column] = max(0, min(_ROUTINE_PHOTOS_MAX, int(value or 0)))
+        elif column in ("web", "photo_meta"):
+            updates[column] = None if value is None else int(bool(value))
+        else:
+            updates[column] = float(value)
+    if not updates:
+        return None
+
+    clause = ", ".join(f"{column} = ?" for column in updates)
+    with _connect() as conn:
+        cur = conn.execute(
+            f"UPDATE routines SET {clause}, updated_at = ? WHERE id = ?",
+            (*updates.values(), time.time(), rid),
+        )
+        if cur.rowcount < 1:
+            return None
+        row = conn.execute("SELECT * FROM routines WHERE id = ?", (rid,)).fetchone()
+    return _routine_row(row) if row else None
+
+
+def delete_routine(rid: str) -> bool:
+    """Remove a routine. False when it didn't exist."""
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM routines WHERE id = ?", (rid,))
+        return cur.rowcount > 0
+
+
+# Four to start with, installed only when asked for — never seeded on connect.
+# A write inside _connect() would leave an open transaction, and available()'s
+# BEGIN IMMEDIATE then raises "cannot start a transaction within a transaction",
+# which is neither "locked" nor "busy" — so the whole history UI would vanish.
+#
+# Each is (name, body, photos, web, photo_meta).
+_STARTERS = (
+    (
+        "🚗 Trip",
+        "Two photos of the same car's odometer are attached: one from the start "
+        "of a trip and one from the end.\n\n"
+        "Read the main odometer number in each photo, digit by digit, and say "
+        "which reading came from which photo. If a photo also shows a smaller "
+        "trip meter, report that separately and never mix the two. If the last "
+        "digit sits in its own box or a different colour it is tenths — say "
+        "whether you counted it. Say whether the dial reads miles or "
+        "kilometres, and if it does not say, say which you assumed.\n\n"
+        "The photo details above label the two photos \"Image 1\" and \"Image 2\" "
+        "in the order they were attached, and those are the same two photos as "
+        "\"[image 1]\" and \"[image 2]\" in any transcription above. Quote both "
+        "capture times back to me — I am asking for them, so the usual rule "
+        "about not reciting photo details does not apply here.\n\n"
+        "Then give me:\n"
+        "- Distance: the larger reading minus the smaller. Do not assume the "
+        "first photo is the start; the later capture time is the end of the trip.\n"
+        "- Elapsed time: the gap between the two capture times.\n"
+        "- Average speed over that elapsed time.\n\n"
+        "If either photo has no readable number, or has no capture time in the "
+        "photo details above, say exactly which photo is missing which thing and "
+        "stop there. Do not estimate either one, and do not answer from one photo "
+        "alone. If the photo with the later time shows the smaller reading, say "
+        "so plainly rather than reporting a negative distance.\n\n"
+        "Capture times carry no time zone. If this trip could have crossed one, "
+        "say the elapsed time may be off by whole hours.",
+        2, False, True,
+    ),
+    (
+        "📊 Before / after",
+        "Two photos of the same thing are attached, taken at different times.\n\n"
+        "Say what is different between them, most significant first — not a "
+        "general description of each. If either shows a number, a gauge or a "
+        "reading, give both values and the difference. Ignore differences that "
+        "are only camera angle, distance or lighting.\n\n"
+        "The photo details above label them \"Image 1\" and \"Image 2\" in the "
+        "order they were attached. Quote both capture times and the gap between "
+        "them; I am asking for them, so report them. If a capture time is "
+        "missing for either photo, say which one and do not estimate it.\n\n"
+        "If the two photos are not of the same subject, say so and stop.",
+        2, None, True,
+    ),
+    (
+        "📄 Read this",
+        "Transcribe every readable word and number in this photo, exactly as it "
+        "appears, keeping the line breaks.\n\n"
+        "Copy any serial number, part number, code, price or total character for "
+        "character. Do not tidy the spelling, convert units, or correct "
+        "arithmetic that does not add up — if a printed total disagrees with the "
+        "items, give both numbers and say which is which. Where something is "
+        "genuinely unreadable, write [unreadable] in its place rather than "
+        "guessing at it.\n\n"
+        "Do not summarise, and do not explain what the thing is unless I ask.",
+        # Photo details forced off: a label or a receipt has no interesting time
+        # or place, and this is the routine most likely to be pointed at
+        # something in someone else's house.
+        1, None, False,
+    ),
+    (
+        "✍️ Plain words",
+        "Explain the following in plain language, for someone who is not in the "
+        "field.\n\n"
+        "Keep it under 200 words, define any term you have to use, and end with "
+        "the one sentence that matters most. If it is ambiguous, say which part "
+        "and why instead of picking one reading and running with it.",
+        0, None, None,
+    ),
+)
+
+
+def create_starters() -> List[Dict[str, Any]]:
+    """Install the shipped routines, skipping any name already taken.
+
+    Idempotent, so pressing the button twice does not give you two of each.
+    """
+    with _connect() as conn:
+        taken = {row["name"] for row in conn.execute("SELECT name FROM routines")}
+    return [
+        create_routine(name, body, photos, web, photo_meta)
+        for name, body, photos, web, photo_meta in _STARTERS
+        if name not in taken
+    ]
 
 
 def stats() -> Dict[str, int]:

@@ -30,6 +30,10 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   screenshot, or paste one in, then ask about it (`llava`, `*-vision`,
   `minicpm-v`, `qwen2.5vl`, `moondream`, …). Images are downscaled in the
   browser before upload. See "Vision models" below.
+- 🚗 **Routines** — save a prompt once and tap it instead of typing. A routine
+  can set the toggles it needs and refuse to send until its photos are attached,
+  so "two odometer photos → how far did I drive and how long did it take" is two
+  taps. Four are shipped. See "Routines" below.
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
@@ -442,6 +446,68 @@ They travel as base64 in the message, exactly as Ollama's native API expects:
 Note the whole conversation is re-sent on every turn, so an image stays in the
 context for the rest of the chat — **New chat** clears it.
 
+## Routines
+
+A routine is a prompt you save once and tap instead of typing. It sits as a chip
+above the message box; tapping it drops its text into the composer, sets the
+toggles it asks for, and holds **Send** until the photos it expects are attached.
+
+The case it was built for: photograph the odometer at the start of a trip and
+again at the end, tap **🚗 Trip**, attach both, send.
+
+> **you:** *(taps 🚗 Trip, attaches two photos)*
+> **model:** Image 1 reads 041233 km, taken 09:04. Image 2 reads 041589 km, taken 17:32. That's 356 km over 8 h 28 min — an average of 42 km/h.
+
+The distance comes from the pictures; the times come from the photos' own EXIF,
+which is why **🚗 Trip** turns **📍 Photo details** on for you. Both photos have
+to go on **one** message, because only the most recent image-bearing turn keeps
+its attachments — the photo-count guard is what makes that automatic instead of
+something you have to remember.
+
+**Setting one up.** ☰ → **Routines** → **＋ New routine**, or the ⚙ at the end of
+the chip strip. A routine has:
+
+| | |
+| --- | --- |
+| **Name** | what the chip says — keep it short, an emoji helps you find it |
+| **Prompt** | the text that goes into the box |
+| **Photos to attach** | 0–4. Send is refused below this, with a count |
+| **📍 Photo details** | force on, force off, or leave your toggle alone |
+| **🌐 Web access** | the same three choices |
+
+The two forcings are genuinely three-state. "Leave as it is" is the right answer
+for most routines — a routine that has no opinion about the web shouldn't be
+made to state one. A forcing lasts for **one turn**: the toggles go back where
+they were once the message is sent, or as soon as you tap the lit chip again.
+
+**Four to start with**, added by **☰ → Routines → ＋ Add the starter routines**
+(nothing is installed until you ask):
+
+- **🚗 Trip** — two odometer photos → distance, elapsed time, average speed
+- **📊 Before / after** — two photos of the same thing → what changed
+- **📄 Read this** — transcribe a label, receipt or serial number verbatim
+- **✍️ Plain words** — explain something jargon-free in under 200 words
+
+They're ordinary routines: edit them, rename them, delete them. Deleting one and
+pressing **＋ Add the starter routines** again brings it back.
+
+**What a routine actually is**, mechanically: the text becomes *your* message.
+It goes into the composer where you can read and edit it before sending ("this
+was the rental, it reads km"), and what the model receives is exactly what the
+bubble shows and what the history stores. That also means the routine's text is
+re-sent with every later turn of that thread, like anything else you type —
+**＋ New chat** clears it.
+
+> ⚠️ A saved routine is an instruction that gets delivered as though you had
+> typed it. Anyone who can reach this app can add or edit one. That's the same
+> exposure conversation history has, and the same answer applies: if this is
+> reachable by anything you don't control, turn Basic Auth on.
+
+One combination is worth knowing about: a routine that attaches photos **and**
+forces web access on sends the photo's coordinates to the search planner, whose
+queries go out to a search engine. The editor says so at the moment you pick it,
+`WEB_SHARE_LOCATION=0` prevents it, and no shipped routine does it.
+
 ## Photo details
 
 A photo carries a small record of its own making — when the shutter fired, which
@@ -516,6 +582,11 @@ make it likes.
 | `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
 | `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...] }` or `{ "prompt": "..." }`. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
+| `GET /api/routines`  | Every saved routine, in strip order |
+| `POST /api/routines` | Save one — body `{ "name", "body", "photos"?, "web"?, "photo_meta"? }`. `web`/`photo_meta` are `true`/`false`/`null`, where null means "leave the toggle alone" |
+| `POST /api/routines/starters` | Install the shipped routines, skipping names already taken. Idempotent |
+| `PATCH /api/routines/<id>` | Change any subset of those fields. An absent key leaves it alone; an explicit `null` clears a forcing |
+| `DELETE /api/routines/<id>` | Remove one |
 | `GET /api/voice/models` | Available + downloadable Vosk speech models |
 | `POST /api/voice/download` | Download a catalog model — body `{ "id": "fr" }` |
 | `POST /api/transcribe` | Speech-to-text: POST WAV audio (`?model=<id>` optional), returns `{ "text": ... }` |

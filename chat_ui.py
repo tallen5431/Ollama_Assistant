@@ -180,6 +180,40 @@ _PAGE = """<!doctype html>
       .convo-act:hover { color:var(--text); }
       .convo-empty { color:var(--muted); font-size:0.8rem; margin:0.4rem 0.2rem; }
 
+      /* One row that scrolls sideways rather than four rows that eat a phone
+         screen — the strip has to stay a single line at ten routines. */
+      .chips { display:flex; gap:0.35rem; flex:1 1 auto; min-width:0;
+               overflow-x:auto; scrollbar-width:none; }
+      .chips::-webkit-scrollbar { display:none; }
+      .chip { flex:0 0 auto; white-space:nowrap; font-size:0.78rem;
+              padding:0.35rem 0.65rem; border-radius:999px;
+              background:var(--panel2); color:var(--muted); }
+      .chip.active { background:var(--accent); border-color:var(--accent);
+                     color:#fff; font-weight:600; }
+      .chip-edit { flex:0 0 auto; padding:0.35rem 0.5rem; font-size:0.8rem; color:var(--muted); }
+      .drawer-tabs { display:flex; gap:0.3rem; }
+      .tab { font-size:0.85rem; padding:0.25rem 0.6rem; color:var(--muted); }
+      .tab.active { color:var(--text); border-color:var(--accent); }
+      #convoPane, #routinePane { display:flex; flex-direction:column;
+                                 flex:1 1 auto; min-width:0; min-height:0; }
+      #routineList { overflow-y:auto; display:flex; flex-direction:column; gap:0.3rem; }
+      #routineEdit { display:flex; flex-direction:column; gap:0.35rem; overflow-y:auto; }
+      #routineEdit label { font-size:0.72rem; color:var(--muted); margin-top:0.2rem; }
+      #routineEdit input, #routineEdit select { width:100%; max-width:none; }
+      #routineEdit input { font-family:inherit; font-size:0.9rem;
+        background:var(--panel2); color:var(--text);
+        border:1px solid var(--border); border-radius:0.5rem; padding:0.4rem 0.6rem; }
+      #routineEdit textarea { min-height:9rem; max-height:none; font-size:0.85rem; }
+      .routine-acts { display:flex; gap:0.4rem; margin-top:0.5rem; }
+      .routine-acts button { flex:1 1 auto; }
+      /* Whether a photo's own timestamp actually came through. The failure this
+         guards is silent otherwise: with photo details off there is no EXIF, no
+         metadata turn, and an answer to half the question with nothing on
+         screen to say why. */
+      .thumb .stamp { position:absolute; bottom:0; left:0; padding:0 0.2rem;
+        font-size:0.6rem; line-height:1.3; background:rgba(0,0,0,0.65);
+        border-radius:0 0.35rem 0 0; }
+
       /* Phones: reclaim vertical space and stop the header wrapping. */
       @media (max-width: 640px) {
         header { gap:0.5rem; padding:0.5rem 0.7rem; flex-wrap:nowrap; }
@@ -202,6 +236,8 @@ _PAGE = """<!doctype html>
         button.primary { padding:0.5rem 0.7rem; }
         .voicebar { gap:0.4rem 0.6rem; }
         #webnote { display:none; }   /* the tooltip covers it */
+        #routinebar { flex-wrap:nowrap; }   /* .voicebar wraps; this one scrolls */
+        .chip { padding:0.5rem 0.75rem; }   /* a wet thumb needs about 38px */
       }
       .insecure { margin:0 0.2rem 0.5rem; }
       .insecure a { color:var(--accent); word-break:break-all; }
@@ -211,11 +247,55 @@ _PAGE = """<!doctype html>
     <div class="backdrop" id="backdrop" hidden></div>
     <aside class="drawer" id="drawer" hidden>
       <div class="drawer-head">
-        <strong>Conversations</strong>
+        <div class="drawer-tabs">
+          <button id="tabChats" class="tab active" type="button">Chats</button>
+          <button id="tabRoutines" class="tab" type="button">Routines</button>
+        </div>
         <button id="drawerClose" title="Close">✕</button>
       </div>
-      <button class="drawer-new" id="drawerNew" type="button">＋ New chat</button>
-      <div id="convoList"></div>
+      <div id="convoPane">
+        <button class="drawer-new" id="drawerNew" type="button">＋ New chat</button>
+        <div id="convoList"></div>
+      </div>
+      <!-- A div, not a form: a form in this page can submit and navigate away.
+           Each pane owns its own ＋ button, so there is never a question about
+           which section it acts on. -->
+      <div id="routinePane" hidden>
+        <button class="drawer-new" id="routineNew" type="button">＋ New routine</button>
+        <div id="routineList"></div>
+        <div id="routineEdit" hidden>
+          <label for="rName">Name</label>
+          <input id="rName" maxlength="40" placeholder="🚗 Trip">
+          <label for="rBody">Prompt</label>
+          <textarea id="rBody" rows="8" spellcheck="false"></textarea>
+          <label for="rPhotos">Photos to attach</label>
+          <select id="rPhotos">
+            <option value="0">No photos</option>
+            <option value="1">1 photo</option>
+            <option value="2">2 photos</option>
+            <option value="3">3 photos</option>
+            <option value="4">4 photos</option>
+          </select>
+          <label for="rMeta">📍 Photo details</label>
+          <select id="rMeta">
+            <option value="">Leave as it is</option>
+            <option value="1">Turn on for this routine</option>
+            <option value="0">Turn off for this routine</option>
+          </select>
+          <label for="rWeb">🌐 Web access</label>
+          <select id="rWeb">
+            <option value="">Leave as it is</option>
+            <option value="1">Turn on for this routine</option>
+            <option value="0">Turn off for this routine</option>
+          </select>
+          <p class="convo-empty" id="routineWarn"></p>
+          <div class="routine-acts">
+            <button class="primary" id="rSave" type="button">Save</button>
+            <button id="rCancel" type="button">Cancel</button>
+            <button class="danger" id="rDelete" type="button" hidden>Delete</button>
+          </div>
+        </div>
+      </div>
     </aside>
 
     <header>
@@ -261,6 +341,13 @@ _PAGE = """<!doctype html>
             <input type="checkbox" id="exif"> 📍 Photo details
           </label>
           <span class="voicebar-label" id="exifnote">date, camera and location from the photo itself</span>
+        </div>
+        <!-- Above the thumbs and the composer, so the footer reads downwards
+             as: pick a routine, attach its photos, write the message. -->
+        <div class="voicebar" id="routinebar" hidden>
+          <div class="chips" id="routineChips"></div>
+          <button class="chip chip-edit" id="routineEditBtn" type="button"
+                  title="Add or change a saved prompt">⚙</button>
         </div>
         <div class="thumbs" id="thumbs" hidden></div>
         <div class="composer">
@@ -313,12 +400,38 @@ _PAGE = """<!doctype html>
       const dotEl    = document.getElementById("dot");
       const statusEl = document.getElementById("statusText");
       const hintEl   = document.getElementById("hint");
+      const routineBar = document.getElementById("routinebar");
+      const routineChipsEl = document.getElementById("routineChips");
+      const routineEditBtn = document.getElementById("routineEditBtn");
+      const convoPaneEl = document.getElementById("convoPane");
+      const routinePaneEl = document.getElementById("routinePane");
+      const routineListEl = document.getElementById("routineList");
+      const routineEditEl = document.getElementById("routineEdit");
+      const routineNewBtn = document.getElementById("routineNew");
+      const routineWarnEl = document.getElementById("routineWarn");
+      const tabChatsEl = document.getElementById("tabChats");
+      const tabRoutinesEl = document.getElementById("tabRoutines");
+      const rNameEl  = document.getElementById("rName");
+      const rBodyEl  = document.getElementById("rBody");
+      const rPhotosEl = document.getElementById("rPhotos");
+      const rWebEl   = document.getElementById("rWeb");
+      const rMetaEl  = document.getElementById("rMeta");
+      const rDeleteBtn = document.getElementById("rDelete");
 
       let messages = [];       // conversation sent to /api/chat for context
       let busy = false;
       let controller = null;   // AbortController for the in-flight stream
       let pendingImages = [];  // [{ b64, url }] attached but not yet sent
       let pendingAutoSend = false;  // an utterance arrived while busy
+      let routines = [];       // the saved list, held so a chip tap is instant
+      // The routine picked but not yet sent: { routine, web, exif }, where
+      // web/exif hold the checkbox values its forcing overwrote, or null when
+      // it forced nothing. A routine is a stamp on one turn, not a mode — this
+      // is the only state it has, and clearing it is the only thing newChat and
+      // loadConversation have to remember. Declared here with exifOn for the
+      // same reason: renderThumbs() and addAttachment() read it.
+      let pendingRoutine = null;
+      let editingRoutineId = null;   // open in the editor; "" for a new one
 
       function setStatus(state, text) {
         dotEl.className = "dot" + (state ? " " + state : "");
@@ -664,8 +777,19 @@ _PAGE = """<!doctype html>
           el.src = img.url; el.alt = "attachment";
           const rm = document.createElement("button");
           rm.textContent = "✕"; rm.title = "Remove";
-          rm.addEventListener("click", () => { pendingImages.splice(i, 1); renderThumbs(); });
+          rm.addEventListener("click", () => {
+            pendingImages.splice(i, 1); renderThumbs(); routineProgress();
+          });
           cell.appendChild(el); cell.appendChild(rm);
+          // 🕘 when the photo's own timestamp came through. Without it, "photo
+          // details is off" stays invisible until the answer comes back having
+          // silently skipped half the question.
+          if (img.meta && img.meta.taken) {
+            const stamp = document.createElement("span");
+            stamp.className = "stamp"; stamp.textContent = "🕘";
+            stamp.title = "date read from the photo";
+            cell.appendChild(stamp);
+          }
           thumbsEl.appendChild(cell);
         });
       }
@@ -877,6 +1001,9 @@ _PAGE = """<!doctype html>
       function addAttachment(att) {
         if (pendingImages.length >= 4) { hintEl.textContent = "Up to 4 images per message."; return false; }
         pendingImages.push(att); renderThumbs();
+        // Before switchToVisionModel, which writes the same hint line: a model
+        // that cannot see the image is the more urgent message and should win.
+        routineProgress();
         switchToVisionModel();
         return true;
       }
@@ -1145,12 +1272,19 @@ _PAGE = """<!doctype html>
           // The deployment picks the default, not the page: on a box only you
           // can reach this is plainly useful on, and PHOTO_META=0 turns it
           // round. A browser that has used the toggle keeps its own answer.
-          if (!chosen("chatExif") && typeof data.photo_meta === "boolean") {
+          // Not while a routine is armed: this runs again when the tab is
+          // resumed, and it would otherwise lower exifOn back underneath a
+          // routine between picking it and attaching the photos.
+          if (!pendingRoutine && !chosen("chatExif") &&
+              typeof data.photo_meta === "boolean") {
             exifEl.checked = data.photo_meta;
             exifOn = data.photo_meta;
           }
           if (typeof data.image_turns === "number") KEEP_IMAGE_TURNS = data.image_turns;
-          if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
+          if (data.history) {
+            historyOn = true; menuBtn.hidden = false;
+            refreshConversations(); refreshRoutines();
+          }
           // A default naming a model that has been deleted or renamed since is
           // otherwise a silent failure on every turn until someone works it out.
           if (data.ollama_reachable && data.model_count && !data.default_installed) {
@@ -1546,6 +1680,7 @@ _PAGE = """<!doctype html>
         currentConvoId = null;
         messages = [];
         pendingImages = []; renderThumbs();
+        clearRoutine();
         chatEl.innerHTML = '<div class="wrap"><div class="empty" id="empty">' +
           'Send a message to start chatting with your local model.</div></div>';
         inputEl.focus();
@@ -1666,7 +1801,12 @@ _PAGE = """<!doctype html>
         try {
           const resp = await fetch("api/conversations", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: firstMessage || "", model: modelEl.value || null }) });
+            // A routine names its thread. Titling from the message would
+            // give every trip the same 60-character prefix of the same
+            // prompt, and the drawer becomes a wall of identical rows.
+            body: JSON.stringify({
+              title: (pendingRoutine && pendingRoutine.routine.name) || firstMessage || "",
+              model: modelEl.value || null }) });
           const data = await resp.json();
           if (!resp.ok || !data.id) { noteHistoryBroken(data.error); currentConvoId = null; }
           else { currentConvoId = data.id; historyBroken = false; }
@@ -1702,6 +1842,7 @@ _PAGE = """<!doctype html>
         messages = [];
         chatEl.innerHTML = "";
         pendingImages = []; renderThumbs();
+        clearRoutine();
 
         for (const msg of convo.messages || []) {
           const imgs = (msg.images || []).map(function (b64) {
@@ -1732,8 +1873,291 @@ _PAGE = """<!doctype html>
         scrollDown(true);
       }
 
-      function openDrawer() { drawerEl.hidden = false; backdropEl.hidden = false; refreshConversations(); }
+      function openDrawer(pane) {
+        drawerEl.hidden = false; backdropEl.hidden = false;
+        showPane(pane === "routines" ? "routines" : "chats");
+      }
       function closeDrawer() { drawerEl.hidden = true; backdropEl.hidden = true; }
+
+      // ---- Routines ----
+      // A saved prompt you tap instead of typing. Picking one drops its text
+      // into the composer, ticks the toggles it declares, and holds Send back
+      // until its photos are attached — which is the whole point: two odometer
+      // photos have to ride on ONE message, because only the newest
+      // image-bearing turn keeps its payload (withRecentImages here,
+      // keep_recent_images on the server), and their timestamps have to be read
+      // before the canvas re-encode strips them.
+
+      async function refreshRoutines() {
+        if (!historyOn) { routineBar.hidden = true; return; }
+        try {
+          const resp = await fetch("api/routines");
+          if (!resp.ok) return;
+          const data = await resp.json();
+          routines = Array.isArray(data.routines) ? data.routines : [];
+        } catch (e) { return; }
+        // Deleted on another device while it was armed here: drop it rather
+        // than leaving a lit chip that refers to nothing.
+        if (pendingRoutine &&
+            !routines.some(r => r.id === pendingRoutine.routine.id)) clearRoutine();
+        routineBar.hidden = false;
+        renderRoutineChips();
+      }
+
+      function renderRoutineChips() {
+        routineChipsEl.innerHTML = "";
+        if (!routines.length) {
+          // The discovery path on a fresh install: one chip that opens the
+          // drawer, where the starters are one more tap away.
+          const add = document.createElement("button");
+          add.type = "button"; add.className = "chip";
+          add.textContent = "＋ Add a routine";
+          add.addEventListener("click", () => openDrawer("routines"));
+          routineChipsEl.appendChild(add);
+          return;
+        }
+        const armed = pendingRoutine && pendingRoutine.routine.id;
+        for (const routine of routines) {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "chip" + (routine.id === armed ? " active" : "");
+          // textContent, never innerHTML: a routine name is stored text that
+          // anyone who can reach this app could have written.
+          let label = routine.name;
+          if (routine.id === armed && routine.photos) {
+            label += " · " + Math.min(pendingImages.length, routine.photos) +
+                     "/" + routine.photos;
+          }
+          chip.textContent = label;
+          chip.addEventListener("click", () => pickRoutine(routine));
+          routineChipsEl.appendChild(chip);
+        }
+      }
+
+      function forceToggle(el, value) {
+        // Assigned, never dispatched: rememberToggle listens for "change", and
+        // a routine forcing a toggle for one turn must not overwrite what this
+        // browser chose. Same rule as switchToVisionModel setting modelEl.value.
+        el.checked = value;
+      }
+
+      function pickRoutine(routine) {
+        // Tapping the lit chip puts everything back — the undo for a mis-tap.
+        if (pendingRoutine && pendingRoutine.routine.id === routine.id) {
+          clearRoutine();
+          return;
+        }
+        clearRoutine();
+        pendingRoutine = { routine: routine, web: null, exif: null };
+        if (routine.web !== null && webEl.checked !== routine.web) {
+          pendingRoutine.web = webEl.checked;
+          forceToggle(webEl, routine.web);
+        }
+        if (routine.photo_meta !== null && exifEl.checked !== routine.photo_meta) {
+          pendingRoutine.exif = exifEl.checked;
+          forceToggle(exifEl, routine.photo_meta);
+          exifOn = routine.photo_meta;
+        }
+        // Into the box, not straight onto the wire: you read it, you can edit
+        // it ("this was the rental, it reads km"), and what the model gets is
+        // exactly what the bubble shows and what the store keeps. A routine
+        // body is saved text that anyone who can reach this app can change, so
+        // the moment it is visible before it is sent is the mitigation that
+        // matters most.
+        const typed = inputEl.value.trim();
+        inputEl.value = typed ? routine.body + "\\n\\n" + typed : routine.body;
+        autosize();
+        renderRoutineChips();
+        routineProgress();
+        // Attaching first and picking afterwards is too late for the photo's
+        // own timestamp: toAttachment() reads it before the canvas re-encode
+        // and there is no second chance. Say so while re-attaching still fixes it.
+        if (pendingImages.length && routine.photo_meta === true &&
+            !pendingImages.some(img => img.meta && img.meta.taken)) {
+          hintEl.textContent = "Those photos were read without their date — remove them and attach again.";
+        }
+        inputEl.focus();
+      }
+
+      function clearRoutine() {
+        if (!pendingRoutine) return;
+        if (pendingRoutine.web !== null) forceToggle(webEl, pendingRoutine.web);
+        if (pendingRoutine.exif !== null) {
+          forceToggle(exifEl, pendingRoutine.exif);
+          exifOn = pendingRoutine.exif;
+        }
+        pendingRoutine = null;
+        renderRoutineChips();
+      }
+
+      function routineGap(routine, have) {
+        // "At least": three photos for a two-photo routine is your business,
+        // one is the silently-wrong-answer case this exists to prevent.
+        if (!routine || !routine.photos) return 0;
+        return Math.max(0, routine.photos - have);
+      }
+
+      function routineProgress() {
+        if (!pendingRoutine) return;
+        renderRoutineChips();
+        const routine = pendingRoutine.routine;
+        const gap = routineGap(routine, pendingImages.length);
+        if (gap) {
+          hintEl.textContent = routine.name + " needs " + routine.photos +
+            (routine.photos === 1 ? " photo — " : " photos — ") +
+            pendingImages.length + " attached.";
+        } else if (routine.photos) {
+          hintEl.textContent = "";
+        }
+      }
+
+      async function trySend() {
+        const routine = pendingRoutine && pendingRoutine.routine;
+        if (routineGap(routine, pendingImages.length)) {
+          routineProgress();
+          return;
+        }
+        await send();
+        // Spent on the turn it was picked for, whatever became of that turn. A
+        // rolled-back turn hands the expanded text back to the composer, so
+        // pressing Send again sends the same message — just without the count
+        // guard, which has already done its job.
+        clearRoutine();
+      }
+
+      // ---- Routines: the drawer ----
+
+      function showPane(which) {
+        const wantRoutines = which === "routines";
+        convoPaneEl.hidden = wantRoutines;
+        routinePaneEl.hidden = !wantRoutines;
+        tabChatsEl.classList.toggle("active", !wantRoutines);
+        tabRoutinesEl.classList.toggle("active", wantRoutines);
+        if (wantRoutines) { closeRoutineEditor(); renderRoutineList(); }
+        else refreshConversations();
+      }
+
+      function renderRoutineList() {
+        routineListEl.innerHTML = "";
+        if (!routines.length) {
+          const note = document.createElement("p");
+          note.className = "convo-empty";
+          note.textContent = "A routine is a prompt you save once and tap instead of typing.";
+          routineListEl.appendChild(note);
+          const add = document.createElement("button");
+          add.type = "button"; add.className = "drawer-new";
+          add.textContent = "＋ Add the starter routines";
+          add.addEventListener("click", addStarters);
+          routineListEl.appendChild(add);
+          return;
+        }
+        for (const routine of routines) {
+          const row = document.createElement("div");
+          row.className = "convo";
+          const open = document.createElement("button");
+          open.type = "button"; open.className = "convo-open";
+          const title = document.createElement("span");
+          title.className = "convo-title";
+          title.textContent = routine.name;
+          const meta = document.createElement("span");
+          meta.className = "convo-meta";
+          const bits = [];
+          if (routine.photos) bits.push(routine.photos + (routine.photos === 1 ? " photo" : " photos"));
+          if (routine.photo_meta !== null) bits.push("📍 " + (routine.photo_meta ? "on" : "off"));
+          if (routine.web !== null) bits.push("🌐 " + (routine.web ? "on" : "off"));
+          meta.textContent = bits.join(" · ") || "no photos";
+          open.appendChild(title); open.appendChild(meta);
+          open.addEventListener("click", () => openRoutineEditor(routine));
+          row.appendChild(open);
+          routineListEl.appendChild(row);
+        }
+      }
+
+      function openRoutineEditor(routine) {
+        editingRoutineId = routine ? routine.id : "";
+        rNameEl.value = routine ? routine.name : "";
+        rBodyEl.value = routine ? routine.body : "";
+        rPhotosEl.value = String(routine ? routine.photos : 0);
+        rMetaEl.value = routine && routine.photo_meta !== null ? (routine.photo_meta ? "1" : "0") : "";
+        rWebEl.value = routine && routine.web !== null ? (routine.web ? "1" : "0") : "";
+        rDeleteBtn.hidden = !routine;
+        routineListEl.hidden = true;
+        routineNewBtn.hidden = true;
+        routineEditEl.hidden = false;
+        routineWarnUpdate();
+        rNameEl.focus();
+      }
+
+      function closeRoutineEditor() {
+        editingRoutineId = null;
+        routineEditEl.hidden = true;
+        routineListEl.hidden = false;
+        routineNewBtn.hidden = false;
+      }
+
+      function routineWarnUpdate() {
+        // Said where the choice is made rather than discovered later: with
+        // photos attached and web access forced on, the photo's own position
+        // goes to the search planner, whose queries leave the machine.
+        const risky = Number(rPhotosEl.value) > 0 && rWebEl.value === "1";
+        routineWarnEl.textContent = risky
+          ? "With photos attached and web access on, a photo's coordinates are sent to the search planner, whose queries go to a search engine. WEB_SHARE_LOCATION=0 stops that."
+          : "";
+      }
+
+      async function saveRoutine() {
+        const name = rNameEl.value.trim();
+        const body = rBodyEl.value.trim();
+        if (!name || !body) {
+          routineWarnEl.textContent = "A routine needs a name and a prompt.";
+          return;
+        }
+        const tri = (value) => (value === "" ? null : value === "1");
+        const payload = { name: name, body: body,
+                          photos: Number(rPhotosEl.value) || 0,
+                          web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value) };
+        try {
+          const resp = await fetch(
+            editingRoutineId ? "api/routines/" + editingRoutineId : "api/routines",
+            { method: editingRoutineId ? "PATCH" : "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload) });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            routineWarnEl.textContent = data.error || "Could not save that.";
+            return;
+          }
+        } catch (e) {
+          routineWarnEl.textContent = "Could not reach the server.";
+          return;
+        }
+        closeRoutineEditor();
+        await refreshRoutines();
+        renderRoutineList();
+      }
+
+      async function deleteRoutine() {
+        if (!editingRoutineId) return;
+        if (!window.confirm("Delete this routine?")) return;
+        const id = editingRoutineId;
+        // Armed and then deleted from under itself: put the toggles back before
+        // the chip it belongs to stops existing.
+        if (pendingRoutine && pendingRoutine.routine.id === id) clearRoutine();
+        try {
+          await fetch("api/routines/" + id, { method: "DELETE" });
+        } catch (e) { return; }
+        closeRoutineEditor();
+        await refreshRoutines();
+        renderRoutineList();
+      }
+
+      async function addStarters() {
+        try {
+          await fetch("api/routines/starters", { method: "POST" });
+        } catch (e) { return; }
+        await refreshRoutines();
+        renderRoutineList();
+      }
 
       // ---- Vision routing ----
       // Attaching an image to a text-only model gets you a refusal or an
@@ -2026,15 +2450,34 @@ _PAGE = """<!doctype html>
       rememberToggle(exifEl, "chatExif", false);
       exifOn = exifEl.checked;
       exifEl.addEventListener("change", () => { exifOn = exifEl.checked; });
+      // Reaching for a toggle while a routine is armed is a real choice, so
+      // drop it from the restore rather than putting it back afterwards.
+      exifEl.addEventListener("change", () => {
+        if (pendingRoutine) pendingRoutine.exif = null;
+      });
+      webEl.addEventListener("change", () => {
+        if (pendingRoutine) pendingRoutine.web = null;
+      });
 
-      menuBtn.addEventListener("click", openDrawer);
+      // An arrow function, not the handler by reference: openDrawer now
+      // takes a pane name, and passing it the MouseEvent would read as one.
+      menuBtn.addEventListener("click", () => openDrawer("chats"));
+      routineEditBtn.addEventListener("click", () => openDrawer("routines"));
+      tabChatsEl.addEventListener("click", () => showPane("chats"));
+      tabRoutinesEl.addEventListener("click", () => showPane("routines"));
+      routineNewBtn.addEventListener("click", () => openRoutineEditor(null));
+      document.getElementById("rSave").addEventListener("click", saveRoutine);
+      document.getElementById("rCancel").addEventListener("click", closeRoutineEditor);
+      rDeleteBtn.addEventListener("click", deleteRoutine);
+      rPhotosEl.addEventListener("change", routineWarnUpdate);
+      rWebEl.addEventListener("change", routineWarnUpdate);
       document.getElementById("drawerClose").addEventListener("click", closeDrawer);
       backdropEl.addEventListener("click", closeDrawer);
       document.getElementById("drawerNew").addEventListener("click", function () {
         newChat(); closeDrawer();
       });
 
-      sendBtn.addEventListener("click", send);
+      sendBtn.addEventListener("click", trySend);
       stopBtn.addEventListener("click", stop);
       newBtn.addEventListener("click", newChat);
       micBtn.addEventListener("click", toggleMic);
@@ -2043,7 +2486,7 @@ _PAGE = """<!doctype html>
         // isComposing / keyCode 229: Enter is accepting an IME candidate, not
         // submitting. Sending here would post the raw romaji.
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
-          e.preventDefault(); send();
+          e.preventDefault(); trySend();
         }
       });
 
