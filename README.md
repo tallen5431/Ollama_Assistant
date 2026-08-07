@@ -278,6 +278,22 @@ Progress appears live above the reply ("Searching for…", "Reading example.com�
 and the pages used are listed underneath, numbered to match the `[n]` citations
 the model is asked to use.
 
+### Checking it works
+
+The test suite covers this against stand-in servers. Two things a stand-in
+cannot check are whether DuckDuckGo's HTML still parses and whether link
+extraction finds anything on a real page, so:
+
+```bash
+.venv/bin/python tools/check_web.py
+.venv/bin/python tools/check_web.py https://en.wikipedia.org/wiki/Ada_Lovelace
+```
+
+It exercises search, fetch, decoding, link extraction and context assembly, and
+prints what it found. Nothing in it talks to Ollama, so a sleeping desktop
+doesn't matter — run it when a web answer looks wrong and it will tell you
+which half is at fault.
+
 ### Search backend
 
 With no configuration, search uses DuckDuckGo's HTML endpoint — no key, but
