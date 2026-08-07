@@ -1380,6 +1380,12 @@ def _metadata_lines(
             parts.append(f"taken {taken}")
         lat = _meta_number(meta.get("lat"), 90)
         lon = _meta_number(meta.get("lon"), 180)
+        # Exactly 0, 0 is the Gulf of Guinea, and it is where a camera writes a
+        # GPS block it never got a fix for. Reporting Null Island as the place
+        # a photo was taken is worse than saying nothing, because the model
+        # will confidently answer "off the coast of Ghana".
+        if lat == 0 and lon == 0:
+            lat = lon = None
         if with_location and lat is not None and lon is not None:
             parts.append(f"at {lat:.6f}, {lon:.6f}")
             # Anything past this is not a place on Earth; the deepest mine and

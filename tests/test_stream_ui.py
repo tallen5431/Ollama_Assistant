@@ -58,6 +58,8 @@ const chatEl = el("div"), inputEl = el("textarea"), hintEl = el("div");
 const sendBtn = el("button"), stopBtn = el("button"), modelEl = el("select");
 const webEl = { checked: false };
 let pendingImages = [], messages = [], busy = false, controller = null, pendingAutoSend = false;
+// send() reads this to decide whether a photo's own date goes with it.
+let exifOn = true;
 let errors = [], saved = { rows: [], conversation: false };
 function renderThumbs() {}
 function autosize() {}

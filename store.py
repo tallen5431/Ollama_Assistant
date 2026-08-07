@@ -539,15 +539,40 @@ _STARTERS = (
 def create_starters() -> List[Dict[str, Any]]:
     """Install the shipped routines, skipping any name already taken.
 
-    Idempotent, so pressing the button twice does not give you two of each.
+    Idempotent, and idempotent *under a double tap*: the read of what is
+    already there and the inserts share one connection and one transaction, so
+    two requests arriving together cannot both find the table empty and both
+    install a full set. Reading on one connection and writing on another —
+    which is what calling create_routine in a loop did — left exactly that gap.
     """
+    now = time.time()
+    made: List[Dict[str, Any]] = []
     with _connect() as conn:
+        # BEGIN IMMEDIATE takes the write lock up front, so the second request
+        # waits here rather than racing us to the same conclusion.
+        conn.execute("BEGIN IMMEDIATE")
         taken = {row["name"] for row in conn.execute("SELECT name FROM routines")}
-    return [
-        create_routine(name, body, photos, web, photo_meta)
-        for name, body, photos, web, photo_meta in _STARTERS
-        if name not in taken
-    ]
+        position = conn.execute(
+            "SELECT COALESCE(MAX(position), 0) AS top FROM routines"
+        ).fetchone()["top"]
+        for name, body, photos, web, photo_meta in _STARTERS:
+            if name in taken:
+                continue
+            position += 1
+            rid = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO routines"
+                " (id, name, body, photos, web, photo_meta, position, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (rid, name, body, photos,
+                 None if web is None else int(web),
+                 None if photo_meta is None else int(photo_meta),
+                 position, now, now),
+            )
+            made.append({"id": rid, "name": name, "body": body, "photos": photos,
+                         "web": web, "photo_meta": photo_meta, "position": position,
+                         "created_at": now, "updated_at": now})
+    return made
 
 
 def stats() -> Dict[str, int]:

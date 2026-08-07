@@ -1438,7 +1438,9 @@ _PAGE = """<!doctype html>
       async function send() {
         const text = inputEl.value.trim();
         const images = pendingImages.slice();
-        if ((!text && !images.length) || busy) return;
+        // Reports whether the turn went. A caller that armed something for
+        // this turn — the routine guard — must not spend it on a refusal.
+        if ((!text && !images.length) || busy) return false;
         busy = true; sendBtn.disabled = true; stopBtn.hidden = false;
         pendingImages = []; renderThumbs();
         const userView = addUser(text, images);
@@ -1449,7 +1451,10 @@ _PAGE = """<!doctype html>
           // Parallel to images[], so the server can pair them up. Only sent
           // when at least one photo actually carried any.
           const meta = images.map(img => img.meta || null);
-          if (meta.some(Boolean)) userMsg.image_meta = meta;
+          // Checked here as well as at attach time: turning the toggle off
+          // after attaching, or picking a routine that turns it off, has to
+          // mean the details do not go — not just that new photos skip them.
+          if (exifOn && meta.some(Boolean)) userMsg.image_meta = meta;
         }
         messages.push(userMsg);
         inputEl.value = ""; autosize();
@@ -1667,10 +1672,15 @@ _PAGE = """<!doctype html>
           controller = null;
           if (pendingAutoSend) {
             pendingAutoSend = false;
-            if (inputEl.value.trim()) { setTimeout(send, 0); return; }
+            // trySend, not send: a dictated follow-up while a routine is
+            // armed still owes it its photos.
+            if (inputEl.value.trim()) { setTimeout(trySend, 0); return; }
           }
           inputEl.focus();
         }
+        // The turn went — however it ended. A stream the user stopped still
+        // sent the message, so a routine armed for it is spent either way.
+        return true;
       }
 
       function stop() { if (controller) controller.abort(); }
@@ -1965,6 +1975,7 @@ _PAGE = """<!doctype html>
         // the moment it is visible before it is sent is the mitigation that
         // matters most.
         const typed = inputEl.value.trim();
+        pendingRoutine.inserted = routine.body;
         inputEl.value = typed ? routine.body + "\\n\\n" + typed : routine.body;
         autosize();
         renderRoutineChips();
@@ -1985,6 +1996,17 @@ _PAGE = """<!doctype html>
         if (pendingRoutine.exif !== null) {
           forceToggle(exifEl, pendingRoutine.exif);
           exifOn = pendingRoutine.exif;
+        }
+        // Take the body back out of the composer, but only while it is still
+        // there verbatim — the whole point of putting it in a box was that you
+        // can edit it, and edited text is yours. Without this, picking a second
+        // routine stacked the two prompts on top of each other.
+        const inserted = pendingRoutine.inserted;
+        if (inserted && inputEl.value.indexOf(inserted) === 0) {
+          let rest = inputEl.value.slice(inserted.length);
+          if (rest.slice(0, 2) === "\\n\\n") rest = rest.slice(2);
+          inputEl.value = rest;
+          autosize();
         }
         pendingRoutine = null;
         renderRoutineChips();
@@ -2017,12 +2039,11 @@ _PAGE = """<!doctype html>
           routineProgress();
           return;
         }
-        await send();
-        // Spent on the turn it was picked for, whatever became of that turn. A
-        // rolled-back turn hands the expanded text back to the composer, so
-        // pressing Send again sends the same message — just without the count
-        // guard, which has already done its job.
-        clearRoutine();
+        // Only when the turn actually went. send() refuses an empty message
+        // and one that arrives while a stream is still running; disarming
+        // there put the toggles back and dropped the count while the message
+        // was still sitting in the composer waiting to be sent.
+        if (await send()) clearRoutine();
       }
 
       // ---- Routines: the drawer ----

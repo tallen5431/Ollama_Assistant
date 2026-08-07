@@ -263,6 +263,21 @@ class TestRenderingTheFacts:
     def test_a_real_coordinate_still_gets_through(self):
         assert "51.510000" in web.image_metadata([{"lat": 51.51, "lon": -0.1275}])
 
+    def test_null_island_is_not_a_place_a_photo_was_taken(self):
+        """A camera writes 0/0/0 for a GPS block it never got a fix for.
+
+        Reported as a position it becomes the Gulf of Guinea, and the model
+        answers "off the coast of Ghana" with complete confidence.
+        """
+        out = web.image_metadata([{"lat": 0.0, "lon": 0.0, "camera": "X"}])
+        assert "0.000000" not in out
+        assert "on a X" in out, "the rest of the photo's facts still stand"
+
+    @pytest.mark.parametrize("lat, lon", [(0.0, 12.5), (12.5, 0.0), (0.0, -0.0001)])
+    def test_a_real_position_on_a_zero_meridian_survives(self, lat, lon):
+        """Only exactly 0,0 is the no-fix marker; Greenwich is a real place."""
+        assert "at " in web.image_metadata([{"lat": lat, "lon": lon}])
+
     def test_a_hostile_camera_name_cannot_run_off(self):
         long_name = "A" * 500
         out = web.image_metadata([{"camera": long_name}])

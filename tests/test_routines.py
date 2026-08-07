@@ -128,6 +128,25 @@ class TestTheStarters:
         assert store.create_starters() == []
         assert len(store.list_routines()) == 4
 
+    def test_a_double_tap_still_installs_one_set(self):
+        """Two taps on a phone arrive together often enough to matter.
+
+        Reading what is already there on one connection and inserting on
+        another leaves a window in which both requests find the table empty.
+        """
+        import threading
+        store.create("a chat")           # so the schema exists before the race
+        counts = []
+        threads = [threading.Thread(target=lambda: counts.append(len(store.create_starters())))
+                   for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sorted(counts) == [0, 0, 0, 0, 0, 4], counts
+        assert len(store.list_routines()) == 4
+        assert store.available() is True, "the race must not leave a transaction open"
+
     def test_they_survive_a_rename_of_one(self):
         store.create_starters()
         store.update_routine(store.list_routines()[0]["id"], {"name": "mine"})
@@ -241,6 +260,21 @@ class TestTheRoutes:
     @pytest.mark.parametrize("payload", [["a"], "hi", 7, None])
     def test_a_body_that_is_not_an_object_is_a_400_not_a_500(self, client, payload):
         assert client.post("/api/routines", json=payload).status_code == 400
+
+    @pytest.mark.parametrize("photos", [float("inf"), float("-inf"), float("nan"),
+                                        "lots", None, [], {"a": 1}])
+    def test_a_photo_count_that_is_not_a_number_never_raises(self, client, photos):
+        """json.loads accepts Infinity and NaN, and int(inf) raises."""
+        resp = client.post("/api/routines",
+                           json={"name": "r", "body": "b", "photos": photos})
+        assert resp.status_code == 200, resp.get_data(as_text=True)[:200]
+        assert resp.get_json()["photos"] == 0
+
+    def test_the_same_on_a_patch(self, client):
+        made = client.post("/api/routines", json={"name": "r", "body": "b"}).get_json()
+        resp = client.patch(f"/api/routines/{made['id']}", json={"photos": float("inf")})
+        assert resp.status_code == 200
+        assert resp.get_json()["routine"]["photos"] == 0
 
     def test_patch_returns_the_whole_normalised_record(self, client):
         made = client.post("/api/routines", json={"name": "r", "body": "b"}).get_json()
@@ -357,3 +391,31 @@ class TestThePage:
         page = self.page()
         assert ".thumb .stamp" in page
         assert 'stamp.textContent = "🕘"' in page
+
+    def test_a_routine_is_only_spent_on_a_turn_that_went(self):
+        """send() refuses an empty message and one that arrives mid-stream.
+
+        Disarming there put the toggles back and dropped the photo count while
+        the message was still sitting in the composer waiting to be sent.
+        """
+        page = self.page()
+        assert "if (await send()) clearRoutine();" in page
+        assert "|| busy) return false;" in page, "send() must report a refusal"
+
+    def test_clearing_takes_its_own_text_back_out(self):
+        """Otherwise picking a second routine stacks the two prompts."""
+        page = self.page()
+        assert "pendingRoutine.inserted = routine.body;" in page
+        assert "inputEl.value.indexOf(inserted) === 0" in page, \
+            "and only while it is still there verbatim — edited text is the user's"
+
+    def test_the_voice_retry_goes_through_the_guard(self):
+        """A dictated follow-up while a routine is armed still owes it photos."""
+        page = self.page()
+        assert "setTimeout(trySend, 0)" in page
+        assert "setTimeout(send, 0)" not in page
+
+    def test_the_photo_details_toggle_is_read_at_send_time(self):
+        """Turning it off after attaching has to mean the details do not go."""
+        page = self.page()
+        assert "if (exifOn && meta.some(Boolean))" in page

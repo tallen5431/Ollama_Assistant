@@ -341,10 +341,14 @@ def _tri(value: Any) -> Optional[bool]:
 
 
 def _count(value: Any) -> int:
-    """A photo count from a request body. The store clamps the range."""
+    """A photo count from a request body. The store clamps the range.
+
+    OverflowError as well as the obvious two: Python's json accepts
+    ``Infinity``, and ``int(inf)`` raises rather than returning anything.
+    """
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
