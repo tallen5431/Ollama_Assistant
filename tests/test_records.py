@@ -361,17 +361,96 @@ class TestThePage:
             code = line.split("//")[0]
             if "innerHTML" in code:
                 assert '= ""' in code, line.strip()
-        assert "who.textContent = record.routine_name;" in body
+        assert "td.textContent = text;" in body, \
+            "every cell goes in as text, whatever it holds"
 
     def test_the_cells_can_be_corrected(self):
         page = self.page()
-        assert 'cell.contentEditable = "true";' in page
+        assert 'td.contentEditable = "true";' in page
         assert "editRecord(record.id, name, value)" in page
 
     def test_both_exports_are_offered(self):
         page = self.page()
-        assert 'csv.href = "api/records.csv"' in page
-        assert 'jsonLink.href = "api/records"' in page
+        assert '["⤓ CSV", "api/records.csv" + query, "records.csv"]' in page
+        assert '["⤓ JSON", "api/records" + query, null]' in page
+
+    def test_the_exports_follow_the_filter(self):
+        """Exporting one routine while looking at one routine."""
+        page = self.page()
+        assert 'const query = recordFilter ? "?routine=" + encodeURIComponent(recordFilter) : "";' in page
+
+
+class TestTheLayoutFitsWhereItIsShown:
+    """A table with eight columns in a 320px drawer is unreadable at any width;
+    the header alone wraps to two lines per column. Measured on the owner's
+    screenshots — narrow gets cards, wide gets the room a table needs.
+    """
+
+    def page(self):
+        return chat_ui.render_page("t")
+
+    def test_a_narrow_screen_gets_one_card_per_record(self):
+        page = self.page()
+        assert "#recordList thead { display:none; }" in page
+        assert "#recordList td::before { content:attr(data-label);" in page
+        assert 'td.setAttribute("data-label", label);' in page, \
+            "the heading has to travel down with the cell"
+
+    def test_the_card_layout_is_only_for_narrow_screens(self):
+        """A table is the right shape for a log when there is room for one."""
+        page = self.page()
+        at = page.index("#recordList .tablewrap { overflow-x:visible; }")
+        media = page.rindex("@media", 0, at)
+        assert "max-width: 720px" in page[media:at]
+
+    def test_a_wide_table_fills_the_drawer_instead_of_hugging_the_left(self):
+        """Four columns in a 64rem drawer left three quarters of it empty."""
+        page = self.page()
+        assert "#recordList table { border-collapse:collapse; min-width:100%;" in page
+        assert "#recordList th, #recordList td { border:1px solid var(--border);" in page
+
+    def test_the_card_rules_come_after_the_table_rules(self):
+        """Both selectors weigh the same, so the later one wins. Put the table
+        borders after the media block and every phone card grows gridlines.
+        """
+        page = self.page()
+        table = page.index("#recordList th, #recordList td { border:1px solid")
+        card = page.index("#recordList td { border:0;")
+        assert table < card, "the narrow-screen block has to be able to override"
+
+    def test_the_drawer_takes_the_room_a_log_needs(self):
+        page = self.page()
+        assert ".drawer.wide { width:min(64rem,94vw); }" in page
+        assert 'drawerEl.classList.toggle("wide", which === "records");' in page
+
+    def test_the_other_panes_stay_narrow(self):
+        """A conversation list is a column of titles and does not want 64rem."""
+        page = self.page()
+        assert 'classList.toggle("wide", which === "records")' in page
+        assert 'classList.add("wide")' not in page
+
+    def test_records_can_be_narrowed_to_one_routine(self):
+        """The columns are the union across routines, so three routines with
+        four fields each is a twelve-column table. Filtering is the fix."""
+        page = self.page()
+        assert "let recordFilter = \"\";" in page
+        assert "records.filter(r => r.routine_name === recordFilter)" in page
+
+    def test_the_columns_follow_the_filter(self):
+        """Otherwise filtering leaves the empty columns of the other routines."""
+        page = self.page()
+        at = page.index("const shown = recordFilter")
+        window = page[at:at + 500]
+        assert "for (const record of shown)" in window
+        assert "columns.push(name)" in window
+
+    def test_one_routine_is_not_a_choice(self):
+        page = self.page()
+        assert "if (names.length < 2) return bar;" in page
+
+    def test_the_routine_column_goes_away_when_it_is_redundant(self):
+        page = self.page()
+        assert 'if (!recordFilter) cell("Routine", record.routine_name);' in page
 
     def test_the_editor_asks_for_the_field_names(self):
         page = self.page()
@@ -402,3 +481,30 @@ class TestThePage:
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
         assert rows[1][1].startswith("'=")
+
+
+class TestFieldsKeepTheirDeclaredOrder:
+    """A trip reads start, end, distance — not "average speed" first.
+
+    Flask sorts JSON keys by default, so the wire order was alphabetical and
+    every consumer of it inherited that: the line under the reply, the table
+    columns, and the cards on a phone.
+    """
+
+    def test_the_wire_keeps_the_order_the_record_was_built_in(self, client):
+        order = ["Start odometer", "End odometer", "Distance", "Average speed"]
+        store.add_record("T", {name: str(i) for i, name in enumerate(order)})
+        out = client.get("/api/records").get_json()
+        assert list(out["records"][0]["fields"]) == order
+        assert out["columns"] == order
+
+    def test_the_csv_columns_follow_it_too(self, client):
+        order = ["Start odometer", "End odometer", "Distance"]
+        store.add_record("T", {name: str(i) for i, name in enumerate(order)})
+        rows = list(csv.reader(io.StringIO(
+            client.get("/api/records.csv").get_data(as_text=True))))
+        assert rows[0][2:] == order
+
+    def test_it_is_switched_off_at_the_app_rather_than_per_route(self):
+        """Every response, so a later route cannot quietly reintroduce it."""
+        assert app_module.app.json.sort_keys is False

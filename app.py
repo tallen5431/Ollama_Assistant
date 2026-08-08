@@ -74,6 +74,12 @@ app = Flask(__name__)
 # /api/transcribe, which is buffered in memory) can't exhaust RAM.
 app.config["MAX_CONTENT_LENGTH"] = get_max_body_bytes()
 
+# Keys go out in the order they were built, not alphabetically. A record's
+# fields are the order the routine declared — start odometer, end odometer,
+# distance — and sorting them turned a trip into "average speed" first. Nothing
+# here reads JSON by key order, so this only affects how it looks.
+app.json.sort_keys = False
+
 # Respect X-Forwarded-* headers so the app works behind the manager's reverse
 # proxy (Caddy) as well as when accessed directly.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)

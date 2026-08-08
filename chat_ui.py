@@ -160,6 +160,7 @@ _PAGE = """<!doctype html>
       .backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:20; }
       .drawer {
         position:fixed; top:0; left:0; bottom:0; z-index:21; width:min(20rem,86vw);
+        transition:width 0.12s ease;
         background:var(--panel); border-right:1px solid var(--border);
         display:flex; flex-direction:column; padding:0.75rem;
       }
@@ -237,6 +238,47 @@ _PAGE = """<!doctype html>
       .metarow:last-child { border-bottom:0; }
       .metaname { flex:0 0 9rem; color:var(--muted); }
       .metarow a { color:var(--accent); word-break:break-all; }
+      /* Records are a table, not a list of titles, and on a desktop there is a
+         whole screen next to a 20rem drawer doing nothing. */
+      .drawer.wide { width:min(64rem,94vw); }
+      .exportbar { display:flex; gap:0.4rem; align-items:center; margin:0.3rem 0 0.6rem; }
+      .exportbar a { text-decoration:none; }
+      .recordfilter { flex-wrap:wrap; margin-bottom:0.4rem; }
+      /* min-width:100% rather than width:100%: fill a wide drawer when four
+         columns would otherwise huddle at the left edge, while still being
+         allowed to grow past it and scroll inside .tablewrap when a dozen
+         columns cannot fit. These sit above the narrow-screen block below
+         because that block has to override them, and both selectors weigh the
+         same — so the later one wins. */
+      #recordList table { border-collapse:collapse; min-width:100%;
+                          font-size:0.8rem; }
+      #recordList th, #recordList td { border:1px solid var(--border);
+        padding:0.3rem 0.45rem; text-align:left; vertical-align:top; }
+      #recordList th { background:var(--panel2); font-weight:600;
+                       white-space:nowrap; }
+
+      /* Narrow enough and a table stops being readable at any width — the
+         header alone wraps to two lines per column. Each record becomes its own
+         block of labelled lines instead, which is the same data in the shape a
+         phone can actually show. data-label carries the heading down. */
+      @media (max-width: 720px) {
+        #recordList .tablewrap { overflow-x:visible; }
+        #recordList table, #recordList tbody, #recordList tr, #recordList td {
+          display:block; width:auto; min-width:0;
+        }
+        #recordList thead { display:none; }
+        #recordList tr { border:1px solid var(--border); border-radius:0.6rem;
+          margin-bottom:0.5rem; padding:0.35rem 0.55rem; position:relative; }
+        #recordList td { border:0; padding:0.22rem 0; display:flex; gap:0.6rem; }
+        #recordList td::before { content:attr(data-label); flex:0 0 7.5rem;
+          color:var(--muted); }
+        #recordList td:empty { display:none; }
+        /* The delete button belongs in the corner of its own card. */
+        #recordList td[data-label=""] { position:absolute; top:0.3rem; right:0.4rem;
+          padding:0; }
+        #recordList td[data-label=""]::before { content:none; }
+      }
+
       /* A line under the reply saying what was kept, so a record appearing is
          visible when it happens rather than discovered in a drawer later. */
       .kept { font-size:0.72rem; color:var(--muted); margin:0.2rem 0 0 0.2rem;
@@ -245,7 +287,6 @@ _PAGE = """<!doctype html>
       #recordList { overflow:auto; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
-      #recordList table { font-size:0.78rem; }
       #recordList a.drawer-new { text-align:center; text-decoration:none;
                                  padding:0.4rem; color:var(--text); }
       .thumb { cursor:pointer; }
@@ -2579,34 +2620,66 @@ _PAGE = """<!doctype html>
         view.root.appendChild(line);
       }
 
+      // Which routine's records are on screen. "" is all of them, which is also
+      // what makes the table widest: the columns are the union across every
+      // routine, so three routines with four fields each is a twelve-column
+      // table in a drawer. Narrowing to one is the fix for that, and it is the
+      // question you usually have anyway ("how far have I driven this month").
+      let recordFilter = "";
+
       function renderRecords() {
         recordListEl.innerHTML = "";
         if (!records.length) {
           const note = document.createElement("p");
           note.className = "convo-empty";
-          note.textContent = "Nothing kept yet. Give a routine some field names " +
-            "and every run of it writes a row here.";
+          note.textContent = recordFilter
+            ? "No records from that routine yet."
+            : "Nothing kept yet. Give a routine some field names and every run " +
+              "of it writes a row here.";
           recordListEl.appendChild(note);
+          if (recordFilter) recordListEl.insertBefore(recordFilterBar(), note);
           return;
+        }
+        recordListEl.appendChild(recordFilterBar());
+
+        const shown = recordFilter
+          ? records.filter(r => r.routine_name === recordFilter) : records;
+        // Only the columns the shown records actually use, so filtering to one
+        // routine genuinely narrows the table rather than leaving empty columns.
+        const columns = [];
+        for (const record of shown) {
+          for (const name of Object.keys(record.fields)) {
+            if (columns.indexOf(name) < 0) columns.push(name);
+          }
         }
 
         const bar = document.createElement("div");
-        bar.className = "routine-acts";
-        const csv = document.createElement("a");
-        csv.className = "drawer-new"; csv.href = "api/records.csv";
-        csv.textContent = "⤓ CSV"; csv.setAttribute("download", "records.csv");
-        const jsonLink = document.createElement("a");
-        jsonLink.className = "drawer-new"; jsonLink.href = "api/records";
-        jsonLink.textContent = "⤓ JSON"; jsonLink.target = "_blank";
-        jsonLink.rel = "noopener noreferrer";
-        bar.appendChild(csv); bar.appendChild(jsonLink);
+        bar.className = "exportbar";
+        const query = recordFilter ? "?routine=" + encodeURIComponent(recordFilter) : "";
+        for (const [label, href, download] of [
+          ["⤓ CSV", "api/records.csv" + query, "records.csv"],
+          ["⤓ JSON", "api/records" + query, null],
+        ]) {
+          const link = document.createElement("a");
+          link.className = "chip"; link.href = href; link.textContent = label;
+          if (download) link.setAttribute("download", download);
+          else { link.target = "_blank"; link.rel = "noopener noreferrer"; }
+          bar.appendChild(link);
+        }
+        const count = document.createElement("span");
+        count.className = "voicebar-label";
+        count.textContent = shown.length + (shown.length === 1 ? " record" : " records");
+        bar.appendChild(count);
         recordListEl.appendChild(bar);
 
         const wrap = document.createElement("div");
         wrap.className = "tablewrap";
         const table = document.createElement("table");
         const head = document.createElement("tr");
-        for (const label of ["When", "Routine"].concat(recordColumns).concat([""])) {
+        // The routine column is redundant once you have filtered to one.
+        const labels = ["When"].concat(recordFilter ? [] : ["Routine"])
+                               .concat(columns).concat([""]);
+        for (const label of labels) {
           const th = document.createElement("th");
           th.textContent = label;
           head.appendChild(th);
@@ -2616,42 +2689,64 @@ _PAGE = """<!doctype html>
         table.appendChild(thead);
 
         const body = document.createElement("tbody");
-        for (const record of records) {
+        for (const record of shown) {
           const row = document.createElement("tr");
-          const when = document.createElement("td");
-          when.textContent = new Date(record.created_at * 1000)
-            .toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
-          row.appendChild(when);
-          const who = document.createElement("td");
-          who.textContent = record.routine_name;   // never innerHTML: stored text
-          row.appendChild(who);
-          for (const name of recordColumns) {
-            const cell = document.createElement("td");
+          // data-label is what turns each cell into its own labelled line when
+          // the stylesheet drops the table layout on a narrow screen.
+          const cell = (label, text) => {
+            const td = document.createElement("td");
+            td.setAttribute("data-label", label);
+            td.textContent = text;      // never innerHTML: this is stored text
+            row.appendChild(td);
+            return td;
+          };
+          cell("When", new Date(record.created_at * 1000)
+            .toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" }));
+          if (!recordFilter) cell("Routine", record.routine_name);
+          for (const name of columns) {
+            const td = cell(name, record.fields[name] || "");
             // Editable, because the fields were pulled out of prose by a model
             // and a log you cannot correct is one you stop trusting.
-            cell.contentEditable = "true";
-            cell.className = "editable";
-            cell.textContent = record.fields[name] || "";
-            cell.addEventListener("blur", () => {
-              const value = cell.textContent.trim();
+            td.contentEditable = "true";
+            td.className = "editable";
+            td.addEventListener("blur", () => {
+              const value = td.textContent.trim();
               if (value === (record.fields[name] || "")) return;
               record.fields[name] = value;
               editRecord(record.id, name, value);
             });
-            row.appendChild(cell);
           }
-          const act = document.createElement("td");
+          const act = cell("", "");
           const rm = document.createElement("button");
           rm.className = "convo-act"; rm.type = "button"; rm.textContent = "✕";
           rm.title = "Delete this record";
           rm.addEventListener("click", () => dropRecord(record));
           act.appendChild(rm);
-          row.appendChild(act);
           body.appendChild(row);
         }
         table.appendChild(body);
         wrap.appendChild(table);
         recordListEl.appendChild(wrap);
+      }
+
+      function recordFilterBar() {
+        const bar = document.createElement("div");
+        bar.className = "chips recordfilter";
+        const names = [];
+        for (const record of records) {
+          if (names.indexOf(record.routine_name) < 0) names.push(record.routine_name);
+        }
+        // One routine is not a choice, so do not draw one.
+        if (names.length < 2) return bar;
+        for (const [label, value] of [["All", ""]].concat(names.map(n => [n, n]))) {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "chip" + (value === recordFilter ? " active" : "");
+          chip.textContent = label;
+          chip.addEventListener("click", () => { recordFilter = value; renderRecords(); });
+          bar.appendChild(chip);
+        }
+        return bar;
       }
 
       async function editRecord(id, name, value) {
@@ -2683,6 +2778,8 @@ _PAGE = """<!doctype html>
         tabChatsEl.classList.toggle("active", which === "chats");
         tabRoutinesEl.classList.toggle("active", which === "routines");
         tabRecordsEl.classList.toggle("active", which === "records");
+        // The log needs the room; the other two panes are lists of titles.
+        drawerEl.classList.toggle("wide", which === "records");
         if (which === "routines") { closeRoutineEditor(); renderRoutineList(); }
         else if (which === "records") { await refreshRecords(); renderRecords(); }
         else refreshConversations();
