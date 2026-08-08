@@ -1306,3 +1306,122 @@ class TestProseDeclines:
     def test_a_genuinely_garbled_reply_still_falls_back(self, monkeypatch):
         monkeypatch.setattr("ollama_client.chat", planner("uhh"))
         assert web.plan_searches(ASK, "m") == ["what changed in the newest ollama?"]
+
+
+# --------------------------------------------------------------------------
+# When the search backend stops working
+# --------------------------------------------------------------------------
+
+_HTML_BLOCKED = "<html><body><div>If this error persists, let us know.</div></body></html>"
+_HTML_NO_HITS = "<html><body><div>No results found for that query.</div></body></html>"
+_HTML_GOOD = """<html><body><div class="result">
+<a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fa">A page</a>
+<a class="result__snippet">the snippet</a></div></body></html>"""
+_LITE_GOOD = """<html><body><table>
+<tr><td>1.&nbsp;</td><td><a rel="nofollow"
+ href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdailymed.nlm.nih.gov%2Fx&amp;rut=z"
+ class='result-link'>Albuterol Sulfate - DailyMed</a></td></tr>
+<tr><td class='result-snippet'>NDC 69097-142-60, 90 mcg per actuation.</td></tr>
+</table></body></html>"""
+
+
+class _Pages:
+    """Serve a scripted page per request, recording what was asked for."""
+
+    def __init__(self, *pages):
+        self.pages = list(pages)
+        self.seen = []
+
+    def __call__(self, url, headers=None, **kw):
+        self.seen.append({"url": url, "ua": (headers or {}).get("User-Agent", "")})
+        outer = self
+
+        class _Resp:
+            ok = True
+            status_code = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def close(self):
+                pass
+
+        return _Resp()
+
+    def body(self, _resp):
+        return self.pages[len(self.seen) - 1]
+
+
+@pytest.fixture
+def duck(monkeypatch):
+    def install(*pages):
+        pages_obj = _Pages(*pages)
+        monkeypatch.setattr(web, "_get", pages_obj)
+        monkeypatch.setattr(web, "_read_capped", pages_obj.body)
+        monkeypatch.setattr(web, "get_search_url", lambda: "")
+        monkeypatch.setattr(web, "web_enabled", lambda: True)
+        return pages_obj
+    return install
+
+
+class TestTheSearchBackendFallback:
+    """Reported: three queries planned, "0 from 0 query group(s)", no failure
+    named, and an answer that said it could not check anything against a
+    source. The endpoint had answered 200 with a page containing no results,
+    which came back as an empty list — indistinguishable from a query that
+    genuinely matched nothing.
+    """
+
+    def test_a_working_first_endpoint_is_used_alone(self, duck):
+        pages = duck(_HTML_GOOD, _LITE_GOOD)
+        out = web.search("anything", 3)
+        assert out[0]["url"] == "https://example.com/a"
+        assert len(pages.seen) == 1, "the second endpoint should not be touched"
+
+    def test_a_blocked_first_endpoint_falls_through_to_the_second(self, duck):
+        pages = duck(_HTML_BLOCKED, _LITE_GOOD)
+        out = web.search("albuterol ndc", 3)
+        assert out[0]["url"] == "https://dailymed.nlm.nih.gov/x"
+        assert out[0]["title"].startswith("Albuterol Sulfate")
+        assert "69097-142-60" in out[0]["snippet"]
+        assert len(pages.seen) == 2
+
+    def test_a_query_that_really_matches_nothing_is_an_answer(self, duck):
+        """Not a fault: it must not raise, and must not try the other one."""
+        pages = duck(_HTML_NO_HITS, _LITE_GOOD)
+        assert web.search("zqxjkv", 3) == []
+        assert len(pages.seen) == 1
+
+    def test_every_endpoint_failing_is_reported_rather_than_returned_empty(self, duck):
+        duck(_HTML_BLOCKED, _HTML_BLOCKED)
+        with pytest.raises(web.WebError) as caught:
+            web.search("anything", 3)
+        said = str(caught.value)
+        assert "no results in it" in said
+        assert "SEARXNG_URL" in said, "and says what to do about it"
+
+    def test_the_search_endpoints_are_asked_as_a_browser(self, duck):
+        """A User-Agent announcing itself as a tool gets an empty result page,
+        which is the failure above with no way to tell it from an answer."""
+        pages = duck(_HTML_GOOD)
+        web.search("anything", 3)
+        assert pages.seen[0]["ua"].startswith("Mozilla/5.0 (Windows")
+        assert "OllamaChat" not in pages.seen[0]["ua"]
+
+    def test_page_fetches_keep_the_honest_one(self):
+        """Identifying the client to a site whose page you are reading is the
+        polite thing and costs nothing; a search endpoint is the exception."""
+        assert "OllamaChat" in web._UA
+        assert web._UA != web._SEARCH_UA
+
+    def test_searxng_is_still_preferred_when_it_is_configured(self, duck, monkeypatch):
+        pages = duck(_HTML_GOOD)
+        monkeypatch.setattr(web, "get_search_url", lambda: "http://searx.local")
+        monkeypatch.setattr(web, "_search_searxng",
+                            lambda base, q, limit: [{"url": "http://x", "title": "t",
+                                                     "snippet": "s"}])
+        assert web.search("anything", 3)[0]["url"] == "http://x"
+        assert not pages.seen, "DuckDuckGo should not be touched"

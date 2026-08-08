@@ -321,7 +321,7 @@ class TestRenderingTheFacts:
         out = web.image_metadata([{"taken": "2026:01:03 07:15:00"}])
         line = out.split("- Photo: ")[1]
         assert "morning" in line
-        assert line.endswith("no position recorded")
+        assert line.endswith("no position in the file")
         assert ", ," not in line, "no empty clauses"
 
     @pytest.mark.parametrize("hour, part", [
@@ -625,7 +625,7 @@ class TestTheSearchPlannerCanUseIt:
 
     def test_a_note_that_fits_is_left_whole(self):
         note = web.metadata_note([{"taken": "2026:08:07 09:04:00"}])
-        assert note.endswith("no position recorded")
+        assert note.endswith("no position in the file")
         assert "(morning)" in note
 
     def test_it_arrives_as_a_note_not_as_the_fenced_system_turn(self, rig, monkeypatch):
@@ -791,12 +791,21 @@ class TestASilentAbsenceIsWorseThanASentence:
 
     def test_a_photo_with_no_position_says_so(self):
         out = web.image_metadata([{"taken": "2026:08:07 16:45:11", "camera": "Pixel 8"}])
-        assert "no position recorded" in out
+        assert "no position in the file" in out
 
-    def test_a_camera_that_tried_and_failed_says_which(self):
-        """Indoors. It is a different answer from "the setting is off"."""
+    def test_a_gps_block_with_no_fix_names_both_causes(self):
+        """A GPS block holding no coordinates has two causes that look
+        identical in the file: the camera got no fix, or something removed the
+        position afterwards. Android's picker strips it by default on an
+        attached photo — reported from a phone where the same camera recorded a
+        position when the shot was taken in the app and none when the file was
+        picked from the gallery. Naming only the first was a confident guess,
+        and usually the wrong one.
+        """
         out = web.image_metadata([{"taken": "2026:08:07 16:45:11", "gpsBlock": True}])
-        assert "the camera asked for a GPS fix and did not get one" in out
+        assert "the camera had no GPS fix" in out
+        assert "removed when the photo was shared or attached" in out
+        assert "camera asked for a GPS fix and did not get one" not in out
 
     def test_a_photo_with_a_position_says_nothing_about_absence(self):
         out = web.image_metadata([{"taken": "2026:08:07 16:45:11",

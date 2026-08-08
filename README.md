@@ -126,7 +126,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
-| `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Unset falls back to DuckDuckGo HTML |
+| `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. **Recommended.** Unset falls back to scraping DuckDuckGo's no-JS endpoints, which is what breaks first |
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
 | `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
@@ -739,6 +739,23 @@ Camera names are treated as untrusted text like anything else the app didn't
 write — folded to one line, capped, and fenced — since a file can claim any
 make it likes.
 
+### When the search stops working
+
+Unset, `SEARXNG_URL` means scraping `html.duckduckgo.com` and, if that yields
+nothing, `lite.duckduckgo.com`. Both are asked as an ordinary browser: a
+User-Agent that announces itself as a tool gets served an empty result page,
+which is indistinguishable from a query that matched nothing — and that is
+exactly how a broken search became an answer saying it could not check
+anything against a source.
+
+An endpoint returning a page with no results in it is now reported as a fault
+rather than as an empty list, and the panel below says which endpoint and what
+to do about it. A query that genuinely matches nothing still comes back as
+nothing, because those are different answers.
+
+Scraping is fragile by nature. If web access matters to you, run SearXNG and
+point `SEARXNG_URL` at it — it is a JSON API that does not change under you.
+
 ## Seeing what a turn did
 
 Under every reply, next to **Show thinking**, is **Show what it did** —
@@ -757,6 +774,9 @@ Sent to the model  3 turns, 7412 characters of text, num_ctx 8192    [show]
 
 The `[show]` toggles reveal the exact text — the metadata block, the
 transcription, the URLs, the system turns the model was actually given.
+
+Both this panel and **Show thinking** are stored with the reply, so a chat
+started on a phone still has them when it is opened on a desktop.
 
 This exists because two very different failures look identical from the
 outside. A reply saying "I cannot read image metadata" while **📍 Photo

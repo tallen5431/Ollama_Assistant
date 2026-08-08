@@ -657,6 +657,8 @@ def api_chat() -> Any:
     convo_id = convo_id if isinstance(convo_id, str) and convo_id else None
     last_user = messages[-1] if isinstance(messages[-1], dict) else {}
     answer: List[str] = []
+    thinking: List[str] = []
+    kept_steps: List[Dict[str, Any]] = []
     kept_sources: List[Dict[str, str]] = []
 
     # Streaming path — pass Ollama's NDJSON lines straight through, preceded by
@@ -787,6 +789,7 @@ def api_chat() -> Any:
             for line in chat_stream(model, convo, options=options,
                                     keep_alive=get_keep_alive() or None):
                 answer.append(_content_of(line))
+                thinking.append(_thinking_of(line))
                 yield line + "\n"
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
@@ -814,6 +817,9 @@ def api_chat() -> Any:
             for line in run_turn():
                 if cancel.is_set():
                     break     # closes chat_stream, which lets Ollama go
+                entry = _debug_of(line)
+                if entry is not None:
+                    kept_steps.append(entry)
                 lines.put(line)
         finally:
             _end_turn(convo_id, cancel)
@@ -823,7 +829,8 @@ def api_chat() -> Any:
             # no title until something else happened to refresh it.
             # Saved even when cancelled: Stop usually means "I have read
             # enough", and the half you read is worth keeping.
-            _keep_turn(convo_id, last_user, "".join(answer), kept_sources)
+            _keep_turn(convo_id, last_user, "".join(answer), kept_sources,
+                       "".join(thinking), kept_steps)
             lines.put(None)
 
     threading.Thread(target=produce, name="chat-turn", daemon=True).start()
@@ -873,6 +880,18 @@ def api_chat_cancel() -> Any:
     return jsonify({"cancelled": flag is not None})
 
 
+def _thinking_of(line: str) -> str:
+    """The reasoning in one of Ollama's NDJSON lines, if it carries any."""
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return ""
+    message = obj.get("message") if isinstance(obj, dict) else None
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("thinking") or "")
+
+
 def _content_of(line: str) -> str:
     """The reply text in one of Ollama's NDJSON lines, if it carries any."""
     try:
@@ -886,7 +905,8 @@ def _content_of(line: str) -> str:
 
 
 def _keep_turn(convo_id: Optional[str], user: Dict[str, Any], reply: str,
-               sources: List[Dict[str, str]]) -> None:
+               sources: List[Dict[str, str]], thinking: str = "",
+               steps: Optional[List[Dict[str, Any]]] = None) -> None:
     """Write the question and its answer down. Never raises into the stream."""
     if not convo_id:
         return
@@ -897,7 +917,8 @@ def _keep_turn(convo_id: Optional[str], user: Dict[str, Any], reply: str,
     if not text:
         return
     try:
-        store.save_turn(convo_id, user, text, sources or None)
+        store.save_turn(convo_id, user, text, sources or None,
+                        thinking=thinking, steps=steps or None)
     except Exception:  # noqa: BLE001 - history is the extra, never the turn
         logger.exception("Could not save the turn to %s", convo_id)
 
@@ -921,6 +942,18 @@ def _step(name: str, detail: str = "", **extra: Any) -> str:
         entry["detail"] = detail
     entry.update(extra)
     return _line({"debug": entry})
+
+
+def _debug_of(line: str) -> Optional[Dict[str, Any]]:
+    """The panel entry in a line, if it is one. Recorded where the lines are
+    relayed rather than at each yield, so a step added later is kept without
+    anyone having to remember to keep it."""
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    entry = obj.get("debug") if isinstance(obj, dict) else None
+    return entry if isinstance(entry, dict) else None
 
 
 def _host_of(url: str) -> str:

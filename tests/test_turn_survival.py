@@ -318,3 +318,66 @@ class TestTheBrowserHandsOver:
         assert '"api/chat/cancel"' in window
         assert "keepalive: true" in window
         assert "controller.abort();" in window
+
+
+class TestThePanelsSurviveTheDevice:
+    """Reported: a chat done on the phone, opened on the desktop, had the reply
+    and neither panel. They were live stream state only — and they are exactly
+    what you go looking for when an answer reads oddly, which is usually later
+    and somewhere else.
+    """
+
+    def test_both_are_stored_with_the_reply(self):
+        convo = store.create("t")["id"]
+        store.save_turn(convo, {"content": "q"}, "a",
+                        thinking="weighing it up",
+                        steps=[{"step": "Photo details", "detail": "none"}])
+        kept = store.get(convo)["messages"][1]
+        assert kept["thinking"] == "weighing it up"
+        assert kept["steps"] == [{"step": "Photo details", "detail": "none"}]
+
+    def test_a_turn_with_neither_stores_neither(self):
+        convo = store.create("t")["id"]
+        store.save_turn(convo, {"content": "q"}, "a")
+        kept = store.get(convo)["messages"][1]
+        assert kept["thinking"] is None and kept["steps"] is None
+
+    def test_a_runaway_scratchpad_is_capped(self):
+        """A reasoning model on a hard question, times a thread of them, is
+        otherwise the database."""
+        convo = store.create("t")["id"]
+        store.save_turn(convo, {"content": "q"}, "a", thinking="x" * 60_000)
+        assert len(store.get(convo)["messages"][1]["thinking"]) == store._THINKING_MAX
+
+    def test_the_route_collects_them_from_the_stream(self, client, monkeypatch):
+        def reasoning(model, messages, **kw):
+            yield json.dumps({"message": {"thinking": "let me see. "}})
+            yield json.dumps({"message": {"thinking": "right."}})
+            yield json.dumps({"message": {"content": "the answer"}})
+            yield json.dumps({"done": True})
+        monkeypatch.setattr(app_module, "chat_stream", reasoning)
+        convo = store.create("t")["id"]
+        client.post("/api/chat", json={
+            "model": "m", "conversation_id": convo,
+            "messages": [{"role": "user", "content": "q", "images": ["b64"]}]}).get_data()
+        for _ in range(60):
+            time.sleep(0.05)
+            if len(store.get(convo)["messages"]) == 2:
+                break
+        kept = store.get(convo)["messages"][1]
+        assert kept["thinking"] == "let me see. right."
+        assert [s["step"] for s in kept["steps"]] == \
+            ["Photo details", "Images", "Sent to the model"]
+
+    def test_a_step_added_later_is_kept_without_anyone_remembering_to(self):
+        """Recorded where the lines are relayed, not at each of the thirteen
+        yields — so the next one is kept for free."""
+        js = page_script(chat_ui.render_page("t"))
+        assert "for (const entry of msg.steps || []) addStep(view, entry);" in js
+
+    def test_reopening_a_thread_paints_them_back(self):
+        js = page_script(chat_ui.render_page("t"))
+        at = js.index("if (msg.thinking) {")
+        window = js[at:at + 300]
+        assert "view.thinkBody.textContent = msg.thinking;" in window
+        assert "view.think.hidden = false;" in window

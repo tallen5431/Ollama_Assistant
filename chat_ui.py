@@ -851,8 +851,12 @@ _PAGE = """<!doctype html>
             <label class="voicebar-check" id="exifbar" hidden title="Read the date, camera and GPS position a photo carries, and tell the model. The app re-encodes images, which strips this, so turning it off means the location never leaves your phone at all. Set PHOTO_META=0 on the server to make off the default.">
               <input type="checkbox" id="exif"> 📍 Photo details
             </label>
-            <label class="voicebar-check voicesetting" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
-              <input type="checkbox" id="headset" checked> 🎧 Headphones
+            <!-- Named for what it does, not for when to use it. Called
+                 "Headphones" it invited everyone not wearing any to untick it,
+                 which turns echo cancelling back on — and that is the thing
+                 that was making dictation worse on a phone. -->
+            <label class="voicebar-check voicesetting" title="On by default, and usually the better setting. With it off, the browser's echo cancelling ducks the mic whenever audio is playing — it mutes you over music and clips quiet speech. Untick it only if you get an echo from laptop speakers.">
+              <input type="checkbox" id="headset" checked> 🎙 Raw mic
             </label>
             <label class="voicebar-check voicesetting" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
               <input type="checkbox" id="autosend"> ⚡ Auto-send
@@ -3148,6 +3152,15 @@ _PAGE = """<!doctype html>
               view.raw = msg.content;      // a reopened thread copies too
               if (view.copyBtn) view.copyBtn.hidden = false;
             }
+            // Both panels are stored with the reply now. They were live stream
+            // state only, so a thread opened on the other device had the answer
+            // and no way to see how it got there — which is exactly when you
+            // go looking.
+            if (msg.thinking) {
+              view.thinkBody.textContent = msg.thinking;
+              view.think.hidden = false;
+            }
+            for (const entry of msg.steps || []) addStep(view, entry);
             if (msg.sources) showSources(view, msg.sources);
             messages.push({ role: "assistant", content: msg.content });
           }

@@ -179,6 +179,25 @@ class TestItSaysWhatTheWebDid:
         assert named(found, "Pages read")["detail"].startswith("1 of 1")
         assert named(found, "Context from the web")["detail"].startswith("1 document")
 
+    def test_a_backend_that_broke_is_named_rather_than_silent(self, app, monkeypatch):
+        """The reported case: "0 from 0 query group(s)" with nothing beside it.
+        A backend that answers 200 with an empty page now says so, and the
+        panel is where you read it."""
+        self._web_on(app, monkeypatch)
+        monkeypatch.setattr(app.web, "plan_searches", lambda *a, **k: ["q"])
+
+        def broken(query, **kw):
+            raise app.web.WebError("html.duckduckgo.com returned a page with "
+                                   "no results in it. Set SEARXNG_URL…")
+        monkeypatch.setattr(app.web, "search", broken)
+        found = steps(app.app.test_client().post("/api/chat", json={
+            "model": "m", "web": True,
+            "messages": [{"role": "user", "content": "what is this?"}]}))
+        entry = named(found, "Search results")
+        assert entry is not None
+        assert "no results in it" in entry["detail"]
+        assert "SEARXNG_URL" in entry["detail"]
+
     def test_none_of_it_appears_when_the_web_is_off(self, app, monkeypatch):
         monkeypatch.setattr(app, "chat_stream", a_reply)
         found = steps(app.app.test_client().post("/api/chat", json={

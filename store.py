@@ -94,6 +94,12 @@ CREATE INDEX IF NOT EXISTS idx_records_created
 # a new column in an existing table does.
 _ADDED_COLUMNS = (
     ("messages", "image_meta", "TEXT"),
+    # The reasoning panel and the "what it did" panel were live stream state
+    # only, so a thread opened on the other device had the reply and neither of
+    # them — and those are exactly what you go looking for when an answer
+    # reads oddly, which is usually later and elsewhere.
+    ("messages", "thinking", "TEXT"),
+    ("messages", "steps", "TEXT"),
     # What a routine records after each run: a JSON list of field names.
     ("routines", "record", "TEXT"),
 )
@@ -188,6 +194,30 @@ def available() -> bool:
         return False
 
 
+def _loads(raw: Any) -> Any:
+    """A JSON column, or None if it will not parse.
+
+    A row that cannot be decoded used to raise out of get(), which 500s the
+    conversation route — so one bad write made that thread permanently
+    unopenable, with no way to reach the messages either side of it. A missing
+    attachment is a far smaller loss than a missing conversation.
+    """
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("Ignoring an unreadable JSON column in %s", db_path().name)
+        return None
+
+
+def _as_list(value: Any) -> Optional[list]:
+    """A list, or nothing. Anything else stored here comes back out and is
+    iterated by the browser, where a string turns into a page error on every
+    later open of that thread."""
+    return value if isinstance(value, list) and value else None
+
+
 def _title_from(text: str) -> str:
     """A conversation title taken from its opening message."""
     clean = " ".join((text or "").split())
@@ -234,7 +264,8 @@ def get(convo_id: str) -> Optional[Dict[str, Any]]:
         if row is None:
             return None
         messages = conn.execute(
-            "SELECT role, content, images, sources, image_meta FROM messages"
+            "SELECT role, content, images, sources, image_meta, thinking, steps"
+            " FROM messages"
             " WHERE conversation_id = ? ORDER BY seq",
             (convo_id,),
         ).fetchall()
@@ -244,11 +275,15 @@ def get(convo_id: str) -> Optional[Dict[str, Any]]:
         {
             "role": m["role"],
             "content": m["content"],
-            "images": json.loads(m["images"]) if m["images"] else None,
-            "sources": json.loads(m["sources"]) if m["sources"] else None,
+            "images": _loads(m["images"]),
+            "sources": _loads(m["sources"]),
             # Reopening a thread and asking "where was that taken?" should get
             # the same answer as asking it the first time round.
-            "image_meta": json.loads(m["image_meta"]) if m["image_meta"] else None,
+            "image_meta": _loads(m["image_meta"]),
+            # So does opening it to work out why an answer came out the way it
+            # did — which is the whole point of these two panels.
+            "thinking": m["thinking"] or None,
+            "steps": _loads(m["steps"]),
         }
         for m in messages
     ]
@@ -290,11 +325,12 @@ def add_message(
                     seq_row["next"],
                     role,
                     content or "",
-                    json.dumps(images) if images else None,
-                    json.dumps(sources) if sources else None,
+                    json.dumps(_as_list(images)) if _as_list(images) else None,
+                    json.dumps(_as_list(sources)) if _as_list(sources) else None,
                     # `any` rather than truthiness: [None, {...}] is a real
                     # entry for a second photo, [None, None] is nothing at all.
-                    json.dumps(image_meta) if image_meta and any(image_meta) else None,
+                    json.dumps(image_meta) if _as_list(image_meta)
+                    and any(image_meta) else None,
                     now,
                 ),
             )
@@ -314,11 +350,19 @@ def add_message(
     return True
 
 
+# Long enough for a reasoning model on a hard question, short enough that a
+# thread of them does not become the database. Truncated rather than dropped:
+# the beginning of a scratchpad is the part that says what it decided to do.
+_THINKING_MAX = 20000
+
+
 def save_turn(
     convo_id: str,
     user: Dict[str, Any],
     reply: str,
     sources: Optional[List[Dict[str, str]]] = None,
+    thinking: str = "",
+    steps: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """Write a question and its answer together, or write neither.
 
@@ -347,8 +391,8 @@ def save_turn(
             " WHERE conversation_id = ?", (convo_id,),
         ).fetchone()["next"]
         content = str(user.get("content") or "")
-        images = user.get("images") or None
-        meta = user.get("image_meta") or None
+        images = _as_list(user.get("images"))
+        meta = _as_list(user.get("image_meta"))
         conn.execute(
             "INSERT INTO messages"
             " (conversation_id, seq, role, content, images, sources, image_meta, created_at)"
@@ -357,12 +401,15 @@ def save_turn(
              json.dumps(images) if images else None,
              json.dumps(meta) if meta and any(meta) else None, now),
         )
+        kept_thinking = (thinking or "")[:_THINKING_MAX] or None
         conn.execute(
             "INSERT INTO messages"
-            " (conversation_id, seq, role, content, images, sources, image_meta, created_at)"
-            " VALUES (?, ?, 'assistant', ?, NULL, ?, NULL, ?)",
+            " (conversation_id, seq, role, content, images, sources, image_meta,"
+            "  thinking, steps, created_at)"
+            " VALUES (?, ?, 'assistant', ?, NULL, ?, NULL, ?, ?, ?)",
             (convo_id, seq + 1, reply,
-             json.dumps(sources) if sources else None, now),
+             json.dumps(sources) if sources else None,
+             kept_thinking, json.dumps(steps) if steps else None, now),
         )
         if row["title"] in ("", "New chat"):
             conn.execute(
@@ -868,7 +915,7 @@ def search(query: str, limit: int = _SEARCH_LIMIT) -> Dict[str, List[Dict[str, A
     triggers. The failure mode of a stale index is a search that quietly misses
     what you are looking for, which is the one thing a search must not do.
     """
-    needle = (query or "").strip()
+    needle = str(query or "").strip()
     if len(needle) < 2:
         return {"conversations": [], "records": []}
     like = "%" + needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"

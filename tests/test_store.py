@@ -330,3 +330,52 @@ class TestStatsAreReachable:
         assert data["conversations"] == 1
         assert data["messages"] == 1
         assert data["bytes"] > 0
+
+
+class TestOneBadRowCannotCostYouAConversation:
+    """Found by poking at the edges of what the API accepts. Each of these
+    makes a thread permanently unopenable, which is a far bigger loss than the
+    attachment that caused it.
+    """
+
+    def test_a_column_that_will_not_parse_is_ignored_not_raised(self):
+        """get() raising 500s the conversation route, and then there is no way
+        to reach the messages either side of the bad one."""
+        convo = store.create("t")["id"]
+        store.add_message(convo, "user", "hello", images=["b64"])
+        with store._connect() as conn:
+            conn.execute("UPDATE messages SET images = '{not json'")
+        got = store.get(convo)
+        assert [m["role"] for m in got["messages"]] == ["user"]
+        assert got["messages"][0]["images"] is None
+        assert got["messages"][0]["content"] == "hello", "the words are what matter"
+
+    @pytest.mark.parametrize("value", ["notalist", 42, {"a": 1}, ""])
+    def test_only_a_list_reaches_a_list_column(self, value):
+        """The browser iterates these. A string comes back out as a string,
+        .map is not a function, and every later open of that thread is a page
+        error rather than a conversation."""
+        convo = store.create("t")["id"]
+        store.save_turn(convo, {"content": "q", "images": value,
+                                "image_meta": value}, "a")
+        first = store.get(convo)["messages"][0]
+        assert first["images"] is None and first["image_meta"] is None
+
+    @pytest.mark.parametrize("value", ["notalist", 42, {"a": 1}])
+    def test_add_message_is_guarded_the_same_way(self, value):
+        convo = store.create("t")["id"]
+        store.add_message(convo, "user", "hello", images=value, sources=value)
+        first = store.get(convo)["messages"][0]
+        assert first["images"] is None and first["sources"] is None
+
+    def test_a_real_list_still_goes_through(self):
+        convo = store.create("t")["id"]
+        store.save_turn(convo, {"content": "q", "images": ["b64"],
+                                "image_meta": [{"taken": "x"}]}, "a")
+        first = store.get(convo)["messages"][0]
+        assert first["images"] == ["b64"]
+        assert first["image_meta"] == [{"taken": "x"}]
+
+    @pytest.mark.parametrize("query", [123, None, object()])
+    def test_a_search_for_something_that_is_not_a_phrase(self, query):
+        assert store.search(query) == {"conversations": [], "records": []}

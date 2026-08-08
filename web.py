@@ -51,6 +51,16 @@ from config import (
 # A browser-ish UA: many sites serve a stub or a block page to obvious bots.
 _UA = "Mozilla/5.0 (compatible; OllamaChat/1.0; +local assistant)"
 
+# DuckDuckGo's no-JS endpoints serve an empty result page to a User-Agent that
+# announces itself as a tool, which is indistinguishable from "your query found
+# nothing" and was: three planned queries, zero groups, no error. An ordinary
+# browser string is sent to the search endpoints only — page fetches keep the
+# honest one above, where identifying the client is the polite thing and costs
+# nothing. The durable answer is SEARXNG_URL pointing at your own instance;
+# this is what makes the fallback work in the meantime.
+_SEARCH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
 _URL_RE = re.compile(r"https?://[^\s<>\"'`\]\)]+", re.I)
 
 # Text-bearing types only. Anything else (images, PDFs, archives) would just be
@@ -545,9 +555,12 @@ class _DuckLinks(HTMLParser):
     all. With one, the model still learns what was there.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, link_class: str = "result__a",
+                 snippet_class: str = "result__snippet") -> None:
         super().__init__(convert_charrefs=True)
         self.results: List[Dict[str, str]] = []
+        self._link_class = link_class
+        self._snippet_class = snippet_class
         self._grab = ""      # "title" | "snippet" | ""
         self._depth = 0      # nesting inside the element being captured
 
@@ -563,7 +576,7 @@ class _DuckLinks(HTMLParser):
         attrs = dict(attrs)
         classes = (attrs.get("class") or "").split()
 
-        if tag == "a" and "result__a" in classes:
+        if tag == "a" and self._link_class in classes:
             href = attrs.get("href") or ""
             # Results are wrapped in a /l/?uddg=<encoded> redirector.
             if "uddg=" in href:
@@ -574,7 +587,7 @@ class _DuckLinks(HTMLParser):
             if href.startswith("http"):
                 self.results.append({"url": href, "title": "", "snippet": ""})
                 self._grab, self._depth = "title", 0
-        elif "result__snippet" in classes and self.results:
+        elif self._snippet_class in classes and self.results:
             self._grab, self._depth = "snippet", 0
 
     def handle_endtag(self, tag):
@@ -590,23 +603,70 @@ class _DuckLinks(HTMLParser):
             self.results[-1][self._grab] += data
 
 
-def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
-    resp = _get("https://html.duckduckgo.com/html/?q=" + quote(query))
-    with resp:
-        if not resp.ok:
-            raise WebError(f"Search returned HTTP {resp.status_code}")
-        body = _read_capped(resp)
-    parser = _DuckLinks()
+# The no-JS endpoints, most informative first. The lite one is a plain table
+# and changes far less often, so it is the one that still works when the other
+# has been reshuffled.
+_DUCK_ENDPOINTS = (
+    ("https://html.duckduckgo.com/html/?q=", "result__a", "result__snippet"),
+    ("https://lite.duckduckgo.com/lite/?q=", "result-link", "result-snippet"),
+)
+
+# What DuckDuckGo says when a query genuinely matches nothing. Distinguishing
+# that from "we could not read the page" matters: one is an answer and the
+# other is a fault, and reporting the fault as an answer is how a silent
+# retrieval failure became "I could not check this against a source".
+_NO_HITS = ("no results found", "no results for", "not match any documents")
+
+
+def _duck_results(body: str, link_class: str, snippet_class: str,
+                  limit: int) -> List[Dict[str, str]]:
+    parser = _DuckLinks(link_class, snippet_class)
     parser.feed(body)
-    results = [
+    return [
         {
             "url": r["url"],
             "title": " ".join(r["title"].split()) or r["url"],
             "snippet": " ".join(r.get("snippet", "").split())[:_SNIPPET_MAX],
         }
         for r in parser.results
-    ]
-    return results[:limit]
+    ][:limit]
+
+
+def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
+    """Try each no-JS endpoint until one yields results.
+
+    An endpoint answering 200 with nothing in it is the failure this exists
+    for. It used to come back as an empty list, which reads exactly like a
+    query that matched nothing — so the turn carried on and told the user it
+    could not verify anything, with no sign that retrieval had broken.
+    """
+    empty: List[str] = []
+    for base, link_class, snippet_class in _DUCK_ENDPOINTS:
+        resp = _get(base + quote(query), headers={"User-Agent": _SEARCH_UA})
+        with resp:
+            if not resp.ok:
+                empty.append(f"{_host_only(base)} returned HTTP {resp.status_code}")
+                continue
+            body = _read_capped(resp)
+        results = _duck_results(body, link_class, snippet_class, limit)
+        if results:
+            return results
+        low = body.lower()
+        if any(marker in low for marker in _NO_HITS):
+            return []          # a real answer: nothing matches
+        empty.append(f"{_host_only(base)} returned a page with no results in it")
+    raise WebError(
+        "; ".join(empty) + ". DuckDuckGo may have changed its markup or be "
+        "rate-limiting this address — set SEARXNG_URL to your own SearXNG "
+        "instance for a search that does not depend on scraping."
+    )
+
+
+def _host_only(url: str) -> str:
+    try:
+        return urlparse(url).hostname or url
+    except ValueError:
+        return url
 
 
 def _search_searxng(base: str, query: str, limit: int) -> List[Dict[str, str]]:
@@ -1470,9 +1530,16 @@ def _metadata_lines(
             # question or invents somewhere; given this it can answer it.
             # Gated on `parts` so a file with nothing readable in it stays
             # absent entirely rather than becoming a line about what it lacks.
-            parts.append("no position recorded (the camera asked for a GPS fix "
-                         "and did not get one)" if meta.get("gpsBlock")
-                         else "no position recorded")
+            # A GPS block with no coordinates in it has two causes that look
+            # identical in the file: the camera asked and got no fix, or
+            # something removed the position afterwards. Android's photo picker
+            # strips it by default when a file is attached rather than
+            # captured, which is the common one — so claiming the camera had no
+            # fix is a confident guess, and often the wrong one.
+            parts.append("no position in the file (either the camera had no "
+                         "GPS fix, or it was removed when the photo was shared "
+                         "or attached — phone galleries do that by default)"
+                         if meta.get("gpsBlock") else "no position in the file")
 
         camera = _meta_text(meta.get("camera"), 60)
         if camera:
