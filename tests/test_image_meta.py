@@ -744,3 +744,29 @@ class TestItSurvivesReopeningTheThread:
         assert store.get("old")["messages"][0]["image_meta"] is None
         assert store.add_message("old", "user", "and this?", ["b64"], None, [FULL])
         assert store.get("old")["messages"][1]["image_meta"] == [FULL]
+
+
+class TestOrientationCannotMisleadTheModel:
+    """The pixels are turned upright before sending; the tag says they were not.
+
+    loadBitmap asks for imageOrientation "from-image", so the model receives an
+    upright image. Reporting "rotated 90° clockwise" on its own reads as a claim
+    about that image, and a model that believes it will try to compensate for a
+    rotation already undone — which is precisely the odometer-OCR case.
+    """
+
+    def test_it_is_said_about_the_camera_not_the_picture(self):
+        out = web.image_metadata([{"taken": "2026:07:14 18:42:07",
+                                   "orientation": "rotated 90° clockwise"}])
+        assert "camera held rotated 90° clockwise" in out
+        assert "already turned upright here" in out
+
+    def test_the_page_really_does_turn_them_upright(self):
+        """If this ever stops being true, the sentence above becomes a lie."""
+        page = chat_ui.render_page("t")
+        assert 'imageOrientation: "from-image"' in page
+
+    def test_an_upright_photo_says_nothing_about_it(self):
+        """Orientation 1 is the default and the parser drops it."""
+        out = web.image_metadata([{"taken": "2026:07:14 18:42:07"}])
+        assert "held" not in out.split("- Photo:")[1]

@@ -1468,7 +1468,13 @@ def _metadata_lines(
             parts.append(shot)
         orientation = _meta_text(meta.get("orientation"), 40)
         if orientation:
-            parts.append(f"held {orientation}")
+            # Said as a fact about the camera, never about the picture. The
+            # browser turns the pixels upright before sending (loadBitmap asks
+            # for imageOrientation "from-image"), so "rotated 90° clockwise" on
+            # its own reads as a claim about the image in front of the model —
+            # and a model that believes it will try to compensate for a rotation
+            # that has already been undone. That is exactly the OCR case.
+            parts.append(f"camera held {orientation}, already turned upright here")
         software = _meta_text(meta.get("software"), 40)
         if software:
             # Worth saying: an edited copy is exactly the case where the rest of
