@@ -223,6 +223,7 @@ _PAGE = """<!doctype html>
          guards is silent otherwise: with photo details off there is no EXIF, no
          metadata turn, and an answer to half the question with nothing on
          screen to say why. */
+      .thumb .stamp.muted { opacity:0.55; }
       .thumb .stamp { position:absolute; bottom:0; left:0; padding:0 0.2rem;
         font-size:0.6rem; line-height:1.3; background:rgba(0,0,0,0.65);
         border-radius:0 0.35rem 0 0; }
@@ -547,17 +548,30 @@ _PAGE = """<!doctype html>
         return out.replace(/\\s+/g, " ").trim();
       }
 
+      // Whether a $…$ pair is maths or two prices in one sentence. Both turn up
+      // constantly and they look identical to a regex, so this leans on the one
+      // convention TeX actually has: the delimiters hug their contents.
+      function looksLikeMaths(body) {
+        // A backslash settles it — no price contains \\frac or \\approx.
+        if (body.indexOf("\\\\") >= 0) return true;
+        // "It cost $100,407 and then $5 more" — the span between the two signs
+        // is prose, and prose ends in a space. TeX never opens or closes on one.
+        if (/^\\s|\\s$/.test(body)) return false;
+        // "$5-$10" is a price range: the span ends on the operator rather than
+        // on something for it to operate on.
+        if (/^[-+*/=<>,^_]|[-+*/=<>,^_]$/.test(body)) return false;
+        // Past that it has to actually do something to be maths at all, or
+        // "$100,407$" alone would lose its signs on a guess.
+        return /[-+*/=<>^_≈±×÷]/.test(body);
+      }
+
       function unTex(t) {
         return t.replace(
           /\\$\\$([\\s\\S]+?)\\$\\$|\\$([^$\\n]+?)\\$|\\\\\\(([\\s\\S]+?)\\\\\\)|\\\\\\[([\\s\\S]+?)\\\\\\]/g,
           function (whole, a, b, c, d) {
             const dollars = a !== undefined ? a : b;
             if (dollars !== undefined) {
-              // A dollar pair is only maths if there is a TeX command between
-              // them. "It cost $100,407 and then $5 more" is two prices in most
-              // replies and a formula in none — and it read as one, losing both
-              // signs and the space between them.
-              if (dollars.indexOf("\\\\") < 0) return whole;
+              if (!looksLikeMaths(dollars)) return whole;
               return texToText(dollars);
             }
             // \\( \\) and \\[ \\] say what they are; nothing else uses them.
@@ -917,13 +931,27 @@ _PAGE = """<!doctype html>
             pendingImages.splice(i, 1); renderThumbs(); routineProgress();
           });
           cell.appendChild(el); cell.appendChild(rm);
-          // 🕘 when the photo's own timestamp came through. Without it, "photo
-          // details is off" stays invisible until the answer comes back having
-          // silently skipped half the question.
-          if (img.meta && img.meta.taken) {
+          // What was actually read, on the thumbnail, before you send. The
+          // failure this exists for is silent otherwise: "photo details is on"
+          // and "this photo has a position in it" are different things, and
+          // until now the difference only showed up in the answer.
+          const badges = [];
+          if (img.meta && img.meta.taken) badges.push(["🕘", "date read from the photo"]);
+          const hasPlace = img.meta && typeof img.meta.lat === "number" &&
+                           typeof img.meta.lon === "number" &&
+                           !(img.meta.lat === 0 && img.meta.lon === 0);
+          if (hasPlace) badges.push(["📍", "location read from the photo"]);
+          if (badges.length) {
             const stamp = document.createElement("span");
-            stamp.className = "stamp"; stamp.textContent = "🕘";
-            stamp.title = "date read from the photo";
+            stamp.className = "stamp";
+            stamp.textContent = badges.map(b => b[0]).join("");
+            stamp.title = badges.map(b => b[1]).join(", ");
+            cell.appendChild(stamp);
+          } else if (img.meta) {
+            const stamp = document.createElement("span");
+            stamp.className = "stamp muted";
+            stamp.textContent = "·";
+            stamp.title = "this photo carries no date or position";
             cell.appendChild(stamp);
           }
           thumbsEl.appendChild(cell);
@@ -937,7 +965,7 @@ _PAGE = """<!doctype html>
       //
       // Hand-rolled rather than a library: this is a few hundred bytes at the
       // front of a JPEG, the app ships no build step and loads nothing from a
-      // CDN, and the alternative is a dependency for six tags.
+      // CDN, and the alternative is a dependency for a couple of dozen tags.
       const EXIF_HEAD_BYTES = 256 * 1024;   // EXIF lives at the very front
 
       function readExif(file) {
@@ -953,8 +981,17 @@ _PAGE = """<!doctype html>
         let offset = 2;
         while (offset + 4 <= view.byteLength) {
           if (view.getUint8(offset) !== 0xff) return null;   // desynchronised
-          const marker = view.getUint8(offset + 1);
+          let marker = view.getUint8(offset + 1);
+          // Any number of 0xFF bytes may pad the gap before a marker, and the
+          // standard says to skip them. Treating one as the marker itself read
+          // a nonsense segment length and lost the whole file — every tag, not
+          // just the padded segment.
+          while (marker === 0xff && offset + 2 < view.byteLength) {
+            offset += 1;
+            marker = view.getUint8(offset + 1);
+          }
           if (marker === 0xda || marker === 0xd9) return null;   // image data starts
+          if (offset + 4 > view.byteLength) return null;
           const size = view.getUint16(offset + 2);
           if (size < 2) return null;
           if (marker === 0xe1 && offset + 10 <= view.byteLength &&
@@ -965,6 +1002,18 @@ _PAGE = """<!doctype html>
         }
         return null;
       }
+
+      // How a value that is a ratio of two integers should read to a person.
+      function ratio(value, digits) {
+        if (typeof value !== "number" || !isFinite(value)) return null;
+        return Math.round(value * Math.pow(10, digits)) / Math.pow(10, digits);
+      }
+
+      const ORIENTATIONS = {
+        1: "upright", 2: "mirrored", 3: "upside down", 4: "mirrored and upside down",
+        5: "mirrored and rotated 90° left", 6: "rotated 90° clockwise",
+        7: "mirrored and rotated 90° right", 8: "rotated 90° anticlockwise",
+      };
 
       function readTiff(view, base) {
         if (base + 8 > view.byteLength) return null;
@@ -982,6 +1031,12 @@ _PAGE = """<!doctype html>
         // "Google Pixel 8" rather than "Google Google Pixel 8": makers often
         // repeat the brand in the model.
         if (camera) out.camera = model && make && model.indexOf(make) === 0 ? model : camera;
+        if (ifd0[0x0131]) out.software = String(ifd0[0x0131]).trim();
+        if (ifd0[0x013b]) out.artist = String(ifd0[0x013b]).trim();
+        if (ifd0[0x8298]) out.copyright = String(ifd0[0x8298]).trim();
+        if (ORIENTATIONS[ifd0[0x0112]] && ifd0[0x0112] !== 1) {
+          out.orientation = ORIENTATIONS[ifd0[0x0112]];
+        }
 
         if (ifd0[0x8769] !== undefined) {
           const exif = readIfd(view, base, base + ifd0[0x8769], le) || {};
@@ -989,18 +1044,75 @@ _PAGE = """<!doctype html>
           // file was last written, which an edit or a copy can change.
           const stamp = exif[0x9003] || exif[0x9004] || ifd0[0x0132];
           if (stamp) out.taken = String(stamp).trim();
+          // The one tag that makes a capture time unambiguous. Without it two
+          // photos either side of a time-zone change are hours apart in a way
+          // nothing downstream can detect.
+          const offset = exif[0x9010] || exif[0x9011] || exif[0x9012];
+          if (offset) out.offset = String(offset).trim();
+
+          const width = exif[0xa002], height = exif[0xa003];
+          if (typeof width === "number" && typeof height === "number") {
+            out.width = width;
+            out.height = height;
+          }
+          if (exif[0xa434]) out.lens = String(exif[0xa434]).trim();
+          if (typeof exif[0x8827] === "number") out.iso = exif[0x8827];
+          const shutter = ratio(exif[0x829a], 6);
+          if (shutter) {
+            // "1/120" is how a shutter speed is written and read; 0.008333 is
+            // the same number and tells nobody anything.
+            out.exposure = shutter < 1 ? "1/" + Math.round(1 / shutter) + " s"
+                                       : ratio(shutter, 1) + " s";
+          }
+          const aperture = ratio(exif[0x829d], 1);
+          if (aperture) out.aperture = "f/" + aperture;
+          const focal = ratio(exif[0x920a], 1);
+          if (focal) out.focal = focal + " mm";
+          if (typeof exif[0xa405] === "number" && exif[0xa405]) {
+            out.focal35 = exif[0xa405] + " mm";
+          }
+          // Bit 0 of Flash is whether it actually fired; the rest is about
+          // return detection and modes, which nobody asks about.
+          if (typeof exif[0x9209] === "number") out.flash = (exif[0x9209] & 1) === 1;
         }
 
         if (ifd0[0x8825] !== undefined) {
-          const gps = readIfd(view, base, base + ifd0[0x8825], le) || {};
-          const lat = dms(gps[0x0002], gps[0x0001]);
-          const lon = dms(gps[0x0004], gps[0x0003]);
-          if (lat !== null && lon !== null) { out.lat = lat; out.lon = lon; }
-          if (typeof gps[0x0006] === "number") {
-            out.altitude = Math.round(gps[0x0006] * (gps[0x0005] === 1 ? -1 : 1));
-          }
+          readGps(view, base, base + ifd0[0x8825], le, out);
         }
         return Object.keys(out).length ? out : null;
+      }
+
+      function readGps(view, base, at, le, out) {
+        const gps = readIfd(view, base, at, le) || {};
+        const lat = dms(gps[0x0002], gps[0x0001]);
+        const lon = dms(gps[0x0004], gps[0x0003]);
+        if (lat !== null && lon !== null) { out.lat = lat; out.lon = lon; }
+        if (typeof gps[0x0006] === "number") {
+          out.altitude = Math.round(gps[0x0006] * (gps[0x0005] === 1 ? -1 : 1));
+        }
+        // How far out the fix might be, in metres. Worth having: "at 44.9778,
+        // -93.2650" reads as a doorstep and can be a whole block.
+        const error = ratio(gps[0x001f], 1);
+        if (error) out.accuracy = error;
+        const speed = ratio(gps[0x000d], 1);
+        if (speed !== null && speed > 0) {
+          const unit = { K: "km/h", M: "mph", N: "knots" }[String(gps[0x000c] || "K")[0]];
+          out.speed = speed + " " + (unit || "km/h");
+        }
+        const heading = ratio(gps[0x0011], 0);
+        if (heading !== null && gps[0x0011] !== undefined) {
+          out.heading = heading + (String(gps[0x0010] || "T")[0] === "M" ? "° magnetic" : "°");
+        }
+        // GPS records UTC. Alongside a local DateTimeOriginal that is a time
+        // zone, which is the one thing an elapsed-time answer needs and the one
+        // thing the capture time alone cannot give.
+        const time = gps[0x0007], date = gps[0x001d];
+        if (Array.isArray(time) && time.length >= 3) {
+          const pad = (n) => (n < 10 ? "0" : "") + n;
+          const clock = pad(Math.round(time[0])) + ":" + pad(Math.round(time[1])) +
+                        ":" + pad(Math.round(time[2]));
+          out.utc = date ? String(date).trim() + " " + clock : clock;
+        }
       }
 
       // One IFD as {tag: value}. Only the types these tags actually use.

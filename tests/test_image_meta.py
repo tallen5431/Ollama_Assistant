@@ -34,8 +34,17 @@ import web
 # than against a fixture that agrees with it by construction.
 # --------------------------------------------------------------------------
 
-def build_jpeg(little_endian: bool = False, gps: bool = True) -> bytes:
-    """A JPEG whose APP1 segment carries camera, timestamp and position."""
+def build_jpeg(little_endian: bool = False, gps: bool = True, rich: bool = False,
+               fill_bytes: bool = False, jfif: bool = False, thumbnail: bool = False,
+               zero_gps: bool = False) -> bytes:
+    """A JPEG whose APP1 segment carries camera, timestamp and position.
+
+    ``rich`` adds the rest of what a phone writes — the time-zone offset, the
+    GPS clock, the lens, the exposure settings. ``fill_bytes``, ``jfif`` and
+    ``thumbnail`` reproduce the surrounding shape of a real file rather than the
+    minimal one: a JFIF segment first, legal 0xFF padding before a marker, and a
+    thumbnail IFD hanging off IFD0's next-IFD pointer.
+    """
     e = "<" if little_endian else ">"
     order = b"II" if little_endian else b"MM"
 
@@ -56,19 +65,45 @@ def build_jpeg(little_endian: bool = False, gps: bool = True) -> bytes:
 
     gps_rows, gps_blob, gadd = ifd_builder()
     if gps:
+        degrees = (rational(0), rational(0), rational(0)) if zero_gps else None
         gadd(1, 2, 2, inline=b"N\x00\x00\x00")                       # latitude ref
-        gadd(2, 5, 3, payload=rational(51) + rational(30) + rational(3600, 100))
+        gadd(2, 5, 3, payload=b"".join(degrees) if degrees else
+             rational(51) + rational(30) + rational(3600, 100))
         gadd(3, 2, 2, inline=b"W\x00\x00\x00")                       # longitude ref
-        gadd(4, 5, 3, payload=rational(0) + rational(7) + rational(3900, 100))
+        gadd(4, 5, 3, payload=b"".join(degrees) if degrees else
+             rational(0) + rational(7) + rational(3900, 100))
         gadd(5, 1, 1, inline=b"\x00\x00\x00\x00")                    # above sea level
         gadd(6, 5, 1, payload=rational(4200, 100))                   # altitude
+        if rich:
+            gadd(7, 5, 3, payload=rational(17) + rational(42) + rational(700, 100))
+            gadd(12, 2, 2, inline=b"K\x00\x00\x00")                  # speed in km/h
+            gadd(13, 5, 1, payload=rational(1234, 100))              # 12.34 km/h
+            gadd(16, 2, 2, inline=b"T\x00\x00\x00")                  # true north
+            gadd(17, 5, 1, payload=rational(27350, 100))             # facing 273.5°
+            gadd(29, 2, 11, payload=b"2026:07:14\x00")               # GPSDateStamp
+            gadd(31, 5, 1, payload=rational(800, 100))               # 8 m of error
 
     exif_rows, exif_blob, eadd = ifd_builder()
     eadd(0x9003, 2, 20, payload=b"2026:07:14 18:42:07\x00")          # DateTimeOriginal
+    if rich:
+        eadd(0x9010, 2, 7, payload=b"+01:00\x00")                    # OffsetTime
+        eadd(0x829A, 5, 1, payload=rational(1, 120))                 # 1/120 s
+        eadd(0x829D, 5, 1, payload=rational(180, 100))               # f/1.8
+        eadd(0x8827, 3, 1, inline=struct.pack(e + "HH", 64, 0))      # ISO 64
+        eadd(0x920A, 5, 1, payload=rational(669, 100))               # 6.69 mm
+        eadd(0xA405, 3, 1, inline=struct.pack(e + "HH", 24, 0))      # 24 mm equivalent
+        eadd(0x9209, 3, 1, inline=struct.pack(e + "HH", 1, 0))       # flash fired
+        eadd(0xA002, 4, 1, inline=struct.pack(e + "I", 4080))        # width
+        eadd(0xA003, 4, 1, inline=struct.pack(e + "I", 3072))        # height
+        eadd(0xA434, 2, 20, payload=b"Pixel 8 back camera\x00")      # LensModel
 
     ifd0_rows, ifd0_blob, iadd = ifd_builder()
     iadd(0x010F, 2, 7, payload=b"Google\x00")                        # Make
     iadd(0x0110, 2, 9, payload=b"Pixel 8\x00\x00")                   # Model
+    if rich:
+        iadd(0x0112, 3, 1, inline=struct.pack(e + "HH", 6, 0))       # rotated 90°
+        iadd(0x0131, 2, 9, payload=b"HDR+ 1.0\x00")                  # Software
+        iadd(0x013B, 2, 3, inline=b"tj\x00\x00")                     # Artist
 
     # Lay the IFDs out end to end. Every pointer is relative to the TIFF header,
     # so the sizes have to be settled before any of them can be written.
@@ -82,28 +117,38 @@ def build_jpeg(little_endian: bool = False, gps: bool = True) -> bytes:
     gps_at = exif_blob_at + len(exif_blob)
     gps_size = 2 + len(gps_rows) * 12 + 4
     gps_blob_at = gps_at + gps_size
+    ifd1_at = gps_blob_at + len(gps_blob)
 
-    def pack(rows, blob_at, extra=()):
+    def pack(rows, blob_at, extra=(), next_ifd=0):
         all_rows = list(rows) + list(extra)
         out = struct.pack(e + "H", len(all_rows))
         for tag, typ, count, value, inline in all_rows:
             out += struct.pack(e + "HHI", tag, typ, count)
             out += value if inline else struct.pack(e + "I", blob_at + value)
-        return out + struct.pack(e + "I", 0)     # no next IFD
+        return out + struct.pack(e + "I", next_ifd)
 
     extras = [(0x8769, 4, 1, struct.pack(e + "I", exif_at), True)]
     if gps:
         extras.append((0x8825, 4, 1, struct.pack(e + "I", gps_at), True))
 
     tiff = order + struct.pack(e + "HI", 42, ifd0_at)
-    tiff += pack(ifd0_rows, ifd0_blob_at, extras) + bytes(ifd0_blob)
+    tiff += pack(ifd0_rows, ifd0_blob_at, extras, ifd1_at if thumbnail else 0)
+    tiff += bytes(ifd0_blob)
     tiff += pack(exif_rows, exif_blob_at) + bytes(exif_blob)
     tiff += pack(gps_rows, gps_blob_at) + bytes(gps_blob)
+    if thumbnail:
+        tiff += pack([(0x0103, 3, 1, struct.pack(e + "HH", 6, 0), True)], 0)
 
     app1 = b"Exif\x00\x00" + tiff
+    head = b""
+    if jfif:
+        payload = b"JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x00\x00"
+        head += b"\xff\xe0" + struct.pack(">H", len(payload) + 2) + payload
+    if fill_bytes:
+        head += b"\xff\xff"        # legal padding before the next marker
     segment = b"\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1
-    # SOI, the segment, then a start-of-scan the parser must stop at.
-    return b"\xff\xd8" + segment + b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\xff\xd9"
+    # SOI, the segments, then a start-of-scan the parser must stop at.
+    return b"\xff\xd8" + head + segment + b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\xff\xd9"
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +205,52 @@ class TestTheShippedParser:
         assert got["camera"] == "Google Pixel 8"
         assert got["taken"].startswith("2026:07:14")
         assert "lat" not in got
+
+    def test_the_rest_of_what_a_phone_writes(self, tmp_path):
+        """Everything else in the file, not just the six tags it started with."""
+        got = self._parse(tmp_path, build_jpeg(rich=True))
+        assert got["offset"] == "+01:00", "the time zone, without which elapsed time is a guess"
+        assert got["utc"].startswith("2026:07:14 17:42"), "GPS keeps UTC"
+        assert got["lens"] == "Pixel 8 back camera"
+        assert (got["width"], got["height"]) == (4080, 3072)
+        assert got["exposure"] == "1/120 s", "written the way a shutter speed is read"
+        assert got["aperture"] == "f/1.8"
+        assert got["focal"] == "6.7 mm"
+        assert got["focal35"] == "24 mm"
+        assert got["iso"] == 64
+        assert got["flash"] is True
+        assert got["accuracy"] == 8
+        assert got["speed"] == "12.3 km/h"
+        assert got["heading"] == "274°"
+        assert got["orientation"] == "rotated 90° clockwise"
+        assert got["software"] == "HDR+ 1.0"
+        assert got["artist"] == "tj"
+
+    @pytest.mark.parametrize("shape", [
+        {"jfif": True},
+        {"fill_bytes": True},
+        {"thumbnail": True},
+        {"jfif": True, "fill_bytes": True, "thumbnail": True},
+    ])
+    def test_the_shape_a_real_file_has_around_the_exif(self, tmp_path, shape):
+        """A JFIF segment first, padding before a marker, a thumbnail IFD after.
+
+        The padding is the one that bit: any number of 0xFF bytes may sit before
+        a marker and the standard says to skip them. Reading one as the marker
+        gave a nonsense segment length and lost the whole file — every tag, not
+        just the padded segment.
+        """
+        got = self._parse(tmp_path, build_jpeg(rich=True, **shape))
+        assert got is not None, shape
+        assert got["camera"] == "Google Pixel 8"
+        assert got["lat"] == pytest.approx(51.51, abs=1e-6)
+
+    def test_a_plain_photo_reports_only_what_it_has(self, tmp_path):
+        """The extra tags are absent, not empty — nothing is invented."""
+        got = self._parse(tmp_path, build_jpeg())
+        for key in ("offset", "utc", "lens", "iso", "flash", "orientation",
+                    "software", "artist", "accuracy", "speed", "heading"):
+            assert key not in got, key
 
     @pytest.mark.parametrize("data, why", [
         (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64, "a PNG has no APP1 at all"),
@@ -238,6 +329,67 @@ class TestRenderingTheFacts:
         """Metres above sea level with no coordinates is not a location."""
         out = web.image_metadata([{"altitude": 42, "camera": "X"}])
         assert "sea level" not in out
+
+    RICH = dict(FULL, offset="+01:00", utc="2026:07:14 17:42:07",
+                lens="Pixel 8 back camera", width=4080, height=3072,
+                exposure="1/120 s", aperture="f/1.8", focal="6.7 mm",
+                focal35="24 mm", iso=64, flash=True, accuracy=8.0,
+                speed="12.3 km/h", heading="274°",
+                orientation="rotated 90° clockwise", software="HDR+ 1.0")
+
+    def test_everything_the_file_carried_is_said(self):
+        out = web.image_metadata([self.RICH])
+        for fragment in ("(UTC+01:00)", "give or take 8 m", "moving at 12.3 km/h",
+                         "facing 274°", "(Pixel 8 back camera)", "4080×3072 (13 MP)",
+                         "1/120 s", "f/1.8", "6.7 mm", "24 mm equivalent", "ISO 64",
+                         "flash fired", "held rotated 90° clockwise",
+                         "written by HDR+ 1.0"):
+            assert fragment in out, fragment
+
+    def test_the_time_zone_is_said_where_it_is_known(self):
+        """Without it, two photos across a zone change are hours apart in a way
+        nothing downstream can detect — which the Trip routine warns about."""
+        assert "(UTC+01:00)" in web.image_metadata([dict(FULL, offset="+01:00")])
+        assert "UTC" not in web.image_metadata([FULL]).split("- Photo:")[1]
+
+    def test_the_gps_clock_stands_in_for_a_missing_offset(self):
+        """GPS keeps UTC; beside a local capture time that is the zone."""
+        out = web.image_metadata([dict(FULL, utc="2026:07:14 17:42:07")])
+        assert "which was 2026:07:14 17:42:07 UTC" in out
+
+    def test_the_offset_wins_when_both_are_there(self):
+        out = web.image_metadata([dict(FULL, offset="+01:00", utc="2026:07:14 17:42:07")])
+        assert "(UTC+01:00)" in out
+        assert "which was" not in out, "saying it twice adds nothing"
+
+    def test_the_settings_are_skipped_when_absent(self):
+        out = web.image_metadata([FULL])
+        for fragment in ("ISO", "f/", "flash", "MP", "equivalent"):
+            assert fragment not in out, fragment
+
+    def test_no_flash_is_said_as_plainly_as_flash(self):
+        assert "no flash" in web.image_metadata([dict(FULL, flash=False)])
+        assert "flash fired" in web.image_metadata([dict(FULL, flash=True)])
+
+    def test_a_lens_without_a_camera_still_gets_a_mention(self):
+        out = web.image_metadata([{"lens": "24mm prime", "taken": "2026:07:14 18:42:07"}])
+        assert "with a 24mm prime" in out
+
+    def test_the_accuracy_qualifies_the_position(self):
+        """Six decimal places reads like a doorstep and can be a whole block."""
+        out = web.image_metadata([dict(FULL, accuracy=45.0)])
+        assert "51.510000, -0.127500 (give or take 45 m)" in out
+
+    def test_speed_and_heading_go_with_the_position(self):
+        """They are GPS facts; without a fix they describe nothing."""
+        out = web.image_metadata([{"speed": "12 km/h", "heading": "90°",
+                                   "taken": "2026:07:14 18:42:07"}])
+        assert "moving at" not in out and "facing" not in out
+
+    def test_a_hostile_field_cannot_run_off(self):
+        long_lens = "L" * 400
+        out = web.image_metadata([dict(FULL, lens=long_lens, software="S" * 400)])
+        assert long_lens not in out and "S" * 400 not in out
 
     def test_the_preamble_marks_it_as_data(self):
         out = web.image_metadata([FULL])

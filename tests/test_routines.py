@@ -416,10 +416,17 @@ class TestThePage:
         assert "WEB_SHARE_LOCATION" in page
         assert "routineWarnUpdate" in page
 
-    def test_the_thumbnail_says_whether_a_date_was_read(self):
+    def test_the_thumbnail_says_what_was_actually_read(self):
+        """"Photo details is on" and "this photo has a position" differ.
+
+        Until the badge said which, the difference only surfaced in the answer.
+        """
         page = self.page()
         assert ".thumb .stamp" in page
-        assert 'stamp.textContent = "🕘"' in page
+        assert '["🕘", "date read from the photo"]' in page
+        assert '["📍", "location read from the photo"]' in page
+        assert "img.meta.lat === 0 && img.meta.lon === 0" in page, \
+            "Null Island must not light the location badge"
 
     def test_a_routine_is_only_spent_on_a_turn_that_went(self):
         """send() refuses an empty message and one that arrives mid-stream.

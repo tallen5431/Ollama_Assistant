@@ -431,3 +431,119 @@ class TestTheWaitCounterIsNotSuppressedByAnEmptyStatus:
         assert self.owned_after([{"status": "Searching: x"}, {"message": {"content": "hi"}},
                                  {"done": True}]) is True
 
+
+
+def _code_only(page: str) -> str:
+    """The page's JavaScript with comments, strings and regexes blanked out.
+
+    Scanning the raw source finds "model(" inside a comment and "Option(" inside
+    a string, which is noise. Walking it once with a little state costs less
+    than an allowlist that grows every time someone writes a sentence.
+    """
+    out = []
+    i, n = 0, len(page)
+    # Whether a "/" here starts a regex or is a division, decided by what came
+    # before it — the same rule a real tokeniser uses, minus the edge cases that
+    # do not appear in this file.
+    prev = ""
+    while i < n:
+        ch = page[i]
+        two = page[i:i + 2]
+        if two == "//":
+            i = page.find("\n", i)
+            if i < 0:
+                break
+            continue
+        if two == "/*":
+            end = page.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if ch in "\"'`":
+            quote, i = ch, i + 1
+            while i < n:
+                if page[i] == "\\":
+                    i += 2
+                    continue
+                if page[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            out.append('""')
+            prev = '"'
+            continue
+        if ch == "/" and prev in "(,=:[!&|?{};+-*%~^" + "\n":
+            i += 1
+            while i < n:
+                if page[i] == "\\":
+                    i += 2
+                    continue
+                if page[i] == "[":
+                    while i < n and page[i] != "]":
+                        i += 1 if page[i] != "\\" else 2
+                if page[i] == "/":
+                    i += 1
+                    break
+                i += 1
+            out.append("RE")
+            prev = "E"
+            continue
+        out.append(ch)
+        if not ch.isspace():
+            prev = ch
+        i += 1
+    return "".join(out)
+
+
+class TestEveryFunctionThePageCallsExists:
+    """A deleted helper survived the whole suite once. Only a browser caught it.
+
+    Editing chat_ui.py means splicing text into one long string, and a slice
+    that reaches a line too far takes working code with it. 687 tests passed
+    with loadBitmap gone — nothing here calls toAttachment, so nothing noticed
+    until an image was attached in a real browser.
+    """
+
+    # Everything the page legitimately reaches for that it does not define.
+    PROVIDED = {
+        # Language and standard library
+        "Array", "Boolean", "Date", "Error", "Infinity", "Intl", "JSON", "Map",
+        "Math", "NaN", "Number", "Object", "Promise", "RegExp", "Set", "String",
+        "Symbol", "TextDecoder", "TextEncoder", "Uint8Array", "Int16Array",
+        "Float32Array", "ArrayBuffer", "DataView", "Blob", "File", "Option",
+        "FileReader", "FormData", "Headers", "Request", "Response", "URL",
+        "AbortController", "Image", "Function", "parseInt", "parseFloat",
+        "isFinite", "isNaN", "encodeURIComponent", "decodeURIComponent",
+        "btoa", "atob", "structuredClone", "queueMicrotask",
+        # Browser
+        "document", "window", "navigator", "location", "localStorage", "console",
+        "fetch", "setTimeout", "clearTimeout", "setInterval", "clearInterval",
+        "requestAnimationFrame", "cancelAnimationFrame", "alert", "confirm",
+        "prompt", "createImageBitmap", "getComputedStyle", "MediaRecorder",
+        "AudioContext", "webkitAudioContext", "SpeechRecognition",
+        "webkitSpeechRecognition", "OffscreenCanvas", "ResizeObserver",
+        "MutationObserver", "CustomEvent", "Event", "AbortSignal",
+        # Reserved words that the scanner sees in call position
+        "if", "for", "while", "switch", "catch", "return", "typeof", "function",
+        "await", "async", "new", "delete", "void", "in", "of", "do", "else", "try",
+    }
+
+    def test_no_call_names_something_that_is_not_defined(self):
+        page = _code_only(_page())
+        declared = set(re.findall(r"\b(?:function|const|let|var|class)\s+([A-Za-z_$][\w$]*)", page))
+        # Parameter names are declarations too.
+        for params in re.findall(r"\bfunction\s*[\w$]*\s*\(([^)]*)\)", page):
+            declared |= {p.strip().split("=")[0].strip() for p in params.split(",") if p.strip()}
+        for params in re.findall(r"\(([^()]*)\)\s*=>", page):
+            declared |= {p.strip().split("=")[0].strip() for p in params.split(",") if p.strip()}
+        declared |= set(re.findall(r"([A-Za-z_$][\w$]*)\s*=>", page))
+        declared |= set(re.findall(r"\bcatch\s*\(\s*([\w$]+)\s*\)", page))
+
+        called = set()
+        for match in re.finditer(r"(^|[^.\w$'\"])([A-Za-z_$][\w$]*)\s*\(", page):
+            called.add(match.group(2))
+
+        missing = sorted(called - declared - self.PROVIDED)
+        assert not missing, (
+            f"the page calls {missing}, which nothing in it defines — "
+            "most likely an edit spliced over a helper"
+        )

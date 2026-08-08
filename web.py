@@ -1365,6 +1365,43 @@ def _meta_number(value: Any, limit: float) -> Optional[float]:
     return number
 
 
+def _photo_size(meta: Dict[str, Any]) -> str:
+    """Pixel dimensions as recorded, which is not what the model receives.
+
+    The browser downscales before upload, so this describes the original — the
+    one number that says whether detail was lost on the way here.
+    """
+    width = _meta_number(meta.get("width"), 1_000_000)
+    height = _meta_number(meta.get("height"), 1_000_000)
+    if not width or not height:
+        return ""
+    megapixels = (width * height) / 1_000_000
+    size = f"{int(width)}×{int(height)}"
+    return f"{size} ({megapixels:.0f} MP) as taken" if megapixels >= 1 else f"{size} as taken"
+
+
+def _photo_settings(meta: Dict[str, Any]) -> str:
+    """Exposure, aperture, focal length, ISO — the shot itself.
+
+    Rarely what someone asks about, but it is what answers "why is this blurry"
+    and "was the flash on", and it costs a few words when present.
+    """
+    bits: List[str] = []
+    for key, limit in (("exposure", 12), ("aperture", 10), ("focal", 12)):
+        value = _meta_text(meta.get(key), limit)
+        if value:
+            bits.append(value)
+    focal35 = _meta_text(meta.get("focal35"), 12)
+    if focal35 and focal35 != _meta_text(meta.get("focal"), 12):
+        bits.append(f"{focal35} equivalent")
+    iso = _meta_number(meta.get("iso"), 10_000_000)
+    if iso:
+        bits.append(f"ISO {int(iso)}")
+    if isinstance(meta.get("flash"), bool):
+        bits.append("flash fired" if meta["flash"] else "no flash")
+    return ", ".join(bits)
+
+
 def _metadata_lines(
     entries: List[Optional[Dict[str, Any]]],
     with_location: bool = True,
@@ -1377,7 +1414,18 @@ def _metadata_lines(
         parts: List[str] = []
         taken = _readable_timestamp(meta.get("taken"))
         if taken:
-            parts.append(f"taken {taken}")
+            offset = _meta_text(meta.get("offset"), 8)
+            # The time zone is the difference between "three hours apart" and
+            # "three hours apart, or two, or four". Nothing else in EXIF can
+            # supply it, so say it where it is known and say nothing where the
+            # camera did not record it.
+            parts.append(f"taken {taken}" + (f" (UTC{offset})" if offset else ""))
+        utc = _meta_text(meta.get("utc"), 24)
+        if utc and not meta.get("offset"):
+            # GPS keeps UTC. Next to a local capture time that is the time zone,
+            # arrived at the long way round.
+            parts.append(f"which was {utc} UTC")
+
         lat = _meta_number(meta.get("lat"), 90)
         lon = _meta_number(meta.get("lon"), 180)
         # Exactly 0, 0 is the Gulf of Guinea, and it is where a camera writes a
@@ -1387,15 +1435,50 @@ def _metadata_lines(
         if lat == 0 and lon == 0:
             lat = lon = None
         if with_location and lat is not None and lon is not None:
-            parts.append(f"at {lat:.6f}, {lon:.6f}")
+            here = f"at {lat:.6f}, {lon:.6f}"
+            accuracy = _meta_number(meta.get("accuracy"), 100_000)
+            if accuracy:
+                # Six decimal places reads like a doorstep and can be a block.
+                here += f" (give or take {int(accuracy)} m)"
+            parts.append(here)
             # Anything past this is not a place on Earth; the deepest mine and
             # the highest cruising altitude both sit well inside it.
             altitude = _meta_number(meta.get("altitude"), 100_000)
             if altitude is not None:
                 parts.append(f"{int(altitude)} m above sea level")
+            speed = _meta_text(meta.get("speed"), 16)
+            if speed:
+                parts.append(f"moving at {speed}")
+            heading = _meta_text(meta.get("heading"), 16)
+            if heading:
+                parts.append(f"facing {heading}")
+
         camera = _meta_text(meta.get("camera"), 60)
         if camera:
-            parts.append(f"on a {camera}")
+            lens = _meta_text(meta.get("lens"), 40)
+            parts.append(f"on a {camera}" + (f" ({lens})" if lens else ""))
+        elif _meta_text(meta.get("lens"), 40):
+            parts.append("with a " + _meta_text(meta.get("lens"), 40))
+
+        size = _photo_size(meta)
+        if size:
+            parts.append(size)
+        shot = _photo_settings(meta)
+        if shot:
+            parts.append(shot)
+        orientation = _meta_text(meta.get("orientation"), 40)
+        if orientation:
+            parts.append(f"held {orientation}")
+        software = _meta_text(meta.get("software"), 40)
+        if software:
+            # Worth saying: an edited copy is exactly the case where the rest of
+            # this may describe the original rather than the file in hand.
+            parts.append(f"written by {software}")
+        for key, label in (("artist", "credited to"), ("copyright", "copyright")):
+            value = _meta_text(meta.get(key), 60)
+            if value:
+                parts.append(f"{label} {value}")
+
         if parts:
             # Numbered whenever there is more than one slot, so "Image 2" means
             # the second photo attached even if the first carried nothing —

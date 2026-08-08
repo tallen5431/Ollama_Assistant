@@ -528,19 +528,62 @@ With it on, ask the ordinary question:
 > **you:** where was this taken, and roughly what time?
 > **model:** Tuesday 14 July 2026, about half six in the evening, at 51.510000, -0.127500 — Westminster, London.
 
-What the model is actually given is one line:
+What the model is actually given is one line per photo:
 
 ```
-- Photo: taken Tuesday 14 July 2026 at 18:42 (evening), at 51.510000, -0.127500,
-  42 m above sea level, on a Google Pixel 8
+- Photo: taken Tuesday 14 July 2026 at 18:42 (evening) (UTC+01:00), at
+  51.510000, -0.127500 (give or take 8 m), 42 m above sea level, on a Google
+  Pixel 8 (Pixel 8 back camera), 4080×3072 (13 MP) as taken, 1/120 s, f/1.8,
+  6.7 mm, 24 mm equivalent, ISO 64, no flash
 ```
 
-What gets read, when the photo has it: date and time taken, latitude and
-longitude, altitude, and the camera make and model. Anything missing is simply
-absent — screenshots have none of it, and phones strip GPS when location
-permission is off. It's rendered into a sentence rather than passed as raw
-fields, with the day of the week and the time of day named, because "was that
-the morning?" is the question people actually ask.
+What gets read, when the photo has it:
+
+| | |
+| --- | --- |
+| **When** | date and time taken, the time-zone offset, and the GPS clock in UTC |
+| **Where** | latitude, longitude, altitude, and how far out the fix might be |
+| **Motion** | speed and the direction the camera was pointing |
+| **Camera** | make, model and lens; the pixel dimensions as taken |
+| **The shot** | shutter speed, aperture, focal length (and 35 mm equivalent), ISO, flash |
+| **The file** | orientation, the software that wrote it, artist and copyright |
+
+Anything missing is simply absent. It's rendered into a sentence rather than
+passed as raw fields, with the day of the week and the time of day named,
+because "was that the morning?" is the question people actually ask.
+
+The time zone is worth calling out. EXIF capture times carry none of their own,
+so two photos either side of a zone change are hours apart in a way nothing
+downstream can detect. Where the camera recorded an offset it's passed through;
+where it didn't but there's a GPS fix, the GPS clock is UTC and gives the same
+answer the long way round.
+
+### Nothing came through?
+
+`📍 Photo details` being on and a photo *having* a position are different
+things. The thumbnail says which before you send: **🕘** if a date was read,
+**📍** if a location was, and a faint **·** if the file had neither.
+
+To check a file directly, point the diagnostic at it. It runs the app's own
+parser, so what it prints is exactly what the app would read:
+
+```
+.venv/bin/python tools/check_photo.py ~/Downloads/odometer.jpg
+```
+
+The usual reasons a photo has no location:
+
+- **The camera never recorded one.** On Android that's Camera → Settings →
+  Location, and the camera app also needs the location permission; on iPhone,
+  Settings → Privacy → Location Services → Camera. This is by far the most
+  common answer, and the tool will say so — if the date and camera read fine,
+  the file is intact and simply has no position in it.
+- **It was stripped in transit.** Messaging apps re-encode, and Google Photos'
+  *share* link is not the original file — use *download* instead.
+- **It's a screenshot.** Those have no EXIF at all.
+- **The position is exactly 0, 0.** That's what a camera writes for a fix it
+  never got. It's treated as no position, because reporting the Gulf of Guinea
+  is worse than reporting nothing.
 
 **On by default**, because on a box only you can reach — over Tailscale, say —
 that's the useful setting. Set `PHOTO_META=0` on the server and a fresh browser

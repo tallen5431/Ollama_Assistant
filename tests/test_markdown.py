@@ -321,3 +321,25 @@ class TestMathsWrittenAsTex:
     def test_a_fence_is_not_touched(self):
         out = render("```latex\n\\frac{a}{b}\n```")
         assert "\\frac{a}{b}" in out
+
+    @pytest.mark.parametrize("tex, plain", [
+        # Both of these came back with their dollar signs still showing: the
+        # first guard demanded a TeX command, and arithmetic written without one
+        # is still arithmetic.
+        ("The difference between the capture times. ($16:45 - 13:37$) = 3 hours",
+         "(16:45 - 13:37) = 3 hours"),
+        ("(or $3 + 8/60$ hours)", "(or 3 + 8/60 hours)"),
+        ("Speed = $68 / 3.133$ mph", "Speed = 68 / 3.133 mph"),
+        ("area is $x^2$ here", "area is x^2 here"),
+    ])
+    def test_arithmetic_without_a_tex_command_is_still_maths(self, tex, plain):
+        assert plain in render(tex)
+
+    @pytest.mark.parametrize("text", [
+        "a range of $5-$10 for the part",
+        "it was $100,407 in total",
+        "$1,234 for the first and $99 for the second",
+    ])
+    def test_prices_are_still_left_alone(self, text):
+        """The delimiters hug their contents in TeX; prose ends in a space."""
+        assert render(text) == "<p>" + text + "</p>", render(text)
