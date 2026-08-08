@@ -377,3 +377,28 @@ class TestThePage:
         page = self.page()
         assert 'id="rRecord"' in page
         assert "record: rRecordEl.value.split(\",\")" in page
+
+    @pytest.mark.parametrize("value, expected", [
+        ("=cmd|' /C calc'!A1", "'=cmd|' /C calc'!A1"),
+        ("+1+1", "'+1+1"),
+        ("@SUM(A1)", "'@SUM(A1)"),
+        ("68 miles", "68 miles"),
+        ("-5 °C", "-5 °C"),          # a reading, not a formula
+        ("3 h 08 min", "3 h 08 min"),
+    ])
+    def test_a_cell_cannot_become_a_formula(self, client, value, expected):
+        """Excel runs a leading =, + or @ when the file is opened.
+
+        Not "-": a negative number is an ordinary reading, and a spreadsheet
+        only treats it as a formula when what follows is not one.
+        """
+        store.add_record("T", {"v": value})
+        rows = list(csv.reader(io.StringIO(
+            client.get("/api/records.csv").get_data(as_text=True))))
+        assert rows[1][2] == expected
+
+    def test_a_routine_name_cannot_become_a_formula_either(self, client):
+        store.add_record("=HYPERLINK(\"http://evil\")", {"v": "1"})
+        rows = list(csv.reader(io.StringIO(
+            client.get("/api/records.csv").get_data(as_text=True))))
+        assert rows[1][1].startswith("'=")

@@ -495,6 +495,20 @@ def api_record_delete(record_id: str) -> Any:
     return jsonify({"ok": True})
 
 
+# Excel and Sheets read a leading =, + or @ as a formula, so a value that
+# arrived here as text becomes something that runs when the file is opened.
+# Not "-": a negative number is an ordinary reading — a temperature, a
+# correction — and quoting it would corrupt the log to prevent nothing, since
+# a spreadsheet only treats "-" as a formula when what follows is not a number.
+_CSV_FORMULA = ("=", "+", "@", "\t", "\r")
+
+
+def _csv_safe(value: str) -> str:
+    """One cell, with a leading formula character defused."""
+    text = str(value or "")
+    return "'" + text if text.startswith(_CSV_FORMULA) else text
+
+
 @app.route("/api/records.csv", methods=["GET"])
 def api_records_csv() -> Any:
     """The whole log as CSV, for a spreadsheet or another machine's importer.
@@ -509,8 +523,8 @@ def api_records_csv() -> Any:
     writer.writerow(["taken_at", "routine"] + columns)
     for row in rows:
         stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
-        writer.writerow([stamp, row["routine_name"]] +
-                        [row["fields"].get(name, "") for name in columns])
+        writer.writerow([stamp, _csv_safe(row["routine_name"])] +
+                        [_csv_safe(row["fields"].get(name, "")) for name in columns])
     return Response(
         buffer.getvalue(),
         mimetype="text/csv",
