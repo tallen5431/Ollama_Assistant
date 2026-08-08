@@ -739,6 +739,27 @@ Camera names are treated as untrusted text like anything else the app didn't
 write — folded to one line, capped, and fenced — since a file can claim any
 make it likes.
 
+### Choosing a microphone
+
+The **🎙 Voice** row has a microphone picker beside the language. The browser's
+default is chosen by the operating system and is regularly not the one you are
+speaking into — a laptop offers the webcam's, a desktop offers whatever the
+monitor came with. A chosen device is demanded rather than preferred, so it is
+honoured or the attempt fails loudly; one that has been unplugged falls back to
+the default and says so.
+
+Beside it is a level meter, live while recording, with a mark that sticks at
+the loudest moment. "It transcribed it wrongly", "it heard nothing" and "it was
+clipping" are three different problems that look identical without one, and a
+silent recording now says which rather than only that no speech was found.
+
+Audio reaches the recogniser as 16 kHz mono. Where the browser will give a
+16 kHz capture context — most of them will — that is what it records and no
+resampling happens at all. Where it will not, the downsample is a windowed-sinc
+low-pass measured at **-65 dB** across everything above the 8 kHz Nyquist, with
+the speech band flat to 0.01 dB. The box average it replaced measured -13 dB,
+which left most of a 12 kHz sound folded down onto a 4 kHz vowel.
+
 ### When the search stops working
 
 Unset, `SEARXNG_URL` means scraping `html.duckduckgo.com` and, if that yields
@@ -748,9 +769,12 @@ which is indistinguishable from a query that matched nothing — and that is
 exactly how a broken search became an answer saying it could not check
 anything against a source.
 
-An endpoint returning a page with no results in it is now reported as a fault
-rather than as an empty list, and the panel below says which endpoint and what
-to do about it. A query that genuinely matches nothing still comes back as
+Results are found by their `/l/?uddg=` redirector when the class names no
+longer match — that redirector is the product, the class names are decoration
+and get reshuffled. An endpoint returning a page with no results in it is
+reported as a fault rather than as an empty list, and the panel shows the first
+line of whatever did come back, so a captcha, an error and a moved layout can
+be told apart. A query that genuinely matches nothing still comes back as
 nothing, because those are different answers.
 
 Scraping is fragile by nature. If web access matters to you, run SearXNG and

@@ -31,6 +31,7 @@ import threading
 import time
 from collections import OrderedDict
 from datetime import datetime
+from html import unescape
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlparse
@@ -618,6 +619,28 @@ _DUCK_ENDPOINTS = (
 _NO_HITS = ("no results found", "no results for", "not match any documents")
 
 
+# Every DuckDuckGo layout, on every endpoint, sends results through the same
+# /l/?uddg=<encoded> redirector. Class names are decoration and get reshuffled;
+# that redirector is the product. Reported from a NucBox where both endpoints
+# answered 200 and both class-based parses found nothing.
+_UDDG_RE = re.compile(r'href="([^"]*[?&]uddg=[^"]+)"', re.I)
+
+
+def _duck_by_redirector(body: str, limit: int) -> List[Dict[str, str]]:
+    """Results by their redirector, for when the markup has moved on."""
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for href in _UDDG_RE.findall(body):
+        target = parse_qs(urlparse(unescape(href)).query).get("uddg", [""])[0]
+        if not target.startswith("http") or target in seen:
+            continue
+        seen.add(target)
+        out.append({"url": target, "title": target, "snippet": ""})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _duck_results(body: str, link_class: str, snippet_class: str,
                   limit: int) -> List[Dict[str, str]]:
     parser = _DuckLinks(link_class, snippet_class)
@@ -629,7 +652,7 @@ def _duck_results(body: str, link_class: str, snippet_class: str,
             "snippet": " ".join(r.get("snippet", "").split())[:_SNIPPET_MAX],
         }
         for r in parser.results
-    ][:limit]
+    ][:limit] or _duck_by_redirector(body, limit)
 
 
 def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
@@ -654,12 +677,35 @@ def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
         low = body.lower()
         if any(marker in low for marker in _NO_HITS):
             return []          # a real answer: nothing matches
-        empty.append(f"{_host_only(base)} returned a page with no results in it")
+        empty.append(f"{_host_only(base)} returned a page with no results in it "
+                     f"({_page_gist(body)})")
     raise WebError(
         "; ".join(empty) + ". DuckDuckGo may have changed its markup or be "
         "rate-limiting this address — set SEARXNG_URL to your own SearXNG "
         "instance for a search that does not depend on scraping."
     )
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+
+
+def _page_gist(body: str, limit: int = 160) -> str:
+    """A few words of whatever came back, so a block page can be recognised.
+
+    Without this, "a page with no results in it" is where the diagnosis stops:
+    a captcha, an error, and a results page whose markup moved all read the
+    same. With it, the panel shows which.
+    """
+    title = _TITLE_RE.search(body or "")
+    text = " ".join(_TAG_RE.sub(" ", (body or "")).split())
+    gist = " ".join((title.group(1) if title else "").split())
+    if gist and gist.lower() not in text.lower()[:40]:
+        gist = f"{gist} — {text}"
+    else:
+        gist = text
+    gist = gist.strip() or "an empty page"
+    return gist[:limit] + ("…" if len(gist) > limit else "")
 
 
 def _host_only(url: str) -> str:

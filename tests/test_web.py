@@ -1425,3 +1425,62 @@ class TestTheSearchBackendFallback:
                                                      "snippet": "s"}])
         assert web.search("anything", 3)[0]["url"] == "http://x"
         assert not pages.seen, "DuckDuckGo should not be touched"
+
+
+_BLOCK_PAGE = """<html><head><title>DuckDuckGo</title></head><body>
+<div>Unfortunately, bots use DuckDuckGo too. Please try again later.</div>
+</body></html>"""
+
+# Every class name changed; the redirector did not, because it is the product.
+_MARKUP_MOVED = """<html><head><title>koala at DuckDuckGo</title></head><body>
+<a class="whatever-2027" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fkoala.com%2Flens&amp;rut=z">K</a>
+<a class="whatever-2027" href="/l/?uddg=https%3A%2F%2Fexample.com%2Freview&amp;rut=y">R</a>
+</body></html>"""
+
+
+class TestItSurvivesTheMarkupMoving:
+    """Reported from a NucBox after the browser User-Agent went in: both
+    endpoints answered 200 and both class-based parses still found nothing, so
+    three planned queries produced six identical failures and no results.
+    """
+
+    def test_results_are_found_by_their_redirector_when_the_classes_change(self, duck):
+        duck(_MARKUP_MOVED)
+        out = web.search("koala lens cleaner", 3)
+        assert [r["url"] for r in out] == ["https://koala.com/lens",
+                                           "https://example.com/review"]
+
+    def test_the_named_parse_is_still_preferred_where_it_works(self):
+        """It is the one that also gets titles and snippets."""
+        out = web._duck_results(_HTML_GOOD, "result__a", "result__snippet", 3)
+        assert out[0]["title"] == "A page" and out[0]["snippet"] == "the snippet"
+
+    def test_a_duplicate_link_is_only_one_result(self):
+        body = _MARKUP_MOVED + _MARKUP_MOVED
+        assert len(web._duck_by_redirector(body, 10)) == 2
+
+    def test_the_limit_is_respected(self):
+        assert len(web._duck_by_redirector(_MARKUP_MOVED, 1)) == 1
+
+    def test_a_page_with_no_redirectors_yields_nothing(self):
+        assert web._duck_by_redirector(_BLOCK_PAGE, 3) == []
+
+    def test_what_came_back_is_reported_so_it_can_be_recognised(self, duck):
+        """"A page with no results in it" is where the diagnosis stopped: a
+        captcha, an error and a moved layout all read the same."""
+        duck(_BLOCK_PAGE, _BLOCK_PAGE)
+        with pytest.raises(web.WebError) as caught:
+            web.search("anything", 3)
+        assert "bots use DuckDuckGo too" in str(caught.value)
+
+    @pytest.mark.parametrize("body, expected", [
+        (_BLOCK_PAGE, "bots use DuckDuckGo"),
+        ("<html><title>Nice title</title><body>and words</body></html>", "Nice title"),
+        ("", "an empty page"),
+        ("<html><body></body></html>", "an empty page"),
+    ])
+    def test_the_gist_of_awkward_pages(self, body, expected):
+        assert expected in web._page_gist(body)
+
+    def test_the_gist_is_bounded(self):
+        assert len(web._page_gist("<p>" + "word " * 500 + "</p>")) <= 161

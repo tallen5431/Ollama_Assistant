@@ -1113,9 +1113,15 @@ def _gather_web(
     # Interleave so each query contributes, then fetch more candidates than
     # needed since some will be paywalled, JS-only, or plain unreachable.
     results = web.merge_results(groups, limit=max_docs * 2)
+    # Deduped: three queries hitting the same broken backend produced the same
+    # sentence three times, which reads as three different problems.
+    unique: List[str] = []
+    for note in failures:
+        if note not in unique:
+            unique.append(note)
     yield _step("Search results",
                 f"{len(results)} from {len(groups)} query group(s)"
-                + (f"; failures: {'; '.join(failures)}" if failures else ""),
+                + (f"; {' | '.join(unique)}" if unique else ""),
                 urls=[r["url"] for r in results[:12]])
     if not results:
         yield _line({"status": failures[0] if failures else "No search results found."})
