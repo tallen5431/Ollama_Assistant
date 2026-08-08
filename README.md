@@ -542,7 +542,7 @@ What gets read, when the photo has it:
 | | |
 | --- | --- |
 | **When** | date and time taken, the time-zone offset, and the GPS clock in UTC |
-| **Where** | latitude, longitude, altitude, and how far out the fix might be |
+| **Where** | latitude, longitude, altitude, and how far out the fix might be — both the recorded position error and the DOP, which is the satellite geometry at the time |
 | **Motion** | speed and the direction the camera was pointing |
 | **Camera** | make, model and lens; the pixel dimensions as taken |
 | **The shot** | shutter speed, aperture, focal length (and 35 mm equivalent), ISO, flash |
@@ -558,18 +558,30 @@ downstream can detect. Where the camera recorded an offset it's passed through;
 where it didn't but there's a GPS fix, the GPS clock is UTC and gives the same
 answer the long way round.
 
-### Nothing came through?
+### Seeing what was read
 
-`📍 Photo details` being on and a photo *having* a position are different
-things. The thumbnail says which before you send: **🕘** if a date was read,
-**📍** if a location was, and a faint **·** if the file had neither.
+**Tap a thumbnail** before you send and a sheet lists everything pulled out of
+that file, with the position linking to a map. That's the quickest way to answer
+"does this photo actually have a location in it?", and it needs no terminal.
 
-To check a file directly, point the diagnostic at it. It runs the app's own
-parser, so what it prints is exactly what the app would read:
+The thumbnail itself carries a summary: **🕘** a date was read, **📍** a location
+was, **📍̸** the camera asked for a fix and didn't get one, and a faint **·** for
+a file with neither. When a position is missing the app says why in the hint
+line, because the three reasons need different fixes.
+
+To check a file from the command line — including one that never reached the
+app — point the diagnostic at it. It runs the app's own parser, so what it
+prints is exactly what the app would read:
 
 ```
 .venv/bin/python tools/check_photo.py ~/Downloads/odometer.jpg
+.venv/bin/python tools/check_photo.py --raw photo.jpg     # every tag, by number
 ```
+
+`--raw` dumps each IFD entry before any interpretation. That's the one worth
+having when a photo demonstrably carries a position and the app reports none:
+it shows whether the GPS block is there and what's in it, which settles whether
+the file is unusual or the parser is wrong.
 
 The usual reasons a photo has no location:
 
@@ -581,9 +593,15 @@ The usual reasons a photo has no location:
 - **It was stripped in transit.** Messaging apps re-encode, and Google Photos'
   *share* link is not the original file — use *download* instead.
 - **It's a screenshot.** Those have no EXIF at all.
-- **The position is exactly 0, 0.** That's what a camera writes for a fix it
-  never got. It's treated as no position, because reporting the Gulf of Guinea
-  is worse than reporting nothing.
+- **The camera asked and got nothing.** A GPS block with no usable fix in it —
+  0, 0, which is the Gulf of Guinea — is common indoors and in a garage. It's
+  reported as *no position*, not as Null Island, but it's a different answer
+  from "the setting is off": wait for a fix rather than change a setting.
+
+A position that *is* there can still be poor. Where the file records a position
+error or a DOP, both are passed on in words — "give or take 8 m; a good fix,
+DOP 1.2" — so the model qualifies an answer rather than reading six decimal
+places as a doorstep.
 
 **On by default**, because on a box only you can reach — over Tailscale, say —
 that's the useful setting. Set `PHOTO_META=0` on the server and a fresh browser

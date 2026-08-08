@@ -9,6 +9,13 @@ same JavaScript the page runs, not a second implementation that might disagree
 
     .venv/bin/python tools/check_photo.py ~/Downloads/odometer.jpg
     .venv/bin/python tools/check_photo.py *.jpg
+    .venv/bin/python tools/check_photo.py --raw photo.jpg   # every tag, by number
+
+``--raw`` dumps each IFD entry the file contains, tag by tag, before any
+interpretation. That is the one thing worth having when a photo demonstrably
+carries a position and the app reports none: it says whether the GPS block is
+there and what is in it, which decides between "the file is unusual" and "the
+parser is wrong".
 
 Needs node, for the same reason the tests do: running the real parser is the
 only way to be sure the answer matches what the app would do.
@@ -75,6 +82,7 @@ FIELDS = (
     ("lon", "Longitude"),
     ("altitude", "Altitude (m)"),
     ("accuracy", "Position error (m)"),
+    ("dop", "Fix quality (DOP)"),
     ("speed", "Speed"),
     ("heading", "Facing"),
     ("camera", "Camera"),
@@ -92,6 +100,85 @@ FIELDS = (
     ("artist", "Artist"),
     ("copyright", "Copyright"),
 )
+
+
+RAW_JS = """
+function dumpIfd(view, base, at, le, name, out) {
+  if (at + 2 > view.byteLength) { out.push([name, "past the end of the file"]); return; }
+  const count = view.getUint16(at, le);
+  out.push([name, count + " entries at +" + (at - base)]);
+  for (let i = 0; i < count; i++) {
+    const entry = at + 2 + i * 12;
+    if (entry + 12 > view.byteLength) break;
+    const tag = view.getUint16(entry, le);
+    const type = view.getUint16(entry + 2, le);
+    const length = view.getUint32(entry + 4, le);
+    const width = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 }[type];
+    let value;
+    if (!width) value = "(unknown type " + type + ")";
+    else {
+      const bytes = width * length;
+      const at2 = bytes <= 4 ? entry + 8 : base + view.getUint32(entry + 8, le);
+      value = (at2 < 0 || at2 + bytes > view.byteLength)
+        ? "(points outside the file, at +" + (at2 - base) + ")"
+        : JSON.stringify(readValue(view, at2, type, length, le));
+    }
+    out.push(["  0x" + tag.toString(16).padStart(4, "0"),
+              "type " + type + " x" + length + "  " + value]);
+  }
+}
+
+function dumpAll(view) {
+  const out = [];
+  let offset = 2, base = -1;
+  while (offset + 4 <= view.byteLength) {
+    if (view.getUint8(offset) !== 0xff) break;
+    let marker = view.getUint8(offset + 1);
+    while (marker === 0xff && offset + 2 < view.byteLength) {
+      offset += 1; marker = view.getUint8(offset + 1);
+    }
+    if (marker === 0xda || marker === 0xd9) break;
+    if (offset + 4 > view.byteLength) break;
+    const size = view.getUint16(offset + 2);
+    if (size < 2) break;
+    out.push(["segment", "0x" + marker.toString(16) + "  " + size + " bytes"]);
+    if (marker === 0xe1 && offset + 10 <= view.byteLength &&
+        view.getUint32(offset + 4) === 0x45786966) base = offset + 10;
+    offset += 2 + size;
+  }
+  if (base < 0) { out.push(["", "no EXIF APP1 segment in this file"]); return out; }
+  const order = view.getUint16(base);
+  const le = order === 0x4949;
+  out.push(["byte order", le ? "II (little-endian)" : "MM (big-endian)"]);
+  const ifd0at = base + view.getUint32(base + 4, le);
+  dumpIfd(view, base, ifd0at, le, "IFD0", out);
+  const ifd0 = readIfd(view, base, ifd0at, le) || {};
+  if (ifd0[0x8769] !== undefined) dumpIfd(view, base, base + ifd0[0x8769], le, "ExifIFD", out);
+  if (ifd0[0x8825] !== undefined) dumpIfd(view, base, base + ifd0[0x8825], le, "GPS IFD", out);
+  else out.push(["GPS IFD", "absent — IFD0 has no 0x8825 pointer"]);
+  return out;
+}
+"""
+
+
+def dump(path: str) -> list:
+    """Every IFD entry in the file, before any interpretation."""
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as script:
+        script.write(
+            parser_source() + RAW_JS
+            + "\nconst fs = require('fs');"
+            + f"\nconst b = fs.readFileSync({json.dumps(path)}).slice(0, {HEAD_BYTES});"
+            + "\nconst v = new DataView(b.buffer, b.byteOffset, b.byteLength);"
+            + "\ntry { console.log(JSON.stringify(dumpAll(v))); }"
+            + "\ncatch (e) { console.log(JSON.stringify([['error', String(e)]])); }\n")
+        name = script.name
+    try:
+        out = subprocess.run(["node", name], capture_output=True, text=True, timeout=30)
+    finally:
+        os.unlink(name)
+    if out.returncode != 0:
+        return [["error", out.stderr.strip()[:400]]]
+    return json.loads(out.stdout.strip() or "[]")
 
 
 def report(path: str) -> bool:
@@ -141,7 +228,8 @@ def main() -> int:
     if shutil.which("node") is None:
         print(f"{BAD} node is not installed, and this runs the app's own parser under it.")
         return 2
-    paths = sys.argv[1:]
+    paths = [a for a in sys.argv[1:] if not a.startswith("-")]
+    raw = "--raw" in sys.argv[1:]
     if not paths:
         print(__doc__.strip())
         return 2
@@ -150,6 +238,10 @@ def main() -> int:
     for path in paths:
         if report(path):
             located += 1
+        if raw:
+            print("\n     ── every tag in the file ──")
+            for label, value in dump(path):
+                print(f"     {label:<12} {value}")
 
     print(f"\n{len(paths)} file(s), {located} with a position.")
     if located:

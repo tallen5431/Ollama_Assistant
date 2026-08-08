@@ -1436,10 +1436,21 @@ def _metadata_lines(
             lat = lon = None
         if with_location and lat is not None and lon is not None:
             here = f"at {lat:.6f}, {lon:.6f}"
+            # Six decimal places reads like a doorstep and can be a block, so
+            # say how much to trust it where the file says.
+            caveats = []
             accuracy = _meta_number(meta.get("accuracy"), 100_000)
             if accuracy:
-                # Six decimal places reads like a doorstep and can be a block.
-                here += f" (give or take {int(accuracy)} m)"
+                caveats.append(f"give or take {int(accuracy)} m")
+            dop = _meta_number(meta.get("dop"), 1000)
+            if dop:
+                # Dilution of precision describes the satellite geometry. The
+                # thresholds are the conventional ones.
+                quality = ("a good fix" if dop < 2 else
+                           "a usable fix" if dop < 5 else "a poor fix")
+                caveats.append(f"{quality}, DOP {dop:g}")
+            if caveats:
+                here += " (" + "; ".join(caveats) + ")"
             parts.append(here)
             # Anything past this is not a place on Earth; the deepest mine and
             # the highest cruising altitude both sit well inside it.
@@ -1452,6 +1463,16 @@ def _metadata_lines(
             heading = _meta_text(meta.get("heading"), 16)
             if heading:
                 parts.append(f"facing {heading}")
+        elif with_location and parts:
+            # Said rather than left out — but only for a photo we can say
+            # something else about. Asked "where was this taken?" about a photo
+            # with no position, a model given silence either ignores the
+            # question or invents somewhere; given this it can answer it.
+            # Gated on `parts` so a file with nothing readable in it stays
+            # absent entirely rather than becoming a line about what it lacks.
+            parts.append("no position recorded (the camera asked for a GPS fix "
+                         "and did not get one)" if meta.get("gpsBlock")
+                         else "no position recorded")
 
         camera = _meta_text(meta.get("camera"), 60)
         if camera:

@@ -416,6 +416,14 @@ class TestThePage:
         assert "WEB_SHARE_LOCATION" in page
         assert "routineWarnUpdate" in page
 
+    def test_attaching_a_photo_explains_a_missing_position(self):
+        """The sentence has to actually be reached, not merely exist."""
+        page = self.page()
+        at = page.index("function addAttachment")
+        body = page[at:page.index("\n      }", at)]
+        assert "noteMissingPlace(att);" in body, \
+            "nothing calls it, so nobody is ever told why"
+
     def test_the_thumbnail_says_what_was_actually_read(self):
         """"Photo details is on" and "this photo has a position" differ.
 
@@ -425,8 +433,8 @@ class TestThePage:
         assert ".thumb .stamp" in page
         assert '["🕘", "date read from the photo"]' in page
         assert '["📍", "location read from the photo"]' in page
-        assert "img.meta.lat === 0 && img.meta.lon === 0" in page, \
-            "Null Island must not light the location badge"
+        assert '["📍̸", "the camera tried but had no GPS fix"]' in page, \
+            "a GPS block with no fix is its own answer, not silence"
 
     def test_a_routine_is_only_spent_on_a_turn_that_went(self):
         """send() refuses an empty message and one that arrives mid-stream.

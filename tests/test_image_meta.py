@@ -81,6 +81,7 @@ def build_jpeg(little_endian: bool = False, gps: bool = True, rich: bool = False
             gadd(16, 2, 2, inline=b"T\x00\x00\x00")                  # true north
             gadd(17, 5, 1, payload=rational(27350, 100))             # facing 273.5°
             gadd(29, 2, 11, payload=b"2026:07:14\x00")               # GPSDateStamp
+            gadd(11, 5, 1, payload=rational(180, 100))               # DOP 1.8
             gadd(31, 5, 1, payload=rational(800, 100))               # 8 m of error
 
     exif_rows, exif_blob, eadd = ifd_builder()
@@ -279,7 +280,12 @@ class TestTheShippedParser:
         if isinstance(got, dict):
             # Anything it did return has to be genuinely present, not garbage
             # scraped from beyond the end.
-            assert set(got) <= {"camera", "taken", "lat", "lon", "altitude"}
+            assert set(got) <= {"camera", "taken", "offset", "utc", "lat", "lon",
+                                "altitude", "accuracy", "speed", "heading",
+                                "lens", "width", "height", "iso", "exposure",
+                                "aperture", "focal", "focal35", "flash",
+                                "orientation", "software", "artist", "copyright",
+                                "gpsBlock"}
             if "camera" in got:
                 assert got["camera"] in ("Google Pixel 8", "Google", "Pixel 8")
 
@@ -310,10 +316,12 @@ class TestRenderingTheFacts:
     def test_nothing_known_produces_nothing_at_all(self, entries):
         assert web.image_metadata(entries) == ""
 
-    def test_a_photo_with_only_a_time_says_only_the_time(self):
+    def test_a_photo_with_only_a_time_says_the_time_and_the_absence(self):
         out = web.image_metadata([{"taken": "2026:01:03 07:15:00"}])
-        assert "morning" in out
-        assert "," not in out.split("- Photo: ")[1], "no empty trailing clauses"
+        line = out.split("- Photo: ")[1]
+        assert "morning" in line
+        assert line.endswith("no position recorded")
+        assert ", ," not in line, "no empty clauses"
 
     @pytest.mark.parametrize("hour, part", [
         ("02", "night"), ("09", "morning"), ("14", "afternoon"), ("21", "evening"),
@@ -616,7 +624,8 @@ class TestTheSearchPlannerCanUseIt:
 
     def test_a_note_that_fits_is_left_whole(self):
         note = web.metadata_note([{"taken": "2026:08:07 09:04:00"}])
-        assert note.endswith("(morning)")
+        assert note.endswith("no position recorded")
+        assert "(morning)" in note
 
     def test_it_arrives_as_a_note_not_as_the_fenced_system_turn(self, rig, monkeypatch):
         """The planner gets a few hundred characters; a preamble would eat them."""
@@ -770,3 +779,204 @@ class TestOrientationCannotMisleadTheModel:
         """Orientation 1 is the default and the parser drops it."""
         out = web.image_metadata([{"taken": "2026:07:14 18:42:07"}])
         assert "held" not in out.split("- Photo:")[1]
+
+
+class TestASilentAbsenceIsWorseThanASentence:
+    """"Where was this taken?" about a photo with no position.
+
+    Given silence a model either ignores the question or invents somewhere.
+    Given the absence in words it can answer it.
+    """
+
+    def test_a_photo_with_no_position_says_so(self):
+        out = web.image_metadata([{"taken": "2026:08:07 16:45:11", "camera": "Pixel 8"}])
+        assert "no position recorded" in out
+
+    def test_a_camera_that_tried_and_failed_says_which(self):
+        """Indoors. It is a different answer from "the setting is off"."""
+        out = web.image_metadata([{"taken": "2026:08:07 16:45:11", "gpsBlock": True}])
+        assert "the camera asked for a GPS fix and did not get one" in out
+
+    def test_a_photo_with_a_position_says_nothing_about_absence(self):
+        out = web.image_metadata([{"taken": "2026:08:07 16:45:11",
+                                   "lat": 51.5, "lon": -0.1}])
+        assert "no position" not in out
+
+    def test_with_the_search_switch_off_it_says_neither(self):
+        """Reporting an absence to the planner is still reporting on location."""
+        for meta in ({"taken": "2026:08:07 16:45:11"},
+                     {"taken": "2026:08:07 16:45:11", "lat": 51.5, "lon": -0.1}):
+            note = web.metadata_note([meta], with_location=False)
+            assert "position" not in note, note
+            assert "51.5" not in note
+
+    def test_it_is_not_a_line_of_its_own(self):
+        """A photo with nothing readable at all must still produce nothing."""
+        assert web.image_metadata([{}]) == ""
+        assert web.image_metadata([{"gpsBlock": True}]) == ""
+
+
+class TestTheAppSaysWhyOnScreen:
+    """A badge helps someone who knows to look; a sentence helps everyone."""
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    @pytest.mark.parametrize("att, expected", [
+        ({}, "screenshots have none"),
+        ({"meta": {"taken": "x"}}, "check location is on"),
+        ({"meta": {"taken": "x", "gpsBlock": True}}, "did not get one"),
+        ({"meta": {"gpsBlock": True}}, "That photo has no GPS fix"),
+        ({"meta": {"taken": "x", "lat": 51.5, "lon": -0.1}}, None),
+    ])
+    def test_the_reasons_are_distinguished(self, tmp_path, att, expected):
+        """Run the shipped function rather than grepping for its strings.
+
+        They are split across concatenations in the source, so a substring test
+        checks the line wrapping rather than what the user is told.
+        """
+        page = re.search(r"<script>(.*?)</script>", chat_ui.render_page("t"), re.S).group(1)
+        at = page.index("      function noteMissingPlace")
+        body = page[at:page.index("      function addAttachment", at)]
+        script = tmp_path / "note.js"
+        script.write_text(
+            "const hintEl = { textContent: '' };\nlet exifOn = true;\n"
+            + body
+            + f"\nnoteMissingPlace({json.dumps(att)});"
+            + "\nconsole.log(hintEl.textContent);\n")
+        out = subprocess.run(["node", str(script)], capture_output=True, text=True,
+                             timeout=30)
+        assert out.returncode == 0, out.stderr
+        said = out.stdout.strip()
+        if expected is None:
+            assert said == "", f"a photo with a position needs no explanation: {said}"
+        else:
+            assert expected in said, said
+
+    def test_it_only_speaks_when_the_toggle_is_on(self):
+        """With photo details off, nothing was read and nothing is missing."""
+        page = chat_ui.render_page("t")
+        at = page.index("function noteMissingPlace")
+        assert "if (!exifOn) return;" in page[at:at + 300]
+
+    def test_it_says_nothing_when_a_position_was_found(self):
+        page = chat_ui.render_page("t")
+        at = page.index("function noteMissingPlace")
+        assert 'typeof att.meta.lat === "number") return;' in page[at:at + 400]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+class TestTheParserDistinguishesTheThreeStates:
+    """No GPS block, a block with no fix, and a real position."""
+
+    def _parse(self, tmp_path, data):
+        blob = tmp_path / "in.jpg"
+        blob.write_bytes(data)
+        script = tmp_path / "run.js"
+        script.write_text(
+            _parser_source()
+            + "\nconst fs = require('fs');"
+            + f"\nconst b = fs.readFileSync({json.dumps(str(blob))});"
+            + "\nconst v = new DataView(b.buffer, b.byteOffset, b.byteLength);"
+            + "\nconsole.log(JSON.stringify(parseExif(v)));\n")
+        out = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=30)
+        assert out.returncode == 0, out.stderr
+        return json.loads(out.stdout.strip())
+
+    def test_a_real_position_sets_no_flag_worth_worrying_about(self, tmp_path):
+        got = self._parse(tmp_path, build_jpeg())
+        assert got["gpsBlock"] is True
+        assert got["lat"] == pytest.approx(51.51, abs=1e-6)
+
+    def test_no_gps_block_at_all(self, tmp_path):
+        got = self._parse(tmp_path, build_jpeg(gps=False))
+        assert "gpsBlock" not in got
+        assert "lat" not in got
+
+    def test_a_block_with_no_fix_is_its_own_answer(self, tmp_path):
+        """0/0/0 is what a camera writes when it asked and got nothing.
+
+        Reported as a position it is the Gulf of Guinea; reported as silence it
+        is indistinguishable from a camera that never tries. It is neither.
+        """
+        got = self._parse(tmp_path, build_jpeg(zero_gps=True))
+        assert got["gpsBlock"] is True
+        assert "lat" not in got and "lon" not in got
+
+    def test_the_fix_quality_is_read_out_of_the_file(self, tmp_path):
+        """DOP is the other half of "how far out might this be"."""
+        got = self._parse(tmp_path, build_jpeg(rich=True))
+        assert got["dop"] == 1.8, got
+        assert got["accuracy"] == 8
+
+    def test_a_block_with_nothing_else_readable_is_not_a_result(self, tmp_path):
+        """gpsBlock alone is not a fact about the photo worth carrying."""
+        data = bytearray(build_jpeg(zero_gps=True))
+        assert self._parse(tmp_path, bytes(data)) is not None   # it has a date
+
+
+class TestThePhotoDetailsPanel:
+    """Tapping a thumbnail shows what was read from that file.
+
+    The question "does my photo actually have a position in it?" otherwise
+    needs a terminal and a script, which is a silly thing to need while
+    standing next to the car.
+    """
+
+    def page(self):
+        return chat_ui.render_page("t")
+
+    def test_the_sheet_exists_and_a_thumbnail_opens_it(self):
+        page = self.page()
+        assert 'id="photometa"' in page
+        assert "showPhotoDetails(img)" in page
+        assert 'el.addEventListener("click", () => showPhotoDetails(img));' in page
+
+    def test_it_offers_a_map_link_for_a_position(self):
+        assert "openstreetmap.org/?mlat=" in self.page()
+
+    def test_file_content_never_becomes_markup(self):
+        """A camera name is whatever the file says it is."""
+        page = self.page()
+        at = page.index("function showPhotoDetails")
+        body = page[at:page.index("function hidePhotoDetails", at)]
+        assert "val.textContent = value;" in body
+        # Assignments, not mentions — the word also appears in a comment saying
+        # why it is not used.
+        for line in body.splitlines():
+            code = line.split("//")[0]
+            if "innerHTML" in code:
+                assert '= ""' in code, line.strip()
+        assert 'metaBodyEl.innerHTML = "";' in body
+
+    def test_closing_it_leaves_the_drawer_backdrop_alone(self):
+        """Both use the same backdrop; taking it away under the drawer is wrong."""
+        page = self.page()
+        at = page.index("function hidePhotoDetails")
+        assert "if (drawerEl.hidden) backdropEl.hidden = true;" in page[at:at + 400]
+
+    def test_the_x_removes_the_attachment_and_the_image_opens_details(self):
+        """Two taps on one 3.5rem square must not fight over the same job."""
+        page = self.page()
+        at = page.index("function renderThumbs")
+        body = page[at:page.index("\n      }", at)]
+        assert 'rm.addEventListener("click"' in body and "pendingImages.splice" in body
+        assert 'el.addEventListener("click", () => showPhotoDetails(img))' in body
+
+
+class TestFixQuality:
+    """"There can be quite a bit of uncertainty in that location" — say so."""
+
+    @pytest.mark.parametrize("dop, said", [
+        (1.2, "a good fix"), (3.0, "a usable fix"), (12.0, "a poor fix"),
+    ])
+    def test_dilution_of_precision_is_turned_into_words(self, dop, said):
+        out = web.image_metadata([{"lat": 51.5, "lon": -0.1, "dop": dop}])
+        assert said in out
+        assert "DOP" in out
+
+    def test_both_qualifiers_read_as_one_clause(self):
+        out = web.image_metadata([{"lat": 51.5, "lon": -0.1, "accuracy": 8.0, "dop": 1.2}])
+        assert "(give or take 8 m; a good fix, DOP 1.2)" in out
+
+    def test_a_position_with_neither_is_left_unqualified(self):
+        out = web.image_metadata([{"lat": 51.5, "lon": -0.1}])
+        assert out.rstrip().endswith("-0.100000")

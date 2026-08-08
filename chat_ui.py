@@ -224,6 +224,20 @@ _PAGE = """<!doctype html>
          metadata turn, and an answer to half the question with nothing on
          screen to say why. */
       .thumb .stamp.muted { opacity:0.55; }
+      /* A sheet from the bottom rather than a side drawer: it is reached from
+         the composer, which is where a thumb already is on a phone. */
+      .sheet {
+        position:fixed; left:0; right:0; bottom:0; z-index:22; max-height:70vh;
+        overflow-y:auto; background:var(--panel);
+        border-top:1px solid var(--border);
+        border-radius:0.9rem 0.9rem 0 0; padding:0.75rem 0.9rem 1.1rem;
+      }
+      .metarow { display:flex; gap:0.6rem; padding:0.28rem 0;
+                 border-bottom:1px solid var(--border); font-size:0.82rem; }
+      .metarow:last-child { border-bottom:0; }
+      .metaname { flex:0 0 9rem; color:var(--muted); }
+      .metarow a { color:var(--accent); word-break:break-all; }
+      .thumb { cursor:pointer; }
       .thumb .stamp { position:absolute; bottom:0; left:0; padding:0 0.2rem;
         font-size:0.6rem; line-height:1.3; background:rgba(0,0,0,0.65);
         border-radius:0 0.35rem 0 0; }
@@ -313,6 +327,13 @@ _PAGE = """<!doctype html>
           </div>
         </div>
       </div>
+    </aside>
+    <aside class="sheet" id="photometa" hidden>
+      <div class="drawer-head">
+        <strong>📍 Photo details</strong>
+        <button id="metaClose" title="Close">✕</button>
+      </div>
+      <div id="metaBody"></div>
     </aside>
 
     <header>
@@ -417,6 +438,8 @@ _PAGE = """<!doctype html>
       const dotEl    = document.getElementById("dot");
       const statusEl = document.getElementById("statusText");
       const hintEl   = document.getElementById("hint");
+      const metaEl    = document.getElementById("photometa");
+      const metaBodyEl = document.getElementById("metaBody");
       const routineBar = document.getElementById("routinebar");
       const routineChipsEl = document.getElementById("routineChips");
       const routineEditBtn = document.getElementById("routineEditBtn");
@@ -925,6 +948,8 @@ _PAGE = """<!doctype html>
           cell.className = "thumb";
           const el = document.createElement("img");
           el.src = img.url; el.alt = "attachment";
+          el.title = "what was read from this photo";
+          el.addEventListener("click", () => showPhotoDetails(img));
           const rm = document.createElement("button");
           rm.textContent = "✕"; rm.title = "Remove";
           rm.addEventListener("click", () => {
@@ -938,9 +963,11 @@ _PAGE = """<!doctype html>
           const badges = [];
           if (img.meta && img.meta.taken) badges.push(["🕘", "date read from the photo"]);
           const hasPlace = img.meta && typeof img.meta.lat === "number" &&
-                           typeof img.meta.lon === "number" &&
-                           !(img.meta.lat === 0 && img.meta.lon === 0);
+                           typeof img.meta.lon === "number";
           if (hasPlace) badges.push(["📍", "location read from the photo"]);
+          else if (img.meta && img.meta.gpsBlock) {
+            badges.push(["📍̸", "the camera tried but had no GPS fix"]);
+          }
           if (badges.length) {
             const stamp = document.createElement("span");
             stamp.className = "stamp";
@@ -1077,16 +1104,25 @@ _PAGE = """<!doctype html>
         }
 
         if (ifd0[0x8825] !== undefined) {
+          // Say that the camera tried. A block with no fix in it is the usual
+          // answer for a photo taken in a garage, and it is a different thing
+          // from a camera that never records position at all — which is the
+          // difference between "wait for a fix" and "turn the setting on".
+          out.gpsBlock = true;
           readGps(view, base, base + ifd0[0x8825], le, out);
         }
-        return Object.keys(out).length ? out : null;
+        const facts = Object.keys(out).filter(k => k !== "gpsBlock");
+        return facts.length ? out : null;
       }
 
       function readGps(view, base, at, le, out) {
         const gps = readIfd(view, base, at, le) || {};
         const lat = dms(gps[0x0002], gps[0x0001]);
         const lon = dms(gps[0x0004], gps[0x0003]);
-        if (lat !== null && lon !== null) { out.lat = lat; out.lon = lon; }
+        if (lat !== null && lon !== null && !(lat === 0 && lon === 0)) {
+          out.lat = lat;
+          out.lon = lon;
+        }
         if (typeof gps[0x0006] === "number") {
           out.altitude = Math.round(gps[0x0006] * (gps[0x0005] === 1 ? -1 : 1));
         }
@@ -1094,6 +1130,12 @@ _PAGE = """<!doctype html>
         // -93.2650" reads as a doorstep and can be a whole block.
         const error = ratio(gps[0x001f], 1);
         if (error) out.accuracy = error;
+        // Dilution of precision: the geometry of the satellites at the time,
+        // which is the other half of "how far out might this be". Under 2 is a
+        // good fix, over 5 is one to distrust — and a phone that has just woken
+        // up indoors writes a position with a DOP of 20 without complaint.
+        const dop = ratio(gps[0x000b], 1);
+        if (dop) out.dop = dop;
         const speed = ratio(gps[0x000d], 1);
         if (speed !== null && speed > 0) {
           const unit = { K: "km/h", M: "mph", N: "knots" }[String(gps[0x000c] || "K")[0]];
@@ -1246,9 +1288,117 @@ _PAGE = """<!doctype html>
         return att;
       }
 
+      // Why a photo carries no position, said in words at the moment it is
+      // attached. A badge is only useful to someone who already knows to look
+      // for it; silence here read as "the app is broken" for long enough to be
+      // worth a sentence.
+      function noteMissingPlace(att) {
+        if (!exifOn) return;
+        if (att.meta && typeof att.meta.lat === "number") return;
+        if (!att.meta) {
+          hintEl.textContent = "No photo details in that file — screenshots have " +
+            "none, and neither does anything re-encoded on the way here.";
+          return;
+        }
+        const had = att.meta.taken ? "That photo has its date but " : "That photo has ";
+        hintEl.textContent = att.meta.gpsBlock
+          ? had + "no GPS fix — the camera asked and did not get one. " +
+            "Indoors is the usual reason."
+          : had + "no location. The camera did not record one: check location " +
+            "is on for the camera app.";
+      }
+
+      // ---- What was read, on the phone ----
+      // Tapping a thumbnail shows every fact pulled out of that file. The
+      // question this answers — "does my photo actually have a position in
+      // it?" — otherwise needs a terminal and a diagnostic script, which is a
+      // silly thing to need while standing next to the car.
+      const META_ROWS = [
+        ["taken", "Taken"],
+        ["offset", "Time zone"],
+        ["utc", "GPS clock (UTC)"],
+        ["accuracy", "Position error", (v) => "± " + v + " m"],
+        ["dop", "Fix quality", (v) => v + " DOP"],
+        ["altitude", "Altitude", (v) => v + " m"],
+        ["speed", "Speed"],
+        ["heading", "Facing"],
+        ["camera", "Camera"],
+        ["lens", "Lens"],
+        ["exposure", "Exposure"],
+        ["aperture", "Aperture"],
+        ["focal", "Focal length"],
+        ["focal35", "35 mm equivalent"],
+        ["iso", "ISO"],
+        ["flash", "Flash", (v) => (v ? "fired" : "did not fire")],
+        ["orientation", "Camera held"],
+        ["software", "Written by"],
+        ["artist", "Artist"],
+        ["copyright", "Copyright"],
+      ];
+
+      function showPhotoDetails(img) {
+        metaBodyEl.innerHTML = "";
+        const meta = img.meta;
+        const add = (label, value, href) => {
+          const row = document.createElement("div");
+          row.className = "metarow";
+          const name = document.createElement("span");
+          name.className = "metaname";
+          name.textContent = label;
+          row.appendChild(name);
+          if (href) {
+            const link = document.createElement("a");
+            link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
+            link.textContent = value;
+            row.appendChild(link);
+          } else {
+            const val = document.createElement("span");
+            val.textContent = value;      // never innerHTML: this is file content
+            row.appendChild(val);
+          }
+          metaBodyEl.appendChild(row);
+        };
+
+        if (!exifOn) {
+          add("Photo details", "turned off — nothing was read from this file");
+        } else if (!meta) {
+          add("Photo details", "none in this file");
+          add("Why", "screenshots carry none, and neither does anything " +
+                     "re-encoded on the way here");
+        } else {
+          if (typeof meta.lat === "number" && typeof meta.lon === "number") {
+            const here = meta.lat.toFixed(6) + ", " + meta.lon.toFixed(6);
+            add("Position", here,
+                "https://www.openstreetmap.org/?mlat=" + meta.lat +
+                "&mlon=" + meta.lon + "#map=16");
+          } else if (meta.gpsBlock) {
+            add("Position", "none — the camera asked for a fix and did not get one");
+          } else {
+            add("Position", "none — the camera did not record one");
+          }
+          if (typeof meta.width === "number" && typeof meta.height === "number") {
+            add("Size as taken", meta.width + " × " + meta.height);
+          }
+          for (const row of META_ROWS) {
+            const value = meta[row[0]];
+            if (value === undefined || value === null || value === "") continue;
+            add(row[1], row[2] ? row[2](value) : String(value));
+          }
+        }
+        metaEl.hidden = false;
+        backdropEl.hidden = false;
+      }
+
+      function hidePhotoDetails() {
+        metaEl.hidden = true;
+        // The drawer uses the same backdrop, so only take it away if it is ours.
+        if (drawerEl.hidden) backdropEl.hidden = true;
+      }
+
       function addAttachment(att) {
         if (pendingImages.length >= 4) { hintEl.textContent = "Up to 4 images per message."; return false; }
         pendingImages.push(att); renderThumbs();
+        noteMissingPlace(att);
         // Before switchToVisionModel, which writes the same hint line: a model
         // that cannot see the image is the more urgent message and should win.
         routineProgress();
@@ -2794,7 +2944,8 @@ _PAGE = """<!doctype html>
       rPhotosEl.addEventListener("change", routineWarnUpdate);
       rWebEl.addEventListener("change", routineWarnUpdate);
       document.getElementById("drawerClose").addEventListener("click", closeDrawer);
-      backdropEl.addEventListener("click", closeDrawer);
+      backdropEl.addEventListener("click", () => { closeDrawer(); hidePhotoDetails(); });
+      document.getElementById("metaClose").addEventListener("click", hidePhotoDetails);
       document.getElementById("drawerNew").addEventListener("click", function () {
         newChat(); closeDrawer();
       });
