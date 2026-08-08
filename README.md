@@ -30,11 +30,27 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   screenshot, or paste one in, then ask about it (`llava`, `*-vision`,
   `minicpm-v`, `qwen2.5vl`, `moondream`, …). Images are downscaled in the
   browser before upload. See "Vision models" below.
+- 🚗 **Routines** — save a prompt once and tap it instead of typing. A routine
+  can set the toggles it needs and refuse to send until its photos are attached,
+  so "two odometer photos → how far did I drive and how long did it take" is two
+  taps. Four are shipped. See "Routines" below.
+- 🗒 **Records** — a routine can keep a row per run. Two odometer photos become
+  *distance 68 miles · elapsed 3 h 08 min* in a table you can correct and pull
+  out as CSV or JSON with `curl`. See "Records" below.
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
-- ✍️ **Formatted replies** — markdown is rendered, with labelled code blocks and
-  a copy button. Matters most with the coder models.
+- ✍️ **Formatted replies** — markdown is rendered: labelled code blocks with a
+  copy button, lists, quotes, headings, and tables (which scroll sideways on a
+  phone rather than stretching the page). Formulas written in LaTeX are unwrapped
+  into plain text — there's no maths renderer here, and `68 / 3.13 ≈ 21.7` beats
+  a raw `\frac` either way.
+- 📍 **Photo details (optional)** — a photo remembers when and where it was
+  taken; the picture itself doesn't show it and re-encoding on upload throws it
+  away. Turn **📍 Photo details** on and the date, time of day, camera and
+  coordinates are read in the browser and sent alongside, so you can ask "where
+  was this?" or "was this the morning?". On by default; `PHOTO_META=0` turns
+  that round. See "Photo details" below.
 - 👁️ **Image reading without losing your model** — attach a screenshot while a
   text-only model is selected and an OCR model transcribes it for you, so a
   stack trace doesn't cost you `qwen3-coder:30b` mid-debug. Only if nothing can
@@ -51,6 +67,10 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
 - 🔌 **Server-manager ready** — one-click start, health probe, and works behind
   the manager's reverse proxy.
 - 🔒 **Optional login** — turn on HTTP Basic Auth before exposing it publicly.
+
+> **On a phone**, the toggles and routine chips fold away while the on-screen
+> keyboard is up, so the conversation keeps the screen. They come back when you
+> dismiss it. Nothing folds on a desktop, where no keyboard covers anything.
 
 ## Quick start
 
@@ -99,6 +119,7 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_CONNECT_TIMEOUT` | `5`                    | How long to wait to *connect*, separately. A sleeping desktop drops the packet rather than refusing it, so this is what stops a message hanging for the full reply timeout |
 | `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
 | `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
+| `PHOTO_META`        | `1`                         | Whether a browser that has never touched the toggle starts with **📍 Photo details** on. `0` makes off the default |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
@@ -108,6 +129,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
 | `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
+| `WEB_SHARE_LOCATION` | `1`                        | Whether a photo's GPS position may inform a search query. `0` keeps the date and camera and drops the position — see "Photo details" |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
 | `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
@@ -347,7 +369,9 @@ doesn't litter the list.
 > kill switch, so auth is the control.
 
 Attached images are stored with their message so a reopened thread still makes
-sense, which means an image-heavy history grows the database. The drawer shows
+sense — along with their photo details, if you had that on, so reopening a
+thread and asking "where was that?" gets the same answer as asking it the first
+time. Which means an image-heavy history grows the database. The drawer shows
 what it currently costs, and deleting conversations genuinely gives the space
 back — the file is compacted when enough of it has become dead space, rather
 than only marking pages free.
@@ -419,6 +443,10 @@ Only when PNG exceeds ~1.5 MB is the image treated as a photograph: downscaled t
 with transparency flattened onto white since JPEG has no alpha. EXIF orientation
 is honoured throughout, so photos aren't sent sideways.
 
+Re-encoding also removes every other trace of EXIF — the date, the camera, the
+GPS position — which is why "Photo details" above exists and why it has to run
+before this step rather than after.
+
 They travel as base64 in the message, exactly as Ollama's native API expects:
 
 ```json
@@ -428,6 +456,248 @@ They travel as base64 in the message, exactly as Ollama's native API expects:
 Note the whole conversation is re-sent on every turn, so an image stays in the
 context for the rest of the chat — **New chat** clears it.
 
+## Routines
+
+A routine is a prompt you save once and tap instead of typing. It sits as a chip
+above the message box; tapping it drops its text into the composer, sets the
+toggles it asks for, and holds **Send** until the photos it expects are attached.
+
+The case it was built for: photograph the odometer at the start of a trip and
+again at the end, tap **🚗 Trip**, attach both, send.
+
+> **you:** *(taps 🚗 Trip, attaches two photos)*
+> **model:** Image 1 reads 041233 km, taken 09:04. Image 2 reads 041589 km, taken 17:32. That's 356 km over 8 h 28 min — an average of 42 km/h.
+
+The distance comes from the pictures; the times come from the photos' own EXIF,
+which is why **🚗 Trip** turns **📍 Photo details** on for you. Both photos have
+to go on **one** message, because only the most recent image-bearing turn keeps
+its attachments — the photo-count guard is what makes that automatic instead of
+something you have to remember.
+
+**Setting one up.** ☰ → **Routines** → **＋ New routine**, or the ⚙ at the end of
+the chip strip. A routine has:
+
+| | |
+| --- | --- |
+| **Name** | what the chip says — keep it short, an emoji helps you find it |
+| **Prompt** | the text that goes into the box |
+| **Photos to attach** | 0–4. Send is refused below this, with a count |
+| **📍 Photo details** | force on, force off, or leave your toggle alone |
+| **🌐 Web access** | the same three choices |
+
+The two forcings are genuinely three-state. "Leave as it is" is the right answer
+for most routines — a routine that has no opinion about the web shouldn't be
+made to state one. A forcing lasts for **one turn**: the toggles go back where
+they were once the message is sent, or as soon as you tap the lit chip again.
+
+**Four to start with**, added by **☰ → Routines → ＋ Add the starter routines**
+(nothing is installed until you ask):
+
+- **🚗 Trip** — two odometer photos → distance, elapsed time, average speed
+- **📊 Before / after** — two photos of the same thing → what changed
+- **📄 Read this** — transcribe a label, receipt or serial number verbatim
+- **✍️ Plain words** — explain something jargon-free in under 200 words
+
+They're ordinary routines: edit them, rename them, delete them. Deleting one and
+pressing **＋ Add the starter routines** again brings it back.
+
+**What a routine actually is**, mechanically: the text becomes *your* message.
+It goes into the composer where you can read and edit it before sending ("this
+was the rental, it reads km"), and what the model receives is exactly what the
+bubble shows and what the history stores. That also means the routine's text is
+re-sent with every later turn of that thread, like anything else you type —
+**＋ New chat** clears it.
+
+> ⚠️ A saved routine is an instruction that gets delivered as though you had
+> typed it. Anyone who can reach this app can add or edit one. That's the same
+> exposure conversation history has, and the same answer applies: if this is
+> reachable by anything you don't control, turn Basic Auth on.
+
+One combination is worth knowing about: a routine that attaches photos **and**
+forces web access on sends the photo's coordinates to the search planner, whose
+queries go out to a search engine. The editor says so at the moment you pick it,
+`WEB_SHARE_LOCATION=0` prevents it, and no shipped routine does it.
+
+## Records
+
+A routine can keep a record of every run. Give it field names and each run
+writes a row you can look at, correct, and export.
+
+The trip case: **🚗 Trip** with `distance, elapsed, average speed`. Photograph
+the odometer twice, tap the chip, send — and under the reply a line appears:
+
+```
+🗒 Kept: distance 68 miles · elapsed 3 h 08 min · average speed 21.7 mph
+```
+
+☰ → **Records** shows the table, newest first:
+
+| When | Routine | distance | elapsed | average speed |
+| --- | --- | --- | --- | --- |
+| 07/08/26, 16:45 | 🚗 Trip | 68 miles | 3 h 08 min | 21.7 mph |
+
+**How the fields are found.** The model that just answered is asked to restate
+its own answer as those fields, as JSON — temperature 0, a hard token cap, and
+nothing invented: a field the answer didn't state comes back empty rather than
+guessed. Extraction rather than pattern-matching, because the answers are prose
+and no regex survives the next model.
+
+It is good, not beyond question, and the app doesn't pretend otherwise: **every
+cell is editable**. Tap it, type, and it saves. A log you can't correct is one
+you stop trusting.
+
+It never costs you an answer. The extraction runs after the reply has finished,
+not inside the stream, so a model that's asleep or that returns something
+unparseable costs you a row and nothing else. Nothing extractable means no row,
+rather than a blank one — a blank record is worse than none.
+
+**Getting it out.** Two links in the Records pane, and both are ordinary
+endpoints, so another machine can pull them:
+
+```bash
+curl -s http://nucbox:8070/api/records.csv > trips.csv
+curl -s http://nucbox:8070/api/records | jq '.records[].fields'
+curl -s 'http://nucbox:8070/api/records.csv?routine=🚗%20Trip'
+```
+
+The CSV timestamps are ISO 8601, so a spreadsheet and a database both parse
+them, and the columns are the union of every field across the log — a routine
+whose fields changed doesn't lose the older runs' data.
+
+Records outlive the routine that made them. Deleting **🚗 Trip** doesn't touch
+a year of trips; the routine's name is copied into each row rather than looked
+up, so the log stands on its own.
+
+> ⚠️ Records are stored in the same `chat.db` and are readable by anyone who can
+> reach the app — the same exposure conversation history has, and the same
+> answer: turn Basic Auth on if this is reachable by anything you don't control.
+
+## Photo details
+
+A photo carries a small record of its own making — when the shutter fired, which
+camera, and on a phone usually where you were standing. None of that is in the
+picture, so no vision model can tell you, however good it is at seeing.
+
+It also doesn't survive the upload. Every image is re-encoded through a canvas
+before it's sent, which produces clean pixels and nothing else: by the time an
+attachment reaches the server the metadata is already gone. So it has to be read
+in the browser, from the original file, before that step — which is what the
+**📍 Photo details** toggle turns on.
+
+With it on, ask the ordinary question:
+
+> **you:** where was this taken, and roughly what time?
+> **model:** Tuesday 14 July 2026, about half six in the evening, at 51.510000, -0.127500 — Westminster, London.
+
+What the model is actually given is one line per photo:
+
+```
+- Photo: taken Tuesday 14 July 2026 at 18:42 (evening) (UTC+01:00), at
+  51.510000, -0.127500 (give or take 8 m), 42 m above sea level, on a Google
+  Pixel 8 (Pixel 8 back camera), 4080×3072 (13 MP) as taken, 1/120 s, f/1.8,
+  6.7 mm, 24 mm equivalent, ISO 64, no flash
+```
+
+What gets read, when the photo has it:
+
+| | |
+| --- | --- |
+| **When** | date and time taken, the time-zone offset, and the GPS clock in UTC |
+| **Where** | latitude, longitude, altitude, and how far out the fix might be — both the recorded position error and the DOP, which is the satellite geometry at the time |
+| **Motion** | speed and the direction the camera was pointing |
+| **Camera** | make, model and lens; the pixel dimensions as taken |
+| **The shot** | shutter speed, aperture, focal length (and 35 mm equivalent), ISO, flash |
+| **The file** | orientation, the software that wrote it, artist and copyright |
+
+Anything missing is simply absent. It's rendered into a sentence rather than
+passed as raw fields, with the day of the week and the time of day named,
+because "was that the morning?" is the question people actually ask.
+
+The time zone is worth calling out. EXIF capture times carry none of their own,
+so two photos either side of a zone change are hours apart in a way nothing
+downstream can detect. Where the camera recorded an offset it's passed through;
+where it didn't but there's a GPS fix, the GPS clock is UTC and gives the same
+answer the long way round.
+
+### Seeing what was read
+
+**Tap a thumbnail** before you send and a sheet lists everything pulled out of
+that file, with the position linking to a map. That's the quickest way to answer
+"does this photo actually have a location in it?", and it needs no terminal.
+
+The thumbnail itself carries a summary: **🕘** a date was read, **📍** a location
+was, **📍̸** the camera asked for a fix and didn't get one, and a faint **·** for
+a file with neither. When a position is missing the app says why in the hint
+line, because the three reasons need different fixes.
+
+To check a file from the command line — including one that never reached the
+app — point the diagnostic at it. It runs the app's own parser, so what it
+prints is exactly what the app would read:
+
+```
+.venv/bin/python tools/check_photo.py ~/Downloads/odometer.jpg
+.venv/bin/python tools/check_photo.py --raw photo.jpg     # every tag, by number
+```
+
+`--raw` dumps each IFD entry before any interpretation. That's the one worth
+having when a photo demonstrably carries a position and the app reports none:
+it shows whether the GPS block is there and what's in it, which settles whether
+the file is unusual or the parser is wrong.
+
+The usual reasons a photo has no location:
+
+- **The camera never recorded one.** On Android that's Camera → Settings →
+  Location, and the camera app also needs the location permission; on iPhone,
+  Settings → Privacy → Location Services → Camera. This is by far the most
+  common answer, and the tool will say so — if the date and camera read fine,
+  the file is intact and simply has no position in it.
+- **It was stripped in transit.** Messaging apps re-encode, and Google Photos'
+  *share* link is not the original file — use *download* instead.
+- **It's a screenshot.** Those have no EXIF at all.
+- **The camera asked and got nothing.** A GPS block with no usable fix in it —
+  0, 0, which is the Gulf of Guinea — is common indoors and in a garage. It's
+  reported as *no position*, not as Null Island, but it's a different answer
+  from "the setting is off": wait for a fix rather than change a setting.
+
+A position that *is* there can still be poor. Where the file records a position
+error or a DOP, both are passed on in words — "give or take 8 m; a good fix,
+DOP 1.2" — so the model qualifies an answer rather than reading six decimal
+places as a doorstep.
+
+**On by default**, because on a box only you can reach — over Tailscale, say —
+that's the useful setting. Set `PHOTO_META=0` on the server and a fresh browser
+starts with it off instead. Either way the toggle is yours to flip, and your
+choice is remembered per browser; the server default only applies to a browser
+that has never touched it. The page starts it *off* and lets `/api/health` turn
+it on rather than the reverse, so `PHOTO_META=0` has no window in which a
+position is read anyway.
+
+**Web search is the one place it can leave the house.** The planner turns your
+message into queries and those go to DuckDuckGo or your SearxNG. The planner
+itself runs on your own hardware, so it's told the photo's date, camera and
+position — "what's this building?" is a much better search when the file says
+you were at 51.51, -0.13. But what it writes is sent onward, so a query *could*
+carry your location. If that's not what you want:
+
+```
+WEB_SHARE_LOCATION=0     # the planner keeps the date and camera, loses the position
+```
+
+The answering model gets the full version regardless — turning this off shapes
+the search, not the answer. And a photo only informs the search on the turn it
+was attached to; last week's photo stops steering today's queries.
+
+Where it goes:
+
+- to the model you're chatting with, on your own machine, as one system turn;
+- to the search planner, also on your machine, as a short note — see above;
+- into the conversation history, so reopening the thread and asking again works;
+- nowhere else.
+
+Camera names are treated as untrusted text like anything else the app didn't
+write — folded to one line, capped, and fenced — since a file can claim any
+make it likes.
+
 ## API endpoints
 
 | Method & path        | Purpose |
@@ -436,7 +706,17 @@ context for the rest of the chat — **New chat** clears it.
 | `GET /healthz`       | Plain `ok` health probe (stays open even when auth is on) |
 | `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
-| `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...] }` or `{ "prompt": "..." }`. Messages may carry `"images": ["<base64>"]` for vision models. |
+| `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...] }` or `{ "prompt": "..." }`. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
+| `GET /api/routines`  | Every saved routine, in strip order |
+| `POST /api/routines` | Save one — body `{ "name", "body", "photos"?, "web"?, "photo_meta"? }`. `web`/`photo_meta` are `true`/`false`/`null`, where null means "leave the toggle alone" |
+| `POST /api/routines/starters` | Install the shipped routines, skipping names already taken. Idempotent |
+| `PATCH /api/routines/<id>` | Change any subset of those fields. An absent key leaves it alone; an explicit `null` clears a forcing |
+| `DELETE /api/routines/<id>` | Remove one |
+| `GET /api/records`   | Kept records, newest first, plus the union of their columns. `?routine=` narrows it |
+| `POST /api/records`  | Restate an answer as fields and keep it — body `{ "answer", "fields": [...], "routine_name"?, "routine_id"?, "conversation_id"?, "model"? }`. Returns `{"record": null}` when nothing could be pulled out, which is an outcome rather than an error |
+| `PATCH /api/records/<id>` | Correct fields — body `{ "fields": {...} }`. Merges, so an edit never drops a column it didn't mention |
+| `DELETE /api/records/<id>` | Remove one |
+| `GET /api/records.csv` | The whole log as CSV, ISO timestamps, `?routine=` narrows it |
 | `GET /api/voice/models` | Available + downloadable Vosk speech models |
 | `POST /api/voice/download` | Download a catalog model — body `{ "id": "fr" }` |
 | `POST /api/transcribe` | Speech-to-text: POST WAV audio (`?model=<id>` optional), returns `{ "text": ... }` |
@@ -466,6 +746,7 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `authz.py`        | Optional HTTP Basic Auth |
 | `voice.py`        | Offline speech-to-text with Vosk |
 | `web.py`          | Optional web fetching/search used to ground answers |
-| `store.py`        | SQLite conversation history |
+| `store.py`        | SQLite conversation history, routines and records |
+| `records.py`      | Restating a routine's answer as the fields it declared |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |

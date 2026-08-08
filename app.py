@@ -17,11 +17,14 @@ Configuration is entirely via environment variables — see config.py / authz.py
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import socket
 import sqlite3
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -31,6 +34,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import authz
+import records
 import store
 import voice
 import web
@@ -44,7 +48,9 @@ from config import (
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
+    get_photo_meta_default,
     get_planner_model,
+    get_share_photo_location,
     get_vision_model,
     get_web_follow_links,
     get_web_max_docs,
@@ -182,6 +188,9 @@ def health() -> Any:
             # The browser trims image payloads before sending, so it needs
             # the same number the server would use.
             "image_turns": get_image_turns(),
+            # Whether a browser that has never touched the toggle starts with
+            # photo details on, so the deployment decides rather than the page.
+            "photo_meta": get_photo_meta_default(),
         }
     )
 
@@ -240,8 +249,10 @@ def _store_unavailable(exc: sqlite3.Error) -> Any:
         return jsonify({"error": "Internal error in the history layer."}), 500
     logger.error("History database error: %s", exc)
     return jsonify({
-        "error": "Conversation history is unavailable — the database could not "
-                 "be written. Chatting still works; nothing is being saved.",
+        # "Saved data", not "conversation history": routines live in the same
+        # file behind the same write probe, and this is what they report too.
+        "error": "Saved data is unavailable — the database could not be "
+                 "written. Chatting still works; nothing is being saved.",
         "history": False,
     }), 503
 
@@ -311,9 +322,214 @@ def api_conversation_add_message(convo_id: str) -> Any:
         return jsonify({"error": "'role' must be 'user' or 'assistant'"}), 400
     images = body.get("images") if isinstance(body.get("images"), list) else None
     sources = body.get("sources") if isinstance(body.get("sources"), list) else None
-    if not store.add_message(convo_id, role, str(body.get("content") or ""), images, sources):
+    meta = body.get("image_meta") if isinstance(body.get("image_meta"), list) else None
+    if not store.add_message(convo_id, role, str(body.get("content") or ""), images,
+                             sources, meta):
         return jsonify({"error": "No such conversation"}), 404
     return jsonify({"ok": True})
+
+
+# -------------------------------------------------------------------
+# Routines — saved prompts
+# -------------------------------------------------------------------
+
+# What a PATCH is allowed to change. Membership is tested against the request
+# body rather than read with .get(), because null is a real value here: absent
+# means "leave it alone", explicit null means "stop forcing this toggle".
+_ROUTINE_FIELDS = ("name", "body", "photos", "web", "photo_meta", "record")
+
+
+def _tri(value: Any) -> Optional[bool]:
+    """Three-state: absent or null means leave the toggle where the user has it."""
+    return None if value is None else bool(value)
+
+
+def _count(value: Any) -> int:
+    """A photo count from a request body. The store clamps the range.
+
+    OverflowError as well as the obvious two: Python's json accepts
+    ``Infinity``, and ``int(inf)`` raises rather than returning anything.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+@app.route("/api/routines", methods=["GET"])
+def api_routines() -> Any:
+    """Every saved routine, in strip order."""
+    return jsonify({"routines": store.list_routines()})
+
+
+@app.route("/api/routines", methods=["POST"])
+def api_routine_create() -> Any:
+    """Save a routine and return its record."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    name = str(body.get("name") or "").strip()
+    text = str(body.get("body") or "").strip()
+    if not name:
+        return jsonify({"error": "Missing 'name'"}), 400
+    if not text:
+        return jsonify({"error": "Missing 'body'"}), 400
+    record = body.get("record")
+    return jsonify(store.create_routine(
+        name, text, _count(body.get("photos")),
+        _tri(body.get("web")), _tri(body.get("photo_meta")),
+        record if isinstance(record, list) else None,
+    ))
+
+
+@app.route("/api/routines/starters", methods=["POST"])
+def api_routine_starters() -> Any:
+    """Install the shipped routines, skipping any name already taken.
+
+    The JSON requirement is the point of the check, not a formality: it is the
+    only routines route that reads no body, so without it a plain HTML form on
+    any page could POST here cross-origin — a form post is a "simple" request
+    and is never preflighted. Every other route here is already unreachable
+    that way, by needing JSON or a method a form cannot send.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Expected a JSON request"}), 415
+    return jsonify({"routines": store.create_starters()})
+
+
+@app.route("/api/routines/<routine_id>", methods=["PATCH"])
+def api_routine_update(routine_id: str) -> Any:
+    """Change some of a routine, returning the whole normalised record."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    fields: Dict[str, Any] = {}
+    for field in _ROUTINE_FIELDS:
+        if field not in body:
+            continue
+        if field in ("name", "body"):
+            fields[field] = str(body[field] or "").strip()
+        elif field == "photos":
+            fields[field] = _count(body[field])
+        elif field == "record":
+            fields[field] = body[field] if isinstance(body[field], list) else []
+        else:
+            fields[field] = _tri(body[field])
+    if not fields:
+        return jsonify({"error": "Nothing to update"}), 400
+    if not fields.get("name", "x") or not fields.get("body", "x"):
+        return jsonify({"error": "A routine needs a name and a prompt"}), 400
+    routine = store.update_routine(routine_id, fields)
+    if routine is None:
+        return jsonify({"error": "No such routine"}), 404
+    return jsonify({"ok": True, "routine": routine})
+
+
+@app.route("/api/routines/<routine_id>", methods=["DELETE"])
+def api_routine_delete(routine_id: str) -> Any:
+    """Remove a routine."""
+    if not store.delete_routine(routine_id):
+        return jsonify({"error": "No such routine"}), 404
+    return jsonify({"ok": True})
+
+
+# -------------------------------------------------------------------
+# Records — what a routine run wrote down
+# -------------------------------------------------------------------
+
+
+@app.route("/api/records", methods=["GET"])
+def api_records() -> Any:
+    """Kept records, newest first. ``?routine=`` narrows to one."""
+    rows = store.list_records(str(request.args.get("routine") or ""))
+    return jsonify({"records": rows, "columns": store.record_columns(rows)})
+
+
+@app.route("/api/records", methods=["POST"])
+def api_record_create() -> Any:
+    """Restate a routine's answer as its declared fields, and keep it.
+
+    Called by the browser once the reply has finished, rather than from inside
+    the streaming generator: that path is delicate, and a record is worth less
+    than the answer already on screen. A failure here is a 200 with no record.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    answer = str(body.get("answer") or "").strip()
+    fields = body.get("fields")
+    if not answer:
+        return jsonify({"error": "Missing 'answer'"}), 400
+    if not isinstance(fields, list) or not fields:
+        return jsonify({"error": "Missing 'fields'"}), 400
+
+    model = str(body.get("model") or "") or get_default_model()
+    extracted = records.extract(answer, [str(f) for f in fields], model)
+    kept = store.add_record(
+        str(body.get("routine_name") or "Routine"), extracted,
+        str(body.get("routine_id") or "") or None,
+        str(body.get("conversation_id") or "") or None,
+    )
+    # 200 either way. "Nothing could be pulled out of that answer" is an
+    # outcome, not an error, and the reply it came from is still on screen.
+    return jsonify({"record": kept})
+
+
+@app.route("/api/records/<record_id>", methods=["PATCH"])
+def api_record_update(record_id: str) -> Any:
+    """Correct a record. The extraction is good, not beyond question."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("fields"), dict):
+        return jsonify({"error": "Missing 'fields'"}), 400
+    record = store.update_record(record_id, body["fields"])
+    if record is None:
+        return jsonify({"error": "No such record"}), 404
+    return jsonify({"ok": True, "record": record})
+
+
+@app.route("/api/records/<record_id>", methods=["DELETE"])
+def api_record_delete(record_id: str) -> Any:
+    """Remove one record."""
+    if not store.delete_record(record_id):
+        return jsonify({"error": "No such record"}), 404
+    return jsonify({"ok": True})
+
+
+# Excel and Sheets read a leading =, + or @ as a formula, so a value that
+# arrived here as text becomes something that runs when the file is opened.
+# Not "-": a negative number is an ordinary reading — a temperature, a
+# correction — and quoting it would corrupt the log to prevent nothing, since
+# a spreadsheet only treats "-" as a formula when what follows is not a number.
+_CSV_FORMULA = ("=", "+", "@", "\t", "\r")
+
+
+def _csv_safe(value: str) -> str:
+    """One cell, with a leading formula character defused."""
+    text = str(value or "")
+    return "'" + text if text.startswith(_CSV_FORMULA) else text
+
+
+@app.route("/api/records.csv", methods=["GET"])
+def api_records_csv() -> Any:
+    """The whole log as CSV, for a spreadsheet or another machine's importer.
+
+    A real endpoint rather than a download built in the browser: pulling this
+    with curl from wherever the records are meant to end up is the point.
+    """
+    rows = store.list_records(str(request.args.get("routine") or ""))
+    columns = store.record_columns(rows)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["taken_at", "routine"] + columns)
+    for row in rows:
+        stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
+        writer.writerow([stamp, _csv_safe(row["routine_name"])] +
+                        [_csv_safe(row["fields"].get(name, "")) for name in columns])
+    return Response(
+        buffer.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="records.csv"'},
+    )
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -343,7 +559,7 @@ def api_chat() -> Any:
     # Non-streaming path — single JSON object.
     if body.get("stream") is False:
         try:
-            reply = ollama_chat(model, messages)
+            reply = ollama_chat(model, web.strip_image_meta(messages))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 502
         return jsonify({"model": model, "reply": reply})
@@ -360,12 +576,31 @@ def api_chat() -> Any:
             # Always send num_ctx, not only on web turns: changing a model's
             # load options mid-conversation makes Ollama reload the runner and
             # throw away the KV cache.
+            options = {"num_ctx": get_num_ctx()}
+
+            # A photo's own record of when and where it was taken. Even a
+            # vision model needs telling: the browser re-encodes every upload
+            # through a canvas, so the pixels that arrive here carry no EXIF at
+            # all and no model, however good its eyes, can read it off them.
+            #
+            # Read it once and then take it off the messages, so that after this
+            # point the facts travel as prose that was deliberately put
+            # somewhere, rather than as a JSON field riding along everywhere.
+            photo_meta = web.conversation_image_meta(messages)
+            meta_context = web.image_metadata(photo_meta)
+            # The planner gets a shorter version. It runs on your own hardware,
+            # but what it writes is sent to a search engine — so the position is
+            # the one part of this that can leave the house, and it has its own
+            # switch (WEB_SHARE_LOCATION).
+            photo_note = web.metadata_note(photo_meta,
+                                           with_location=get_share_photo_location())
+            turns = web.strip_image_meta(messages)
+
             # Only the most recent image-bearing turn keeps its payload. A
             # vision model otherwise re-reads every screenshot in the thread on
             # every turn, and turn six is almost never about turn one's image.
             # Earlier turns keep their text, so the conversation still reads.
-            convo = web.keep_recent_images(messages, keep_turns=get_image_turns())
-            options = {"num_ctx": get_num_ctx()}
+            convo = web.keep_recent_images(turns, keep_turns=get_image_turns())
 
             # An image attached to a model that cannot see used to force a
             # switch, which meant giving up your best model exactly when you
@@ -374,7 +609,7 @@ def api_chat() -> Any:
             transcript = None
             # Any image still in the thread, not only a newly attached one, so a
             # follow-up question about the same screenshot keeps its context.
-            images = web.conversation_images(messages)
+            images = web.conversation_images(turns)
             if images and not _model_has_vision(model):
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
@@ -404,12 +639,16 @@ def api_chat() -> Any:
                         context = web.image_failed_context()
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
-                    convo = web.with_context(web.strip_images(messages), context)
+                    convo = web.with_context(web.strip_images(turns), context)
+
+            if meta_context:
+                convo = web.with_context(convo, meta_context)
 
             if use_web:
                 documents: List[Dict[str, str]] = []
                 outcome: Dict[str, bool] = {}
-                for line in _gather_web(model, messages, documents, transcript, outcome):
+                for line in _gather_web(model, turns, documents, transcript, outcome,
+                                        photo_note=photo_note):
                     yield line
                 if not documents and outcome.get("attempted"):
                     # Retrieval ran and produced nothing. Say so, or the answer
@@ -497,6 +736,7 @@ def _gather_web(
     documents: List[Dict[str, str]],
     transcript: Optional[str] = None,
     outcome: Optional[Dict[str, bool]] = None,
+    photo_note: str = "",
 ) -> Any:
     """Collect web documents for this turn, yielding progress lines as it goes.
 
@@ -564,7 +804,11 @@ def _gather_web(
                     yield _line({"status": "Could not read the image; searching without it."})
 
     yield _line({"status": "Working out what to search for…"})
-    queries = web.plan_searches(messages, model, image_note=image_note)
+    # Only alongside an image attached to *this* turn, for the same reason the
+    # transcription is gated that way: last week's photo should not still be
+    # steering today's queries.
+    queries = web.plan_searches(messages, model, image_note=image_note,
+                                photo_note=photo_note if images else "")
     if queries is None:
         yield _line({"status": "Could not plan a search; answering without one."})
         return

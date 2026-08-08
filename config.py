@@ -169,6 +169,29 @@ def get_web_follow_links() -> int:
     return max(0, min(4, int(_number("WEB_FOLLOW_LINKS", 2))))
 
 
+def get_photo_meta_default() -> bool:
+    """Whether a browser that has never chosen starts with photo details on.
+
+    The date, camera and GPS position a photo carries are read in the browser
+    and sent with it. On a box only you can reach — over Tailscale, say — that
+    is plainly useful and on is the right default. Set ``PHOTO_META=0`` where
+    that is not true; a browser that has used the toggle keeps its own answer
+    either way.
+    """
+    return _flag("PHOTO_META", "1")
+
+
+def get_share_photo_location() -> bool:
+    """Whether a photo's coordinates may inform a web search.
+
+    The planner runs on your own hardware, but what it writes is sent to a
+    search engine — so this is the one setting on which a photo's position can
+    leave the house. ``WEB_SHARE_LOCATION=0`` keeps the date and camera in the
+    planner's view and drops the position.
+    """
+    return _flag("WEB_SHARE_LOCATION", "1")
+
+
 def get_image_turns() -> int:
     """How many recent image-bearing turns keep their attachments.
 

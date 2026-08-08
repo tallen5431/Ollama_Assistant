@@ -180,6 +180,87 @@ _PAGE = """<!doctype html>
       .convo-act:hover { color:var(--text); }
       .convo-empty { color:var(--muted); font-size:0.8rem; margin:0.4rem 0.2rem; }
 
+      /* A comparison table is wider than a phone more often than not, so it
+         scrolls inside its own box. Letting it widen the bubble instead would
+         put the whole conversation on a horizontal scrollbar. */
+      .tablewrap { overflow-x:auto; margin:0.6rem 0; }
+      .bubble.md table { border-collapse:collapse; font-size:0.85rem; min-width:100%; }
+      .bubble.md th, .bubble.md td {
+        border:1px solid var(--border); padding:0.3rem 0.55rem;
+        text-align:left; vertical-align:top;
+      }
+      .bubble.md th { background:var(--panel2); font-weight:600; white-space:nowrap; }
+      .bubble.md tbody tr:nth-child(even) td { background:rgba(255,255,255,0.02); }
+      .bubble.md hr { border:0; border-top:1px solid var(--border); margin:0.9rem 0; }
+
+      /* One row that scrolls sideways rather than four rows that eat a phone
+         screen — the strip has to stay a single line at ten routines. */
+      .chips { display:flex; gap:0.35rem; flex:1 1 auto; min-width:0;
+               overflow-x:auto; scrollbar-width:none; }
+      .chips::-webkit-scrollbar { display:none; }
+      .chip { flex:0 0 auto; white-space:nowrap; font-size:0.78rem;
+              padding:0.35rem 0.65rem; border-radius:999px;
+              background:var(--panel2); color:var(--muted); }
+      .chip.active { background:var(--accent); border-color:var(--accent);
+                     color:#fff; font-weight:600; }
+      .chip-edit { flex:0 0 auto; padding:0.35rem 0.5rem; font-size:0.8rem; color:var(--muted); }
+      .drawer-tabs { display:flex; gap:0.3rem; }
+      .tab { font-size:0.85rem; padding:0.25rem 0.6rem; color:var(--muted); }
+      .tab.active { color:var(--text); border-color:var(--accent); }
+      #convoPane, #routinePane { display:flex; flex-direction:column;
+                                 flex:1 1 auto; min-width:0; min-height:0; }
+      #routineList { overflow-y:auto; display:flex; flex-direction:column; gap:0.3rem; }
+      #routineEdit { display:flex; flex-direction:column; gap:0.35rem; overflow-y:auto; }
+      #routineEdit label { font-size:0.72rem; color:var(--muted); margin-top:0.2rem; }
+      #routineEdit input, #routineEdit select { width:100%; max-width:none; }
+      #routineEdit input { font-family:inherit; font-size:0.9rem;
+        background:var(--panel2); color:var(--text);
+        border:1px solid var(--border); border-radius:0.5rem; padding:0.4rem 0.6rem; }
+      #routineEdit textarea { min-height:9rem; max-height:none; font-size:0.85rem; }
+      .routine-acts { display:flex; gap:0.4rem; margin-top:0.5rem; }
+      .routine-acts button { flex:1 1 auto; }
+      /* Whether a photo's own timestamp actually came through. The failure this
+         guards is silent otherwise: with photo details off there is no EXIF, no
+         metadata turn, and an answer to half the question with nothing on
+         screen to say why. */
+      .thumb .stamp.muted { opacity:0.55; }
+      /* A sheet from the bottom rather than a side drawer: it is reached from
+         the composer, which is where a thumb already is on a phone. */
+      .sheet {
+        position:fixed; left:0; right:0; bottom:0; z-index:22; max-height:70vh;
+        overflow-y:auto; background:var(--panel);
+        border-top:1px solid var(--border);
+        border-radius:0.9rem 0.9rem 0 0; padding:0.75rem 0.9rem 1.1rem;
+      }
+      .metarow { display:flex; gap:0.6rem; padding:0.28rem 0;
+                 border-bottom:1px solid var(--border); font-size:0.82rem; }
+      .metarow:last-child { border-bottom:0; }
+      .metaname { flex:0 0 9rem; color:var(--muted); }
+      .metarow a { color:var(--accent); word-break:break-all; }
+      /* A line under the reply saying what was kept, so a record appearing is
+         visible when it happens rather than discovered in a drawer later. */
+      .kept { font-size:0.72rem; color:var(--muted); margin:0.2rem 0 0 0.2rem;
+              cursor:pointer; }
+      .kept:hover { color:var(--text); }
+      #recordList { overflow:auto; }
+      #recordList .editable { min-width:5rem; cursor:text; }
+      #recordList .editable:focus { outline:1px solid var(--accent); }
+      #recordList table { font-size:0.78rem; }
+      #recordList a.drawer-new { text-align:center; text-decoration:none;
+                                 padding:0.4rem; color:var(--text); }
+      .thumb { cursor:pointer; }
+      .thumb .stamp { position:absolute; bottom:0; left:0; padding:0 0.2rem;
+        font-size:0.6rem; line-height:1.3; background:rgba(0,0,0,0.65);
+        border-radius:0 0.35rem 0 0; }
+
+      /* While the keyboard is up, everything above the composer goes away —
+         see fitFooter(). Not display:none on the composer itself: the point is
+         to give the conversation back its screen, not to hide what you are
+         typing into. */
+      body.typing #voicebar, body.typing #togglebar,
+      body.typing #routinebar, body.typing #insecureNote { display:none; }
+      body.typing .hint { display:none; }
+
       /* Phones: reclaim vertical space and stop the header wrapping. */
       @media (max-width: 640px) {
         header { gap:0.5rem; padding:0.5rem 0.7rem; flex-wrap:nowrap; }
@@ -202,6 +283,19 @@ _PAGE = """<!doctype html>
         button.primary { padding:0.5rem 0.7rem; }
         .voicebar { gap:0.4rem 0.6rem; }
         #webnote { display:none; }   /* the tooltip covers it */
+        #routinebar, #togglebar { flex-wrap:nowrap; overflow-x:auto;
+                                   scrollbar-width:none; }
+        #togglebar::-webkit-scrollbar { display:none; }
+        #togglebar .voicebar-check { flex:0 0 auto; white-space:nowrap; }
+        #exifnote, #webnote { display:none; }   /* the tooltips carry these */
+        /* Every control here measured under 44px, which is the minimum every
+           platform guideline asks for; the checkbox rows were 14px tall. The
+           padding is on the label rather than the box, because the label is
+           what a thumb actually lands on. */
+        .chip { padding:0.6rem 0.8rem; min-height:44px; display:flex; align-items:center; }
+        .voicebar-check { min-height:44px; }
+        .composer button { min-height:44px; padding:0.5rem 0.6rem; }
+        #menu, #newChat { min-height:40px; }
       }
       .insecure { margin:0 0.2rem 0.5rem; }
       .insecure a { color:var(--accent); word-break:break-all; }
@@ -211,11 +305,74 @@ _PAGE = """<!doctype html>
     <div class="backdrop" id="backdrop" hidden></div>
     <aside class="drawer" id="drawer" hidden>
       <div class="drawer-head">
-        <strong>Conversations</strong>
+        <div class="drawer-tabs">
+          <button id="tabChats" class="tab active" type="button">Chats</button>
+          <button id="tabRoutines" class="tab" type="button">Routines</button>
+          <button id="tabRecords" class="tab" type="button">Records</button>
+        </div>
         <button id="drawerClose" title="Close">✕</button>
       </div>
-      <button class="drawer-new" id="drawerNew" type="button">＋ New chat</button>
-      <div id="convoList"></div>
+      <div id="convoPane">
+        <button class="drawer-new" id="drawerNew" type="button">＋ New chat</button>
+        <div id="convoList"></div>
+      </div>
+      <!-- A div, not a form: a form in this page can submit and navigate away.
+           Each pane owns its own ＋ button, so there is never a question about
+           which section it acts on. -->
+      <div id="routinePane" hidden>
+        <button class="drawer-new" id="routineNew" type="button">＋ New routine</button>
+        <div id="routineList"></div>
+        <div id="routineEdit" hidden>
+          <label for="rName">Name</label>
+          <input id="rName" maxlength="40" placeholder="🚗 Trip">
+          <label for="rBody">Prompt</label>
+          <!-- maxlength to match the store's cap: the operative sentence in a
+               prompt is usually the last one, and cutting it server-side in
+               silence changes what the routine does on every later use. -->
+          <textarea id="rBody" rows="8" spellcheck="false" maxlength="4000"></textarea>
+          <label for="rPhotos">Photos to attach</label>
+          <select id="rPhotos">
+            <option value="0">No photos</option>
+            <option value="1">1 photo</option>
+            <option value="2">2 photos</option>
+            <option value="3">3 photos</option>
+            <option value="4">4 photos</option>
+          </select>
+          <label for="rMeta">📍 Photo details</label>
+          <select id="rMeta">
+            <option value="">Leave as it is</option>
+            <option value="1">Turn on for this routine</option>
+            <option value="0">Turn off for this routine</option>
+          </select>
+          <label for="rWeb">🌐 Web access</label>
+          <select id="rWeb">
+            <option value="">Leave as it is</option>
+            <option value="1">Turn on for this routine</option>
+            <option value="0">Turn off for this routine</option>
+          </select>
+          <label for="rRecord">Keep a record of each run</label>
+          <input id="rRecord" placeholder="distance, elapsed, average speed">
+          <p class="convo-empty" id="rRecordNote">Field names, comma separated.
+            After every run the model restates its own answer as these, and the
+            row lands in Records. Leave empty to keep nothing.</p>
+          <p class="convo-empty" id="routineWarn"></p>
+          <div class="routine-acts">
+            <button class="primary" id="rSave" type="button">Save</button>
+            <button id="rCancel" type="button">Cancel</button>
+            <button class="danger" id="rDelete" type="button" hidden>Delete</button>
+          </div>
+        </div>
+      </div>
+      <div id="recordPane" hidden>
+        <div id="recordList"></div>
+      </div>
+    </aside>
+    <aside class="sheet" id="photometa" hidden>
+      <div class="drawer-head">
+        <strong>📍 Photo details</strong>
+        <button id="metaClose" title="Close">✕</button>
+      </div>
+      <div id="metaBody"></div>
     </aside>
 
     <header>
@@ -239,22 +396,35 @@ _PAGE = """<!doctype html>
         <div class="voicebar" id="voicebar" hidden>
           <span class="voicebar-label">🎙 Voice</span>
           <select id="voiceModel" title="Speech recognition language"></select>
-          <label class="voicebar-check" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
-            <input type="checkbox" id="headset" checked> 🎧 Headphones
-          </label>
-          <label class="voicebar-check" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
-            <input type="checkbox" id="autosend"> ⚡ Auto-send
-          </label>
-          <label class="voicebar-check" title="Keep the mic open and treat a pause in speech as the end of a message. With Auto-send on, this runs a whole conversation from one tap.">
-            <input type="checkbox" id="continuous"> 🔁 Continuous
-          </label>
         </div>
         <p class="hint insecure" id="insecureNote" hidden></p>
-        <div class="voicebar" id="webbar" hidden>
-          <label class="voicebar-check" title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
-            <input type="checkbox" id="web"> 🌐 Web access
+        <!-- One row, not two. Each toggle hides independently — web access has
+             a server-side kill switch — but two single-checkbox rows cost 48px
+             of a 844px phone before anything has been typed. -->
+        <div class="voicebar" id="togglebar">
+          <label class="voicebar-check" id="webbar" hidden title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
+            <input type="checkbox" id="web"> 🌐 Web
+          </label>
+          <label class="voicebar-check" id="exifbar" hidden title="Read the date, camera and GPS position a photo carries, and tell the model. The app re-encodes images, which strips this, so turning it off means the location never leaves your phone at all. Set PHOTO_META=0 on the server to make off the default.">
+            <input type="checkbox" id="exif"> 📍 Photo details
+          </label>
+          <label class="voicebar-check voicesetting" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
+            <input type="checkbox" id="headset" checked> 🎧 Headphones
+          </label>
+          <label class="voicebar-check voicesetting" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
+            <input type="checkbox" id="autosend"> ⚡ Auto-send
+          </label>
+          <label class="voicebar-check voicesetting" title="Keep the mic open and treat a pause in speech as the end of a message. With Auto-send on, this runs a whole conversation from one tap.">
+            <input type="checkbox" id="continuous"> 🔁 Continuous
           </label>
           <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
+        </div>
+        <!-- Above the thumbs and the composer, so the footer reads downwards
+             as: pick a routine, attach its photos, write the message. -->
+        <div class="voicebar" id="routinebar" hidden>
+          <div class="chips" id="routineChips"></div>
+          <button class="chip chip-edit" id="routineEditBtn" type="button"
+                  title="Add or change a saved prompt">⚙</button>
         </div>
         <div class="thumbs" id="thumbs" hidden></div>
         <div class="composer">
@@ -286,6 +456,12 @@ _PAGE = """<!doctype html>
       const continuousEl = document.getElementById("continuous");
       const webEl    = document.getElementById("web");
       const webBar   = document.getElementById("webbar");
+      const exifEl   = document.getElementById("exif");
+      const exifBar  = document.getElementById("exifbar");
+      // Declared with the element, not with the toggle wiring further down:
+      // toAttachment() reads it, and a "let" below its use is a temporal
+      // dead zone waiting for someone to call that function earlier.
+      let exifOn = false;
       const insecureNote = document.getElementById("insecureNote");
       const drawerEl = document.getElementById("drawer");
       const backdropEl = document.getElementById("backdrop");
@@ -301,12 +477,45 @@ _PAGE = """<!doctype html>
       const dotEl    = document.getElementById("dot");
       const statusEl = document.getElementById("statusText");
       const hintEl   = document.getElementById("hint");
+      const metaEl    = document.getElementById("photometa");
+      const metaBodyEl = document.getElementById("metaBody");
+      const routineBar = document.getElementById("routinebar");
+      const routineChipsEl = document.getElementById("routineChips");
+      const routineEditBtn = document.getElementById("routineEditBtn");
+      const convoPaneEl = document.getElementById("convoPane");
+      const routinePaneEl = document.getElementById("routinePane");
+      const routineListEl = document.getElementById("routineList");
+      const routineEditEl = document.getElementById("routineEdit");
+      const routineNewBtn = document.getElementById("routineNew");
+      const routineWarnEl = document.getElementById("routineWarn");
+      const tabChatsEl = document.getElementById("tabChats");
+      const tabRoutinesEl = document.getElementById("tabRoutines");
+      const rNameEl  = document.getElementById("rName");
+      const rBodyEl  = document.getElementById("rBody");
+      const rPhotosEl = document.getElementById("rPhotos");
+      const rWebEl   = document.getElementById("rWeb");
+      const rMetaEl  = document.getElementById("rMeta");
+      const rSaveBtn  = document.getElementById("rSave");
+      const rRecordEl = document.getElementById("rRecord");
+      const recordPaneEl = document.getElementById("recordPane");
+      const recordListEl = document.getElementById("recordList");
+      const tabRecordsEl = document.getElementById("tabRecords");
+      const rDeleteBtn = document.getElementById("rDelete");
 
       let messages = [];       // conversation sent to /api/chat for context
       let busy = false;
       let controller = null;   // AbortController for the in-flight stream
       let pendingImages = [];  // [{ b64, url }] attached but not yet sent
       let pendingAutoSend = false;  // an utterance arrived while busy
+      let routines = [];       // the saved list, held so a chip tap is instant
+      // The routine picked but not yet sent: { routine, web, exif }, where
+      // web/exif hold the checkbox values its forcing overwrote, or null when
+      // it forced nothing. A routine is a stamp on one turn, not a mode — this
+      // is the only state it has, and clearing it is the only thing newChat and
+      // loadConversation have to remember. Declared here with exifOn for the
+      // same reason: renderThumbs() and addAttachment() read it.
+      let pendingRoutine = null;
+      let editingRoutineId = null;   // open in the editor; "" for a new one
 
       function setStatus(state, text) {
         dotEl.className = "dot" + (state ? " " + state : "");
@@ -371,6 +580,93 @@ _PAGE = """<!doctype html>
       const MD_SENTINEL = String.fromCharCode(1);
       const MD_SLOT = new RegExp(MD_SENTINEL + "(\\\\d+)" + MD_SENTINEL, "g");
 
+      // ---- Maths written as TeX ----
+      // Models reach for LaTeX the moment an answer contains arithmetic, and
+      // this page has no maths renderer: no build step and nothing from a CDN,
+      // so KaTeX is not on the table for a handful of subtractions. Unwrapping
+      // it into plain text gives what a person reads anyway — "68 / 3.13 ≈ 21.7"
+      // beats a raw \\frac on a phone, and beats it by a mile unrendered.
+      const TEX_SYMBOLS = [
+        [/\\\\approx/g, "≈"], [/\\\\times/g, "×"], [/\\\\cdot/g, "·"],
+        [/\\\\div/g, "÷"], [/\\\\pm/g, "±"], [/\\\\mp/g, "∓"],
+        [/\\\\leq?\\b/g, "≤"], [/\\\\geq?\\b/g, "≥"], [/\\\\neq/g, "≠"],
+        [/\\\\rightarrow/g, "→"], [/\\\\to\\b/g, "→"], [/\\\\infty/g, "∞"],
+        [/\\\\degree|\\\\deg\\b/g, "°"],
+      ];
+
+      function texToText(body) {
+        let out = body;
+        // \\text{…} and its relatives are pure wrapping; \\frac wants to become a
+        // division that reads left to right. Repeated because these nest.
+        for (let pass = 0; pass < 4; pass++) {
+          out = out.replace(/\\\\(?:text|mathrm|mathbf|mathit|operatorname)\\s*\\{([^{}]*)\\}/g, "$1");
+          out = out.replace(/\\\\(?:d|t)?frac\\s*\\{([^{}]*)\\}\\s*\\{([^{}]*)\\}/g, "($1) / ($2)");
+          out = out.replace(/\\\\sqrt\\s*\\{([^{}]*)\\}/g, "√($1)");
+        }
+        for (const pair of TEX_SYMBOLS) out = out.replace(pair[0], pair[1]);
+        out = out.replace(/\\\\left|\\\\right/g, "")
+                 .replace(/\\\\[,;:!]/g, " ")
+                 .replace(/\\\\\\\\/g, " ")
+                 .replace(/\\\\([%$&#_{}])/g, "$1")
+                 // Brackets the fraction rule added, dropped again where neither
+                 // side needs them: "(68) / (3.13)" is worse than "68 / 3.13".
+                 .replace(/\\(([^()\\s]+)\\) \\/ \\(([^()\\s]+)\\)/g, "$1 / $2");
+        return out.replace(/\\s+/g, " ").trim();
+      }
+
+      // Whether a $…$ pair is maths or two prices in one sentence. Both turn up
+      // constantly and they look identical to a regex, so this leans on the one
+      // convention TeX actually has: the delimiters hug their contents.
+      function looksLikeMaths(body) {
+        // A backslash settles it — no price contains \\frac or \\approx.
+        if (body.indexOf("\\\\") >= 0) return true;
+        // "It cost $100,407 and then $5 more" — the span between the two signs
+        // is prose, and prose ends in a space. TeX never opens or closes on one.
+        if (/^\\s|\\s$/.test(body)) return false;
+        // "$5-$10" is a price range: the span ends on the operator rather than
+        // on something for it to operate on.
+        if (/^[-+*/=<>,^_]|[-+*/=<>,^_]$/.test(body)) return false;
+        // Past that it has to actually do something to be maths at all, or
+        // "$100,407$" alone would lose its signs on a guess.
+        return /[-+*/=<>^_≈±×÷]/.test(body);
+      }
+
+      function unTex(t) {
+        return t.replace(
+          /\\$\\$([\\s\\S]+?)\\$\\$|\\$([^$\\n]+?)\\$|\\\\\\(([\\s\\S]+?)\\\\\\)|\\\\\\[([\\s\\S]+?)\\\\\\]/g,
+          function (whole, a, b, c, d) {
+            const dollars = a !== undefined ? a : b;
+            if (dollars !== undefined) {
+              if (!looksLikeMaths(dollars)) return whole;
+              return texToText(dollars);
+            }
+            // \\( \\) and \\[ \\] say what they are; nothing else uses them.
+            return texToText(c !== undefined ? c : d);
+          });
+      }
+
+      // ---- Tables ----
+      // A model asked to compare two things reaches for a pipe table almost
+      // every time, and without this the whole grid came out as one paragraph
+      // of pipes and dashes joined by <br> — which is how the odometer answer
+      // arrived: correct numbers, unreadable layout.
+      const TABLE_DIVIDER_RE = /^\\s*\\|?(?:\\s*:?-{1,}:?\\s*\\|)+\\s*:?-{1,}:?\\s*\\|?\\s*$/;
+
+      function tableCells(line) {
+        let row = line.trim();
+        // The outer pipes are optional in the format models actually emit.
+        if (row.slice(0, 1) === "|") row = row.slice(1);
+        if (row.slice(-1) === "|") row = row.slice(0, -1);
+        return row.split("|").map(function (c) { return c.trim(); });
+      }
+
+      function alignOf(spec) {
+        const left = spec.slice(0, 1) === ":", right = spec.slice(-1) === ":";
+        if (left && right) return " style=\\"text-align:center\\"";
+        if (right) return " style=\\"text-align:right\\"";
+        return "";
+      }
+
       function inlineMd(t) {
         // Lift code spans out before anything else runs. Applying the emphasis
         // and link rules to inlineMd's own output means markdown *inside* a code
@@ -381,6 +677,7 @@ _PAGE = """<!doctype html>
           spans.push(code);
           return MD_SENTINEL + (spans.length - 1) + MD_SENTINEL;
         });
+        out = unTex(out);
         // Emphasis needs a non-space character inside both delimiters, as
         // CommonMark requires. Without that, prose like "SELECT * FROM a …
         // SELECT * FROM b" turns everything between two unrelated asterisks
@@ -436,7 +733,8 @@ _PAGE = """<!doctype html>
                    body + "</code></pre></div>");
         }
 
-        for (const line of lines) {
+        for (let ln = 0; ln < lines.length; ln++) {
+          const line = lines[ln];
           // A fence is only a fence at the start of a line — an inline triple
           // backtick mid-sentence used to swallow the rest of the reply.
           const fenceMatch = line.match(/^\\s*```(.*)$/);
@@ -469,6 +767,49 @@ _PAGE = """<!doctype html>
           }
 
           if (!line.trim()) { flushAll(); continue; }
+
+          // A thematic break: three or more of the same mark on a line of its
+          // own. It arrived as a literal "***" paragraph between two sections.
+          if (/^ {0,3}([-*_])(?:\\s*\\1){2,}\\s*$/.test(line)) {
+            flushAll();
+            out.push("<hr>");
+            continue;
+          }
+
+          // A pipe table, but only when the next line is the divider — that is
+          // what tells a real table from prose that happens to contain a pipe.
+          if (line.indexOf("|") >= 0 && ln + 1 < lines.length &&
+              TABLE_DIVIDER_RE.test(lines[ln + 1])) {
+            const head = tableCells(line);
+            const align = tableCells(lines[ln + 1]).map(alignOf);
+            const rows = [];
+            let at = ln + 2;
+            while (at < lines.length && lines[at].trim() && lines[at].indexOf("|") >= 0) {
+              rows.push(tableCells(lines[at]));
+              at += 1;
+            }
+            // Only if the divider agrees with the header about the column
+            // count; otherwise this is prose and belongs in a paragraph.
+            if (align.length === head.length) {
+              flushAll();
+              const cell = function (tag, text, i) {
+                return "<" + tag + (align[i] || "") + ">" + inlineMd(text) + "</" + tag + ">";
+              };
+              out.push('<div class="tablewrap"><table><thead><tr>' +
+                head.map(function (h, i) { return cell("th", h, i); }).join("") +
+                "</tr></thead><tbody>" +
+                rows.map(function (r) {
+                  // Pad or trim to the header, so one short row cannot shear
+                  // the rest of the grid sideways.
+                  const cells = [];
+                  for (let i = 0; i < head.length; i++) cells.push(cell("td", r[i] || "", i));
+                  return "<tr>" + cells.join("") + "</tr>";
+                }).join("") +
+                "</tbody></table></div>");
+              ln = at - 1;
+              continue;
+            }
+          }
 
           const heading = line.match(/^ {0,3}(#{1,6})\\s+(.*)$/);
           if (heading) {
@@ -650,12 +991,269 @@ _PAGE = """<!doctype html>
           cell.className = "thumb";
           const el = document.createElement("img");
           el.src = img.url; el.alt = "attachment";
+          el.title = "what was read from this photo";
+          el.addEventListener("click", () => showPhotoDetails(img));
           const rm = document.createElement("button");
           rm.textContent = "✕"; rm.title = "Remove";
-          rm.addEventListener("click", () => { pendingImages.splice(i, 1); renderThumbs(); });
+          rm.addEventListener("click", () => {
+            pendingImages.splice(i, 1); renderThumbs(); routineProgress();
+          });
           cell.appendChild(el); cell.appendChild(rm);
+          // What was actually read, on the thumbnail, before you send. The
+          // failure this exists for is silent otherwise: "photo details is on"
+          // and "this photo has a position in it" are different things, and
+          // until now the difference only showed up in the answer.
+          const badges = [];
+          if (img.meta && img.meta.taken) badges.push(["🕘", "date read from the photo"]);
+          const hasPlace = img.meta && typeof img.meta.lat === "number" &&
+                           typeof img.meta.lon === "number";
+          if (hasPlace) badges.push(["📍", "location read from the photo"]);
+          else if (img.meta && img.meta.gpsBlock) {
+            badges.push(["📍̸", "the camera tried but had no GPS fix"]);
+          }
+          if (badges.length) {
+            const stamp = document.createElement("span");
+            stamp.className = "stamp";
+            stamp.textContent = badges.map(b => b[0]).join("");
+            stamp.title = badges.map(b => b[1]).join(", ");
+            cell.appendChild(stamp);
+          } else if (img.meta) {
+            const stamp = document.createElement("span");
+            stamp.className = "stamp muted";
+            stamp.textContent = "·";
+            stamp.title = "this photo carries no date or position";
+            cell.appendChild(stamp);
+          }
           thumbsEl.appendChild(cell);
         });
+      }
+
+      // ---- EXIF ----
+      // Read before the canvas re-encode, which is the only chance: drawing an
+      // image onto a canvas and reading it back produces clean pixels with no
+      // metadata at all, so nothing downstream could recover this.
+      //
+      // Hand-rolled rather than a library: this is a few hundred bytes at the
+      // front of a JPEG, the app ships no build step and loads nothing from a
+      // CDN, and the alternative is a dependency for a couple of dozen tags.
+      const EXIF_HEAD_BYTES = 256 * 1024;   // EXIF lives at the very front
+
+      function readExif(file) {
+        if (!file || !file.slice || !window.DataView) return Promise.resolve(null);
+        return file.slice(0, EXIF_HEAD_BYTES).arrayBuffer()
+          .then(buf => parseExif(new DataView(buf)))
+          .catch(() => null);
+      }
+
+      function parseExif(view) {
+        if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return null;   // not a JPEG
+        // Walk the marker segments looking for APP1 with an "Exif\\0\\0" payload.
+        let offset = 2;
+        while (offset + 4 <= view.byteLength) {
+          if (view.getUint8(offset) !== 0xff) return null;   // desynchronised
+          let marker = view.getUint8(offset + 1);
+          // Any number of 0xFF bytes may pad the gap before a marker, and the
+          // standard says to skip them. Treating one as the marker itself read
+          // a nonsense segment length and lost the whole file — every tag, not
+          // just the padded segment.
+          while (marker === 0xff && offset + 2 < view.byteLength) {
+            offset += 1;
+            marker = view.getUint8(offset + 1);
+          }
+          if (marker === 0xda || marker === 0xd9) return null;   // image data starts
+          if (offset + 4 > view.byteLength) return null;
+          const size = view.getUint16(offset + 2);
+          if (size < 2) return null;
+          if (marker === 0xe1 && offset + 10 <= view.byteLength &&
+              view.getUint32(offset + 4) === 0x45786966) {
+            return readTiff(view, offset + 10);
+          }
+          offset += 2 + size;
+        }
+        return null;
+      }
+
+      // How a value that is a ratio of two integers should read to a person.
+      function ratio(value, digits) {
+        if (typeof value !== "number" || !isFinite(value)) return null;
+        return Math.round(value * Math.pow(10, digits)) / Math.pow(10, digits);
+      }
+
+      const ORIENTATIONS = {
+        1: "upright", 2: "mirrored", 3: "upside down", 4: "mirrored and upside down",
+        5: "mirrored and rotated 90° left", 6: "rotated 90° clockwise",
+        7: "mirrored and rotated 90° right", 8: "rotated 90° anticlockwise",
+      };
+
+      function readTiff(view, base) {
+        if (base + 8 > view.byteLength) return null;
+        const order = view.getUint16(base);
+        if (order !== 0x4949 && order !== 0x4d4d) return null;
+        const le = order === 0x4949;                       // "II" is little-endian
+        if (view.getUint16(base + 2, le) !== 0x002a) return null;
+
+        const out = {};
+        const ifd0 = readIfd(view, base, base + view.getUint32(base + 4, le), le);
+        if (!ifd0) return null;
+
+        const make = ifd0[0x010f], model = ifd0[0x0110];
+        const camera = [make, model].filter(Boolean).join(" ").trim();
+        // "Google Pixel 8" rather than "Google Google Pixel 8": makers often
+        // repeat the brand in the model.
+        if (camera) out.camera = model && make && model.indexOf(make) === 0 ? model : camera;
+        if (ifd0[0x0131]) out.software = String(ifd0[0x0131]).trim();
+        if (ifd0[0x013b]) out.artist = String(ifd0[0x013b]).trim();
+        if (ifd0[0x8298]) out.copyright = String(ifd0[0x8298]).trim();
+        if (ORIENTATIONS[ifd0[0x0112]] && ifd0[0x0112] !== 1) {
+          out.orientation = ORIENTATIONS[ifd0[0x0112]];
+        }
+
+        if (ifd0[0x8769] !== undefined) {
+          const exif = readIfd(view, base, base + ifd0[0x8769], le) || {};
+          // DateTimeOriginal is when the shutter fired; DateTime is when the
+          // file was last written, which an edit or a copy can change.
+          const stamp = exif[0x9003] || exif[0x9004] || ifd0[0x0132];
+          if (stamp) out.taken = String(stamp).trim();
+          // The one tag that makes a capture time unambiguous. Without it two
+          // photos either side of a time-zone change are hours apart in a way
+          // nothing downstream can detect.
+          const offset = exif[0x9010] || exif[0x9011] || exif[0x9012];
+          if (offset) out.offset = String(offset).trim();
+
+          const width = exif[0xa002], height = exif[0xa003];
+          if (typeof width === "number" && typeof height === "number") {
+            out.width = width;
+            out.height = height;
+          }
+          if (exif[0xa434]) out.lens = String(exif[0xa434]).trim();
+          if (typeof exif[0x8827] === "number") out.iso = exif[0x8827];
+          const shutter = ratio(exif[0x829a], 6);
+          if (shutter) {
+            // "1/120" is how a shutter speed is written and read; 0.008333 is
+            // the same number and tells nobody anything.
+            out.exposure = shutter < 1 ? "1/" + Math.round(1 / shutter) + " s"
+                                       : ratio(shutter, 1) + " s";
+          }
+          const aperture = ratio(exif[0x829d], 1);
+          if (aperture) out.aperture = "f/" + aperture;
+          const focal = ratio(exif[0x920a], 1);
+          if (focal) out.focal = focal + " mm";
+          if (typeof exif[0xa405] === "number" && exif[0xa405]) {
+            out.focal35 = exif[0xa405] + " mm";
+          }
+          // Bit 0 of Flash is whether it actually fired; the rest is about
+          // return detection and modes, which nobody asks about.
+          if (typeof exif[0x9209] === "number") out.flash = (exif[0x9209] & 1) === 1;
+        }
+
+        if (ifd0[0x8825] !== undefined) {
+          // Say that the camera tried. A block with no fix in it is the usual
+          // answer for a photo taken in a garage, and it is a different thing
+          // from a camera that never records position at all — which is the
+          // difference between "wait for a fix" and "turn the setting on".
+          out.gpsBlock = true;
+          readGps(view, base, base + ifd0[0x8825], le, out);
+        }
+        const facts = Object.keys(out).filter(k => k !== "gpsBlock");
+        return facts.length ? out : null;
+      }
+
+      function readGps(view, base, at, le, out) {
+        const gps = readIfd(view, base, at, le) || {};
+        const lat = dms(gps[0x0002], gps[0x0001]);
+        const lon = dms(gps[0x0004], gps[0x0003]);
+        if (lat !== null && lon !== null && !(lat === 0 && lon === 0)) {
+          out.lat = lat;
+          out.lon = lon;
+        }
+        if (typeof gps[0x0006] === "number") {
+          out.altitude = Math.round(gps[0x0006] * (gps[0x0005] === 1 ? -1 : 1));
+        }
+        // How far out the fix might be, in metres. Worth having: "at 44.9778,
+        // -93.2650" reads as a doorstep and can be a whole block.
+        const error = ratio(gps[0x001f], 1);
+        if (error) out.accuracy = error;
+        // Dilution of precision: the geometry of the satellites at the time,
+        // which is the other half of "how far out might this be". Under 2 is a
+        // good fix, over 5 is one to distrust — and a phone that has just woken
+        // up indoors writes a position with a DOP of 20 without complaint.
+        const dop = ratio(gps[0x000b], 1);
+        if (dop) out.dop = dop;
+        const speed = ratio(gps[0x000d], 1);
+        if (speed !== null && speed > 0) {
+          const unit = { K: "km/h", M: "mph", N: "knots" }[String(gps[0x000c] || "K")[0]];
+          out.speed = speed + " " + (unit || "km/h");
+        }
+        const heading = ratio(gps[0x0011], 0);
+        if (heading !== null && gps[0x0011] !== undefined) {
+          out.heading = heading + (String(gps[0x0010] || "T")[0] === "M" ? "° magnetic" : "°");
+        }
+        // GPS records UTC. Alongside a local DateTimeOriginal that is a time
+        // zone, which is the one thing an elapsed-time answer needs and the one
+        // thing the capture time alone cannot give.
+        const time = gps[0x0007], date = gps[0x001d];
+        if (Array.isArray(time) && time.length >= 3) {
+          const pad = (n) => (n < 10 ? "0" : "") + n;
+          const clock = pad(Math.round(time[0])) + ":" + pad(Math.round(time[1])) +
+                        ":" + pad(Math.round(time[2]));
+          out.utc = date ? String(date).trim() + " " + clock : clock;
+        }
+      }
+
+      // One IFD as {tag: value}. Only the types these tags actually use.
+      function readIfd(view, base, at, le) {
+        if (at + 2 > view.byteLength) return null;
+        const count = view.getUint16(at, le);
+        const out = {};
+        for (let i = 0; i < count; i++) {
+          const entry = at + 2 + i * 12;
+          if (entry + 12 > view.byteLength) break;
+          const tag = view.getUint16(entry, le);
+          const type = view.getUint16(entry + 2, le);
+          const length = view.getUint32(entry + 4, le);
+          const width = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8 }[type];
+          if (!width) continue;
+          const bytes = width * length;
+          // Values of four bytes or fewer are stored in the entry itself.
+          const at2 = bytes <= 4 ? entry + 8 : base + view.getUint32(entry + 8, le);
+          if (at2 < 0 || at2 + bytes > view.byteLength) continue;
+          out[tag] = readValue(view, at2, type, length, le);
+        }
+        return out;
+      }
+
+      function readValue(view, at, type, length, le) {
+        if (type === 2) {                                   // ASCII
+          let s = "";
+          for (let i = 0; i < length; i++) {
+            const c = view.getUint8(at + i);
+            if (!c) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        }
+        if (type === 5 || type === 10) {                    // RATIONAL
+          const read = (o) => type === 5
+            ? view.getUint32(o, le) / (view.getUint32(o + 4, le) || 1)
+            : view.getInt32(o, le) / (view.getInt32(o + 4, le) || 1);
+          if (length === 1) return read(at);
+          const out = [];
+          for (let i = 0; i < length; i++) out.push(read(at + i * 8));
+          return out;
+        }
+        if (type === 3) return view.getUint16(at, le);
+        if (type === 4 || type === 9) return view.getUint32(at, le);
+        if (type === 1 || type === 7) return view.getUint8(at);
+        return null;
+      }
+
+      // Degrees/minutes/seconds plus a N/S/E/W reference, to a signed decimal.
+      function dms(parts, ref) {
+        if (!Array.isArray(parts) || parts.length < 3) return null;
+        const value = parts[0] + parts[1] / 60 + parts[2] / 3600;
+        if (!isFinite(value)) return null;
+        const sign = /^[SW]/i.test(String(ref || "")) ? -1 : 1;
+        return Math.round(value * sign * 1e6) / 1e6;
       }
 
       function loadBitmap(file) {
@@ -721,16 +1319,132 @@ _PAGE = """<!doctype html>
       }
 
       async function toAttachment(file, maxDim = IMG_MAX_DIM) {
+        // Before the canvas: re-encoding produces clean pixels with no metadata,
+        // so this is the only point at which it still exists.
+        const meta = exifOn ? await readExif(file) : null;
         const bmp = await loadBitmap(file);
         const canvas = toCanvas(bmp, bmp.width || bmp.naturalWidth,
                                      bmp.height || bmp.naturalHeight, maxDim);
         if (bmp.close) bmp.close();
-        return encodeAttachment(canvas);
+        const att = encodeAttachment(canvas);
+        if (meta) att.meta = meta;
+        return att;
+      }
+
+      // Why a photo carries no position, said in words at the moment it is
+      // attached. A badge is only useful to someone who already knows to look
+      // for it; silence here read as "the app is broken" for long enough to be
+      // worth a sentence.
+      function noteMissingPlace(att) {
+        if (!exifOn) return;
+        if (att.meta && typeof att.meta.lat === "number") return;
+        if (!att.meta) {
+          hintEl.textContent = "No photo details in that file — screenshots have " +
+            "none, and neither does anything re-encoded on the way here.";
+          return;
+        }
+        const had = att.meta.taken ? "That photo has its date but " : "That photo has ";
+        hintEl.textContent = att.meta.gpsBlock
+          ? had + "no GPS fix — the camera asked and did not get one. " +
+            "Indoors is the usual reason."
+          : had + "no location. The camera did not record one: check location " +
+            "is on for the camera app.";
+      }
+
+      // ---- What was read, on the phone ----
+      // Tapping a thumbnail shows every fact pulled out of that file. The
+      // question this answers — "does my photo actually have a position in
+      // it?" — otherwise needs a terminal and a diagnostic script, which is a
+      // silly thing to need while standing next to the car.
+      const META_ROWS = [
+        ["taken", "Taken"],
+        ["offset", "Time zone"],
+        ["utc", "GPS clock (UTC)"],
+        ["accuracy", "Position error", (v) => "± " + v + " m"],
+        ["dop", "Fix quality", (v) => v + " DOP"],
+        ["altitude", "Altitude", (v) => v + " m"],
+        ["speed", "Speed"],
+        ["heading", "Facing"],
+        ["camera", "Camera"],
+        ["lens", "Lens"],
+        ["exposure", "Exposure"],
+        ["aperture", "Aperture"],
+        ["focal", "Focal length"],
+        ["focal35", "35 mm equivalent"],
+        ["iso", "ISO"],
+        ["flash", "Flash", (v) => (v ? "fired" : "did not fire")],
+        ["orientation", "Camera held"],
+        ["software", "Written by"],
+        ["artist", "Artist"],
+        ["copyright", "Copyright"],
+      ];
+
+      function showPhotoDetails(img) {
+        metaBodyEl.innerHTML = "";
+        const meta = img.meta;
+        const add = (label, value, href) => {
+          const row = document.createElement("div");
+          row.className = "metarow";
+          const name = document.createElement("span");
+          name.className = "metaname";
+          name.textContent = label;
+          row.appendChild(name);
+          if (href) {
+            const link = document.createElement("a");
+            link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
+            link.textContent = value;
+            row.appendChild(link);
+          } else {
+            const val = document.createElement("span");
+            val.textContent = value;      // never innerHTML: this is file content
+            row.appendChild(val);
+          }
+          metaBodyEl.appendChild(row);
+        };
+
+        if (!exifOn) {
+          add("Photo details", "turned off — nothing was read from this file");
+        } else if (!meta) {
+          add("Photo details", "none in this file");
+          add("Why", "screenshots carry none, and neither does anything " +
+                     "re-encoded on the way here");
+        } else {
+          if (typeof meta.lat === "number" && typeof meta.lon === "number") {
+            const here = meta.lat.toFixed(6) + ", " + meta.lon.toFixed(6);
+            add("Position", here,
+                "https://www.openstreetmap.org/?mlat=" + meta.lat +
+                "&mlon=" + meta.lon + "#map=16");
+          } else if (meta.gpsBlock) {
+            add("Position", "none — the camera asked for a fix and did not get one");
+          } else {
+            add("Position", "none — the camera did not record one");
+          }
+          if (typeof meta.width === "number" && typeof meta.height === "number") {
+            add("Size as taken", meta.width + " × " + meta.height);
+          }
+          for (const row of META_ROWS) {
+            const value = meta[row[0]];
+            if (value === undefined || value === null || value === "") continue;
+            add(row[1], row[2] ? row[2](value) : String(value));
+          }
+        }
+        metaEl.hidden = false;
+        backdropEl.hidden = false;
+      }
+
+      function hidePhotoDetails() {
+        metaEl.hidden = true;
+        // The drawer uses the same backdrop, so only take it away if it is ours.
+        if (drawerEl.hidden) backdropEl.hidden = true;
       }
 
       function addAttachment(att) {
         if (pendingImages.length >= 4) { hintEl.textContent = "Up to 4 images per message."; return false; }
         pendingImages.push(att); renderThumbs();
+        noteMissingPlace(att);
+        // Before switchToVisionModel, which writes the same hint line: a model
+        // that cannot see the image is the more urgent message and should win.
+        routineProgress();
         switchToVisionModel();
         return true;
       }
@@ -995,8 +1709,29 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
+          // The dictation toggles sit in the same row now, so they need their
+          // own gate: without vosk they are three settings for a button that
+          // is not there.
+          for (const el of document.querySelectorAll(".voicesetting")) {
+            el.hidden = !data.voice;
+          }
+          exifBar.hidden = false;
+          // The deployment picks the default, not the page: on a box only you
+          // can reach this is plainly useful on, and PHOTO_META=0 turns it
+          // round. A browser that has used the toggle keeps its own answer.
+          // Not while a routine is armed: this runs again when the tab is
+          // resumed, and it would otherwise lower exifOn back underneath a
+          // routine between picking it and attaching the photos.
+          if (!pendingRoutine && !chosen("chatExif") &&
+              typeof data.photo_meta === "boolean") {
+            exifEl.checked = data.photo_meta;
+            exifOn = data.photo_meta;
+          }
           if (typeof data.image_turns === "number") KEEP_IMAGE_TURNS = data.image_turns;
-          if (data.history) { historyOn = true; menuBtn.hidden = false; refreshConversations(); }
+          if (data.history) {
+            historyOn = true; menuBtn.hidden = false;
+            refreshConversations(); refreshRoutines();
+          }
           // A default naming a model that has been deleted or renamed since is
           // otherwise a silent failure on every turn until someone works it out.
           if (data.ollama_reachable && data.model_count && !data.default_installed) {
@@ -1140,6 +1875,7 @@ _PAGE = """<!doctype html>
           if (kept > KEEP_IMAGE_TURNS) {
             const copy = Object.assign({}, out[i]);
             delete copy.images;
+            delete copy.image_meta;   // it describes photos that are no longer here
             out[i] = copy;
           }
         }
@@ -1149,13 +1885,29 @@ _PAGE = """<!doctype html>
       async function send() {
         const text = inputEl.value.trim();
         const images = pendingImages.slice();
-        if ((!text && !images.length) || busy) return;
+        // Reports whether the turn committed — not merely that it started. A
+        // caller that armed something for this turn (the routine guard) must
+        // not spend it on a refusal, and must not spend it on a turn that was
+        // rolled back either: the message comes back to the composer, so the
+        // routine has to still be holding its toggles and its photo count for
+        // the retry the app has just invited.
+        if ((!text && !images.length) || busy) return false;
+        let went = true, queued = false;
         busy = true; sendBtn.disabled = true; stopBtn.hidden = false;
         pendingImages = []; renderThumbs();
         const userView = addUser(text, images);
         // Ollama takes images as bare base64 alongside the text, not as a data URL.
         const userMsg = { role: "user", content: text };
-        if (images.length) userMsg.images = images.map(img => img.b64);
+        if (images.length) {
+          userMsg.images = images.map(img => img.b64);
+          // Parallel to images[], so the server can pair them up. Only sent
+          // when at least one photo actually carried any.
+          const meta = images.map(img => img.meta || null);
+          // Checked here as well as at attach time: turning the toggle off
+          // after attaching, or picking a routine that turns it off, has to
+          // mean the details do not go — not just that new photos skip them.
+          if (exifOn && meta.some(Boolean)) userMsg.image_meta = meta;
+        }
         messages.push(userMsg);
         inputEl.value = ""; autosize();
         // Deliberately not saved yet: a failed turn is rolled back on screen and
@@ -1206,7 +1958,8 @@ _PAGE = """<!doctype html>
           if (turnSaved || messages !== thread) return;
           turnSaved = true;
           await ensureConversation(text);
-          await saveMessage("user", text, userMsg.images || null, null);
+          await saveMessage("user", text, userMsg.images || null, null,
+                            userMsg.image_meta || null);
           if (reply) await saveMessage("assistant", reply, null, sources || null);
           refreshConversations();
         }
@@ -1319,6 +2072,7 @@ _PAGE = """<!doctype html>
             // screen and made the next send post two user turns; roll the whole
             // turn back and hand the message back so it can be retried.
             view.root.remove();
+            went = false;
             const returned = rollBackTurn();
             markError("The model returned an empty reply." +
                       (returned ? " Your message is back in the box." : ""));
@@ -1338,6 +2092,7 @@ _PAGE = """<!doctype html>
               // written, so the two devices diverged and the next send posted
               // two user roles.
               view.root.remove();
+              went = false;
               // Only claim the message came back if it did: with the composer
               // already holding something else it is not restored, and saying
               // otherwise sent people looking for a photo that had been dropped.
@@ -1359,6 +2114,7 @@ _PAGE = """<!doctype html>
               commitTurn(partial, lastSources);
             } else {
               view.root.remove();
+              went = false;
               rollBackTurn();
               markError(err.message || String(err));
             }
@@ -1371,10 +2127,19 @@ _PAGE = """<!doctype html>
           controller = null;
           if (pendingAutoSend) {
             pendingAutoSend = false;
-            if (inputEl.value.trim()) { setTimeout(send, 0); return; }
+            // trySend, not send: a dictated follow-up while a routine is
+            // armed still owes it its photos.
+            //
+            // Not `return` — a return inside finally replaces the value the
+            // function was about to give back, so this reported every queued
+            // dictation as a turn that never went and the routine stayed armed
+            // with its own message already sent.
+            if (inputEl.value.trim()) queued = true;
           }
-          inputEl.focus();
+          if (queued) setTimeout(trySend, 0);
+          else inputEl.focus();
         }
+        return went;
       }
 
       function stop() { if (controller) controller.abort(); }
@@ -1384,6 +2149,7 @@ _PAGE = """<!doctype html>
         currentConvoId = null;
         messages = [];
         pendingImages = []; renderThumbs();
+        clearRoutine();
         chatEl.innerHTML = '<div class="wrap"><div class="empty" id="empty">' +
           'Send a message to start chatting with your local model.</div></div>';
         inputEl.focus();
@@ -1504,7 +2270,12 @@ _PAGE = """<!doctype html>
         try {
           const resp = await fetch("api/conversations", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: firstMessage || "", model: modelEl.value || null }) });
+            // A routine names its thread. Titling from the message would
+            // give every trip the same 60-character prefix of the same
+            // prompt, and the drawer becomes a wall of identical rows.
+            body: JSON.stringify({
+              title: (pendingRoutine && pendingRoutine.routine.name) || firstMessage || "",
+              model: modelEl.value || null }) });
           const data = await resp.json();
           if (!resp.ok || !data.id) { noteHistoryBroken(data.error); currentConvoId = null; }
           else { currentConvoId = data.id; historyBroken = false; }
@@ -1512,13 +2283,14 @@ _PAGE = """<!doctype html>
         return currentConvoId;
       }
 
-      async function saveMessage(role, content, images, sources) {
+      async function saveMessage(role, content, images, sources, meta) {
         if (!historyOn || !currentConvoId) return;
         try {
           const resp = await fetch("api/conversations/" + currentConvoId + "/messages", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ role: role, content: content,
-                                   images: images || null, sources: sources || null }) });
+                                   images: images || null, sources: sources || null,
+                                   image_meta: meta || null }) });
           if (!resp.ok) {
             const data = await resp.json().catch(function () { return {}; });
             noteHistoryBroken(data.error);
@@ -1539,6 +2311,7 @@ _PAGE = """<!doctype html>
         messages = [];
         chatEl.innerHTML = "";
         pendingImages = []; renderThumbs();
+        clearRoutine();
 
         for (const msg of convo.messages || []) {
           const imgs = (msg.images || []).map(function (b64) {
@@ -1548,6 +2321,7 @@ _PAGE = """<!doctype html>
             addUser(msg.content, imgs);
             const entry = { role: "user", content: msg.content };
             if (imgs.length) entry.images = imgs.map(function (i) { return i.b64; });
+            if (imgs.length && msg.image_meta) entry.image_meta = msg.image_meta;
             messages.push(entry);
           } else {
             const view = addAssistant();
@@ -1568,8 +2342,507 @@ _PAGE = """<!doctype html>
         scrollDown(true);
       }
 
-      function openDrawer() { drawerEl.hidden = false; backdropEl.hidden = false; refreshConversations(); }
+      function openDrawer(pane) {
+        drawerEl.hidden = false; backdropEl.hidden = false;
+        showPane(pane === "routines" || pane === "records" ? pane : "chats");
+      }
       function closeDrawer() { drawerEl.hidden = true; backdropEl.hidden = true; }
+
+      // ---- Routines ----
+      // A saved prompt you tap instead of typing. Picking one drops its text
+      // into the composer, ticks the toggles it declares, and holds Send back
+      // until its photos are attached — which is the whole point: two odometer
+      // photos have to ride on ONE message, because only the newest
+      // image-bearing turn keeps its payload (withRecentImages here,
+      // keep_recent_images on the server), and their timestamps have to be read
+      // before the canvas re-encode strips them.
+
+      async function refreshRoutines() {
+        if (!historyOn) { routineBar.hidden = true; return; }
+        try {
+          const resp = await fetch("api/routines");
+          if (!resp.ok) return;
+          const data = await resp.json();
+          routines = Array.isArray(data.routines) ? data.routines : [];
+        } catch (e) { return; }
+        // Deleted on another device while it was armed here: drop it rather
+        // than leaving a lit chip that refers to nothing.
+        if (pendingRoutine &&
+            !routines.some(r => r.id === pendingRoutine.routine.id)) clearRoutine();
+        routineBar.hidden = false;
+        renderRoutineChips();
+      }
+
+      function renderRoutineChips() {
+        routineChipsEl.innerHTML = "";
+        if (!routines.length) {
+          // The discovery path on a fresh install: one chip that opens the
+          // drawer, where the starters are one more tap away.
+          const add = document.createElement("button");
+          add.type = "button"; add.className = "chip";
+          add.textContent = "＋ Add a routine";
+          add.addEventListener("click", () => openDrawer("routines"));
+          routineChipsEl.appendChild(add);
+          return;
+        }
+        const armed = pendingRoutine && pendingRoutine.routine.id;
+        for (const saved of routines) {
+          // The armed chip is drawn from the object the guard is actually
+          // using, not from the refreshed list. Editing a routine while it is
+          // armed otherwise had the chip reading "1/3" off the new record
+          // while Send let it through on the old count of 1.
+          const routine = saved.id === armed ? pendingRoutine.routine : saved;
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "chip" + (routine.id === armed ? " active" : "");
+          // textContent, never innerHTML: a routine name is stored text that
+          // anyone who can reach this app could have written.
+          let label = routine.name;
+          if (routine.id === armed && routine.photos) {
+            label += " · " + Math.min(pendingImages.length, routine.photos) +
+                     "/" + routine.photos;
+          }
+          chip.textContent = label;
+          chip.addEventListener("click", () => pickRoutine(routine));
+          routineChipsEl.appendChild(chip);
+        }
+      }
+
+      function forceToggle(el, value) {
+        // Assigned, never dispatched: rememberToggle listens for "change", and
+        // a routine forcing a toggle for one turn must not overwrite what this
+        // browser chose. Same rule as switchToVisionModel setting modelEl.value.
+        el.checked = value;
+      }
+
+      function pickRoutine(routine) {
+        // Tapping the lit chip puts everything back — the undo for a mis-tap.
+        if (pendingRoutine && pendingRoutine.routine.id === routine.id) {
+          clearRoutine();
+          return;
+        }
+        clearRoutine();
+        pendingRoutine = { routine: routine, web: null, exif: null };
+        if (routine.web !== null && webEl.checked !== routine.web) {
+          pendingRoutine.web = webEl.checked;
+          forceToggle(webEl, routine.web);
+        }
+        if (routine.photo_meta !== null && exifEl.checked !== routine.photo_meta) {
+          pendingRoutine.exif = exifEl.checked;
+          forceToggle(exifEl, routine.photo_meta);
+          exifOn = routine.photo_meta;
+        }
+        // Into the box, not straight onto the wire: you read it, you can edit
+        // it ("this was the rental, it reads km"), and what the model gets is
+        // exactly what the bubble shows and what the store keeps. A routine
+        // body is saved text that anyone who can reach this app can change, so
+        // the moment it is visible before it is sent is the mitigation that
+        // matters most.
+        const typed = inputEl.value.trim();
+        pendingRoutine.inserted = routine.body;
+        inputEl.value = typed ? routine.body + "\\n\\n" + typed : routine.body;
+        autosize();
+        renderRoutineChips();
+        routineProgress();
+        // Attaching first and picking afterwards is too late for the photo's
+        // own timestamp: toAttachment() reads it before the canvas re-encode
+        // and there is no second chance. Say so while re-attaching still fixes it.
+        if (pendingImages.length && routine.photo_meta === true &&
+            !pendingImages.some(img => img.meta && img.meta.taken)) {
+          hintEl.textContent = "Those photos were read without their date — remove them and attach again.";
+        }
+        inputEl.focus();
+      }
+
+      function clearRoutine() {
+        if (!pendingRoutine) return;
+        if (pendingRoutine.web !== null) forceToggle(webEl, pendingRoutine.web);
+        if (pendingRoutine.exif !== null) {
+          forceToggle(exifEl, pendingRoutine.exif);
+          exifOn = pendingRoutine.exif;
+        }
+        // Take the body back out of the composer, but only while it is still
+        // there verbatim — the whole point of putting it in a box was that you
+        // can edit it, and edited text is yours. Without this, picking a second
+        // routine stacked the two prompts on top of each other.
+        const inserted = pendingRoutine.inserted;
+        if (inserted && inputEl.value.indexOf(inserted) === 0) {
+          let rest = inputEl.value.slice(inserted.length);
+          if (rest.slice(0, 2) === "\\n\\n") rest = rest.slice(2);
+          inputEl.value = rest;
+          autosize();
+        }
+        pendingRoutine = null;
+        renderRoutineChips();
+      }
+
+      function routineGap(routine, have) {
+        // "At least": three photos for a two-photo routine is your business,
+        // one is the silently-wrong-answer case this exists to prevent.
+        if (!routine || !routine.photos) return 0;
+        return Math.max(0, routine.photos - have);
+      }
+
+      function routineProgress() {
+        if (!pendingRoutine) return;
+        renderRoutineChips();
+        const routine = pendingRoutine.routine;
+        const gap = routineGap(routine, pendingImages.length);
+        if (gap) {
+          hintEl.textContent = routine.name + " needs " + routine.photos +
+            (routine.photos === 1 ? " photo — " : " photos — ") +
+            pendingImages.length + " attached.";
+        } else if (routine.photos && hintEl.textContent.indexOf(" attached.") > 0) {
+          // Only our own message. hintEl is shared, and blanking it outright
+          // wiped the latched "history is not being saved" warning the moment
+          // the second photo landed.
+          hintEl.textContent = "";
+        }
+      }
+
+      async function trySend() {
+        const routine = pendingRoutine && pendingRoutine.routine;
+        if (routineGap(routine, pendingImages.length)) {
+          routineProgress();
+          return;
+        }
+        // Only when the turn actually went. send() refuses an empty message
+        // and one that arrives while a stream is still running; disarming
+        // there put the toggles back and dropped the count while the message
+        // was still sitting in the composer waiting to be sent.
+        if (!(await send())) return;
+        clearRoutine();
+        // Read back out of messages[] rather than out of send(), which is
+        // covered by the node tests slice by slice and is not worth widening
+        // for this. The last turn is the assistant one that just committed.
+        const last = messages[messages.length - 1];
+        if (last && last.role === "assistant") {
+          const bubbles = chatEl.querySelectorAll(".msg.assistant");
+          const root = bubbles.length ? bubbles[bubbles.length - 1] : null;
+          keepRecord(routine, last.content, root ? { root: root } : null);
+        }
+      }
+
+      // ---- Records ----
+      // What a routine run wrote down. The paragraph is the answer; this is the
+      // thing you still want in a year — 68 miles, 3 h 08 min, on the 7th of
+      // August. Kept as fields so it can be a table, a CSV, or a row in
+      // whatever the owner already runs.
+
+      let records = [], recordColumns = [];
+
+      async function refreshRecords() {
+        if (!historyOn) return;
+        try {
+          const resp = await fetch("api/records");
+          if (!resp.ok) return;
+          const data = await resp.json();
+          records = Array.isArray(data.records) ? data.records : [];
+          recordColumns = Array.isArray(data.columns) ? data.columns : [];
+        } catch (e) { return; }
+      }
+
+      // Fired once the reply is complete, not from inside the stream: the
+      // streaming path is delicate and a record is worth less than the answer
+      // already on screen. A failure here is silent by design — the reply
+      // stands on its own.
+      async function keepRecord(routine, answer, view) {
+        if (!historyOn || !routine || !routine.record || !routine.record.length) return;
+        if (!answer || !answer.trim()) return;
+        try {
+          const resp = await fetch("api/records", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              answer: answer, fields: routine.record,
+              routine_id: routine.id, routine_name: routine.name,
+              conversation_id: currentConvoId, model: modelEl.value || null }) });
+          if (!resp.ok) return;
+          const data = await resp.json();
+          if (data.record && view) showKept(view, data.record, routine.record);
+        } catch (e) { /* the answer is what matters; this is the extra */ }
+      }
+
+      // A line under the reply, so a record being kept is visible at the moment
+      // it happens rather than discovered later in a drawer.
+      function showKept(view, record, order) {
+        const line = document.createElement("div");
+        line.className = "kept";
+        // Ordered by what the routine declared, not by the object's keys:
+        // Flask's jsonify sorts them, so the wire order is alphabetical and
+        // "average speed" led a trip record that starts with the distance.
+        const names = (order && order.length ? order : Object.keys(record.fields));
+        const pairs = names.filter(n => record.fields[n])
+                           .map(n => [n, record.fields[n]]);
+        line.textContent = "🗒 Kept: " + pairs.map(p => p[0] + " " + p[1]).join(" · ");
+        line.title = "Saved to Records. Tap to open them.";
+        line.addEventListener("click", () => openDrawer("records"));
+        view.root.appendChild(line);
+      }
+
+      function renderRecords() {
+        recordListEl.innerHTML = "";
+        if (!records.length) {
+          const note = document.createElement("p");
+          note.className = "convo-empty";
+          note.textContent = "Nothing kept yet. Give a routine some field names " +
+            "and every run of it writes a row here.";
+          recordListEl.appendChild(note);
+          return;
+        }
+
+        const bar = document.createElement("div");
+        bar.className = "routine-acts";
+        const csv = document.createElement("a");
+        csv.className = "drawer-new"; csv.href = "api/records.csv";
+        csv.textContent = "⤓ CSV"; csv.setAttribute("download", "records.csv");
+        const jsonLink = document.createElement("a");
+        jsonLink.className = "drawer-new"; jsonLink.href = "api/records";
+        jsonLink.textContent = "⤓ JSON"; jsonLink.target = "_blank";
+        jsonLink.rel = "noopener noreferrer";
+        bar.appendChild(csv); bar.appendChild(jsonLink);
+        recordListEl.appendChild(bar);
+
+        const wrap = document.createElement("div");
+        wrap.className = "tablewrap";
+        const table = document.createElement("table");
+        const head = document.createElement("tr");
+        for (const label of ["When", "Routine"].concat(recordColumns).concat([""])) {
+          const th = document.createElement("th");
+          th.textContent = label;
+          head.appendChild(th);
+        }
+        const thead = document.createElement("thead");
+        thead.appendChild(head);
+        table.appendChild(thead);
+
+        const body = document.createElement("tbody");
+        for (const record of records) {
+          const row = document.createElement("tr");
+          const when = document.createElement("td");
+          when.textContent = new Date(record.created_at * 1000)
+            .toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+          row.appendChild(when);
+          const who = document.createElement("td");
+          who.textContent = record.routine_name;   // never innerHTML: stored text
+          row.appendChild(who);
+          for (const name of recordColumns) {
+            const cell = document.createElement("td");
+            // Editable, because the fields were pulled out of prose by a model
+            // and a log you cannot correct is one you stop trusting.
+            cell.contentEditable = "true";
+            cell.className = "editable";
+            cell.textContent = record.fields[name] || "";
+            cell.addEventListener("blur", () => {
+              const value = cell.textContent.trim();
+              if (value === (record.fields[name] || "")) return;
+              record.fields[name] = value;
+              editRecord(record.id, name, value);
+            });
+            row.appendChild(cell);
+          }
+          const act = document.createElement("td");
+          const rm = document.createElement("button");
+          rm.className = "convo-act"; rm.type = "button"; rm.textContent = "✕";
+          rm.title = "Delete this record";
+          rm.addEventListener("click", () => dropRecord(record));
+          act.appendChild(rm);
+          row.appendChild(act);
+          body.appendChild(row);
+        }
+        table.appendChild(body);
+        wrap.appendChild(table);
+        recordListEl.appendChild(wrap);
+      }
+
+      async function editRecord(id, name, value) {
+        const fields = {};
+        fields[name] = value;
+        try {
+          await fetch("api/records/" + id, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fields: fields }) });
+        } catch (e) { /* the cell already shows what you typed */ }
+      }
+
+      async function dropRecord(record) {
+        if (!window.confirm("Delete this record?")) return;
+        try {
+          const resp = await fetch("api/records/" + record.id, { method: "DELETE" });
+          if (!resp.ok) return;
+        } catch (e) { return; }
+        await refreshRecords();
+        renderRecords();
+      }
+
+      // ---- Routines: the drawer ----
+
+      async function showPane(which) {
+        convoPaneEl.hidden = which !== "chats";
+        routinePaneEl.hidden = which !== "routines";
+        recordPaneEl.hidden = which !== "records";
+        tabChatsEl.classList.toggle("active", which === "chats");
+        tabRoutinesEl.classList.toggle("active", which === "routines");
+        tabRecordsEl.classList.toggle("active", which === "records");
+        if (which === "routines") { closeRoutineEditor(); renderRoutineList(); }
+        else if (which === "records") { await refreshRecords(); renderRecords(); }
+        else refreshConversations();
+      }
+
+      function renderRoutineList() {
+        routineListEl.innerHTML = "";
+        if (!routines.length) {
+          const note = document.createElement("p");
+          note.className = "convo-empty";
+          note.textContent = "A routine is a prompt you save once and tap instead of typing.";
+          routineListEl.appendChild(note);
+          const add = document.createElement("button");
+          add.type = "button"; add.className = "drawer-new";
+          add.textContent = "＋ Add the starter routines";
+          add.addEventListener("click", addStarters);
+          routineListEl.appendChild(add);
+          return;
+        }
+        for (const routine of routines) {
+          const row = document.createElement("div");
+          row.className = "convo";
+          const open = document.createElement("button");
+          open.type = "button"; open.className = "convo-open";
+          const title = document.createElement("span");
+          title.className = "convo-title";
+          title.textContent = routine.name;
+          const meta = document.createElement("span");
+          meta.className = "convo-meta";
+          const bits = [];
+          if (routine.photos) bits.push(routine.photos + (routine.photos === 1 ? " photo" : " photos"));
+          if (routine.photo_meta !== null) bits.push("📍 " + (routine.photo_meta ? "on" : "off"));
+          if (routine.web !== null) bits.push("🌐 " + (routine.web ? "on" : "off"));
+          meta.textContent = bits.join(" · ") || "no photos";
+          open.appendChild(title); open.appendChild(meta);
+          open.addEventListener("click", () => openRoutineEditor(routine));
+          row.appendChild(open);
+          routineListEl.appendChild(row);
+        }
+      }
+
+      function openRoutineEditor(routine) {
+        editingRoutineId = routine ? routine.id : "";
+        rNameEl.value = routine ? routine.name : "";
+        rBodyEl.value = routine ? routine.body : "";
+        rPhotosEl.value = String(routine ? routine.photos : 0);
+        rRecordEl.value = routine && routine.record ? routine.record.join(", ") : "";
+        rMetaEl.value = routine && routine.photo_meta !== null ? (routine.photo_meta ? "1" : "0") : "";
+        rWebEl.value = routine && routine.web !== null ? (routine.web ? "1" : "0") : "";
+        rDeleteBtn.hidden = !routine;
+        routineListEl.hidden = true;
+        routineNewBtn.hidden = true;
+        routineEditEl.hidden = false;
+        routineWarnUpdate();
+        rNameEl.focus();
+      }
+
+      function closeRoutineEditor() {
+        editingRoutineId = null;
+        routineEditEl.hidden = true;
+        routineListEl.hidden = false;
+        routineNewBtn.hidden = false;
+      }
+
+      function routineWarnUpdate() {
+        // Said where the choice is made rather than discovered later: with
+        // photos attached and web access forced on, the photo's own position
+        // goes to the search planner, whose queries leave the machine.
+        const risky = Number(rPhotosEl.value) > 0 && rWebEl.value === "1";
+        routineWarnEl.textContent = risky
+          ? "With photos attached and web access on, a photo's coordinates are sent to the search planner, whose queries go to a search engine. WEB_SHARE_LOCATION=0 stops that."
+          : "";
+      }
+
+      let savingRoutine = false;
+      async function saveRoutine() {
+        // editingRoutineId is not set until after the await, so two taps on a
+        // slow link both took the create branch and made two of the routine.
+        if (savingRoutine) return;
+        const name = rNameEl.value.trim();
+        const body = rBodyEl.value.trim();
+        if (!name || !body) {
+          routineWarnEl.textContent = "A routine needs a name and a prompt.";
+          return;
+        }
+        const tri = (value) => (value === "" ? null : value === "1");
+        const payload = { name: name, body: body,
+                          photos: Number(rPhotosEl.value) || 0,
+                          web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value),
+                          record: rRecordEl.value.split(",")
+                            .map(f => f.trim()).filter(Boolean) };
+        savingRoutine = true;
+        rSaveBtn.disabled = true;
+        try {
+          const resp = await fetch(
+            editingRoutineId ? "api/routines/" + editingRoutineId : "api/routines",
+            { method: editingRoutineId ? "PATCH" : "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload) });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            routineWarnEl.textContent = data.error || "Could not save that.";
+            return;
+          }
+          // What came back is what will be used. The store truncates, and a
+          // routine that quietly does something other than what is written in
+          // the box is worse than one that refuses to save.
+          const saved = await resp.json().catch(() => ({}));
+          const kept = saved.routine || saved;
+          if (kept && typeof kept.body === "string" && kept.body.length < body.length) {
+            rBodyEl.value = kept.body;
+            routineWarnEl.textContent = "Saved, but the prompt was trimmed to " +
+              kept.body.length + " characters.";
+            return;
+          }
+        } catch (e) {
+          routineWarnEl.textContent = "Could not reach the server.";
+          return;
+        } finally {
+          savingRoutine = false;
+          rSaveBtn.disabled = false;
+        }
+        closeRoutineEditor();
+        await refreshRoutines();
+        renderRoutineList();
+      }
+
+      async function deleteRoutine() {
+        if (!editingRoutineId) return;
+        if (!window.confirm("Delete this routine?")) return;
+        const id = editingRoutineId;
+        // Armed and then deleted from under itself: put the toggles back before
+        // the chip it belongs to stops existing.
+        try {
+          const resp = await fetch("api/routines/" + id, { method: "DELETE" });
+          if (!resp.ok) {
+            routineWarnEl.textContent = "Could not delete that.";
+            return;
+          }
+        } catch (e) {
+          routineWarnEl.textContent = "Could not reach the server.";
+          return;
+        }
+        // Only once it is actually gone. Disarming first left a failed delete
+        // with the routine alive, its toggles reverted and the editor stuck.
+        if (pendingRoutine && pendingRoutine.routine.id === id) clearRoutine();
+        closeRoutineEditor();
+        await refreshRoutines();
+        renderRoutineList();
+      }
+
+      async function addStarters() {
+        try {
+          await fetch("api/routines/starters", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: "{}" });
+        } catch (e) { return; }
+        await refreshRoutines();
+        renderRoutineList();
+      }
 
       // ---- Vision routing ----
       // Attaching an image to a text-only model gets you a refusal or an
@@ -1761,7 +3034,9 @@ _PAGE = """<!doctype html>
           // Auto-send skips the Send button so speaking alone drives the chat.
           // While a reply is still streaming, hold the text in the box instead of
           // dropping it — send() would refuse it and the words would be lost.
-          if (autoSendEl.checked && !busy) { send(); return; }
+          // trySend, not send: dictation is still a send, and a routine armed
+          // for this turn is still owed its photos.
+          if (autoSendEl.checked && !busy) { trySend(); return; }
           if (autoSendEl.checked && busy) {
             // Re-checked in send()'s finally, so the utterance is not stranded.
             pendingAutoSend = true;
@@ -1837,6 +3112,40 @@ _PAGE = """<!doctype html>
       // Remember the voice toggles — they describe your hardware and habits, not
       // this visit. Headphones defaults ON (see the checkbox in the markup);
       // only an explicit stored choice overrides it.
+      // Whether this browser has ever touched a toggle, so a server-supplied
+      // default can apply to a fresh browser without overriding a real choice.
+      function chosen(key) {
+        try { return localStorage.getItem(key) !== null; } catch (e) { return false; }
+      }
+
+      // ---- Room to read while you type ----
+      // Measured on a 390x844 phone: the footer is 293px idle, and 291px with
+      // the on-screen keyboard up — which leaves 42px of conversation. You
+      // cannot see the message you are replying to while replying to it.
+      //
+      // visualViewport is what actually shrinks when the keyboard opens;
+      // window.innerHeight does not move on Android Chrome. Where it is absent
+      // (older browsers, and every desktop, where no keyboard ever covers
+      // anything) nothing here runs and the footer stays as it was.
+      const KEYBOARD_ROOM = 520;   // below this, the keyboard is up
+
+      function fitFooter() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        const tight = vv.height < KEYBOARD_ROOM;
+        // The composer and the thumbnails stay. Everything above them is a
+        // setting you chose before you started typing, and it will still be
+        // there when the keyboard goes away.
+        document.body.classList.toggle("typing", tight);
+      }
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", fitFooter);
+        // Scroll too: Android fires resize, iOS Safari sometimes only offsets.
+        window.visualViewport.addEventListener("scroll", fitFooter);
+        fitFooter();
+      }
+
       function rememberToggle(el, key, dflt) {
         try {
           const saved = localStorage.getItem(key);
@@ -1850,15 +3159,42 @@ _PAGE = """<!doctype html>
       rememberToggle(autoSendEl, "chatAutoSend", false);
       rememberToggle(continuousEl, "chatContinuous", false);
       rememberToggle(webEl, "chatWeb", false);
+      // Starts off and is turned on by /api/health if the server says so —
+      // rather than the other way round, so a deployment that wants this off
+      // never has a window in which a photo's position is read anyway.
+      rememberToggle(exifEl, "chatExif", false);
+      exifOn = exifEl.checked;
+      exifEl.addEventListener("change", () => { exifOn = exifEl.checked; });
+      // Reaching for a toggle while a routine is armed is a real choice, so
+      // drop it from the restore rather than putting it back afterwards.
+      exifEl.addEventListener("change", () => {
+        if (pendingRoutine) pendingRoutine.exif = null;
+      });
+      webEl.addEventListener("change", () => {
+        if (pendingRoutine) pendingRoutine.web = null;
+      });
 
-      menuBtn.addEventListener("click", openDrawer);
+      // An arrow function, not the handler by reference: openDrawer now
+      // takes a pane name, and passing it the MouseEvent would read as one.
+      menuBtn.addEventListener("click", () => openDrawer("chats"));
+      routineEditBtn.addEventListener("click", () => openDrawer("routines"));
+      tabChatsEl.addEventListener("click", () => showPane("chats"));
+      tabRoutinesEl.addEventListener("click", () => showPane("routines"));
+      tabRecordsEl.addEventListener("click", () => showPane("records"));
+      routineNewBtn.addEventListener("click", () => openRoutineEditor(null));
+      rSaveBtn.addEventListener("click", saveRoutine);
+      document.getElementById("rCancel").addEventListener("click", closeRoutineEditor);
+      rDeleteBtn.addEventListener("click", deleteRoutine);
+      rPhotosEl.addEventListener("change", routineWarnUpdate);
+      rWebEl.addEventListener("change", routineWarnUpdate);
       document.getElementById("drawerClose").addEventListener("click", closeDrawer);
-      backdropEl.addEventListener("click", closeDrawer);
+      backdropEl.addEventListener("click", () => { closeDrawer(); hidePhotoDetails(); });
+      document.getElementById("metaClose").addEventListener("click", hidePhotoDetails);
       document.getElementById("drawerNew").addEventListener("click", function () {
         newChat(); closeDrawer();
       });
 
-      sendBtn.addEventListener("click", send);
+      sendBtn.addEventListener("click", trySend);
       stopBtn.addEventListener("click", stop);
       newBtn.addEventListener("click", newChat);
       micBtn.addEventListener("click", toggleMic);
@@ -1867,7 +3203,7 @@ _PAGE = """<!doctype html>
         // isComposing / keyCode 229: Enter is accepting an IME candidate, not
         // submitting. Sending here would post the raw romaji.
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
-          e.preventDefault(); send();
+          e.preventDefault(); trySend();
         }
       });
 

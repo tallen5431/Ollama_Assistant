@@ -66,6 +66,31 @@ def clear_process_caches():
 
 
 @pytest.fixture(autouse=True)
+def no_auth_left_behind():
+    """Put app.py back to open after a test that reloaded it with auth on.
+
+    ``importlib.reload`` with CHAT_AUTH_* set registers a before_request handler
+    and leaves AUTH_ENABLED True on the module for the rest of the session.
+    monkeypatch takes the environment variables back but cannot take the
+    handler back, so every later test that touches the app gets a 401 from a
+    module it never configured — /api/health returns HTML, get_json() returns
+    None, and the failure lands nowhere near its cause.
+
+    Repaired rather than reported, unlike the stub guard above: this one is
+    fixed by exactly the reload that caused it, with the environment now clean,
+    and the check is two env reads on tests that did nothing wrong.
+    """
+    yield
+    module = sys.modules.get("app")
+    if module is None or not getattr(module, "AUTH_ENABLED", False):
+        return
+    import authz
+    if authz.auth_enabled():
+        return          # the environment still says auth is on; that is correct
+    importlib.reload(module)
+
+
+@pytest.fixture(autouse=True)
 def no_stub_left_behind():
     """Fail the test that leaks a stub, not the twenty tests downstream.
 
