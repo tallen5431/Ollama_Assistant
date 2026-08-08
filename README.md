@@ -739,6 +739,33 @@ Camera names are treated as untrusted text like anything else the app didn't
 write — folded to one line, capped, and fenced — since a file can claim any
 make it likes.
 
+## Seeing what a turn did
+
+Under every reply, next to **Show thinking**, is **Show what it did** —
+collapsed, because on a turn that went fine it is noise. Open it and the turn
+is on the record, in order:
+
+```
+Photo details    1 photo(s) carried their own record; 937 characters given
+                 to the model                                        [show]
+Images           1 in the thread; qwen3-vl:30b reads them itself
+Read the image   minicpm-v (description)                             [show]
+Planned searches hosyond 3.5 320x480 arduino screen
+Search results   0 from 1 query group(s)                             [show]
+Sent to the model  3 turns, 7412 characters of text, num_ctx 8192    [show]
+```
+
+The `[show]` toggles reveal the exact text — the metadata block, the
+transcription, the URLs, the system turns the model was actually given.
+
+This exists because two very different failures look identical from the
+outside. A reply saying "I cannot read image metadata" while **📍 Photo
+details** is ticked is either the photo carrying no EXIF (a screenshot, or a
+copy that stripped it) or the model ignoring what it was handed — and the panel
+says which. The same goes for a web answer that hedges: the search may never
+have been planned, may have been planned from too little, or may have run and
+found nothing, and only the last of those means the retrieval worked.
+
 ## API endpoints
 
 | Method & path        | Purpose |
@@ -747,7 +774,7 @@ make it likes.
 | `GET /healthz`       | Plain `ok` health probe (stays open even when auth is on) |
 | `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
-| `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
+| `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
 | `POST /api/chat/cancel` | Stop the turn running for a conversation — body `{ "conversation_id" }`. Needed because generation outlives the connection |
 | `GET /api/search`    | Find a phrase across conversations and records — `?q=`. Returns `{ "conversations": [...], "records": [...] }`; under two characters returns both empty |
 | `POST /api/photos/forget` | Apply the photo retention now — body `{ "days"? }`, defaulting to `PHOTO_KEEP_DAYS`. Returns what it dropped |

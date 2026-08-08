@@ -128,6 +128,7 @@ class TestVisionPassthrough:
             },
         )
         assert resp.status_code == 200
+        resp.get_data()          # the turn only reaches Ollama once it is read
 
         sent = fake_ollama.last_request
         assert sent["model"] == "llava:13b"
@@ -140,7 +141,7 @@ class TestVisionPassthrough:
         mod.app.test_client().post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "", "images": imgs}]},
-        )
+        ).get_data()
         assert fake_ollama.last_request["messages"][0]["images"] == imgs
 
     def test_history_with_a_past_image_still_streams(self, fake_ollama):
@@ -157,6 +158,7 @@ class TestVisionPassthrough:
             },
         )
         assert resp.status_code == 200
+        resp.get_data()
         assert len(fake_ollama.last_request["messages"]) == 3
 
 

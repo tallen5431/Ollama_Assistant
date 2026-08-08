@@ -681,6 +681,18 @@ def api_chat() -> Any:
             # somewhere, rather than as a JSON field riding along everywhere.
             photo_meta = web.conversation_image_meta(messages)
             meta_context = web.image_metadata(photo_meta)
+            carried = sum(1 for m in photo_meta if m)
+            if not web.conversation_images(messages):
+                pass                      # nothing attached; no photo step at all
+            elif meta_context:
+                yield _step("Photo details",
+                            f"{carried} photo(s) carried their own record; "
+                            f"{len(meta_context)} characters given to the model",
+                            text=meta_context)
+            else:
+                yield _step("Photo details",
+                            "none — the toggle is off, or the file carried no "
+                            "EXIF (a screenshot, or a copy that stripped it)")
             # The planner gets a shorter version. It runs on your own hardware,
             # but what it writes is sent to a search engine — so the position is
             # the one part of this that can leave the house, and it has its own
@@ -703,6 +715,11 @@ def api_chat() -> Any:
             # Any image still in the thread, not only a newly attached one, so a
             # follow-up question about the same screenshot keeps its context.
             images = web.conversation_images(turns)
+            if images:
+                yield _step(
+                    "Images", f"{len(images)} in the thread; {model} "
+                    + ("reads them itself" if _model_has_vision(model)
+                       else "cannot see, so they are transcribed for it"))
             if images and not _model_has_vision(model):
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
@@ -761,6 +778,12 @@ def api_chat() -> Any:
                     kept_sources.extend(
                         {"url": d["url"], "title": d["title"]} for d in documents)
                     yield _line({"sources": list(kept_sources)})
+            yield _step(
+                "Sent to the model",
+                f"{len(convo)} turns, {sum(len(str(t.get('content') or '')) for t in convo)} "
+                f"characters of text, num_ctx {options.get('num_ctx')}",
+                system=[str(t.get("content") or "")[:2000]
+                        for t in convo if t.get("role") == "system"])
             for line in chat_stream(model, convo, options=options,
                                     keep_alive=get_keep_alive() or None):
                 answer.append(_content_of(line))
@@ -884,6 +907,22 @@ def _line(obj: Dict[str, Any]) -> str:
     return json.dumps(obj) + "\n"
 
 
+def _step(name: str, detail: str = "", **extra: Any) -> str:
+    """One line for the panel that says what this turn actually did.
+
+    The status line says what is happening now and is replaced by the next one;
+    this accumulates, so afterwards you can see why an answer came out the way
+    it did — which photo details were read, what was searched for, what came
+    back, what was put in front of the model. Kept out of the way behind a
+    collapsed panel, because it is only ever wanted when something looks wrong.
+    """
+    entry: Dict[str, Any] = {"step": name}
+    if detail:
+        entry["detail"] = detail
+    entry.update(extra)
+    return _line({"debug": entry})
+
+
 def _host_of(url: str) -> str:
     try:
         return urlparse(url).hostname or url
@@ -1002,6 +1041,16 @@ def _gather_web(
                     # Planning without the image beats not answering.
                     logger.warning("Image read via %s failed: %s", reader, exc)
                     yield _line({"status": "Could not read the image; searching without it."})
+                    yield _step("Read the image for search", f"{reader} failed: {exc}")
+                else:
+                    yield _step("Read the image for search",
+                                f"{reader} ({'OCR' if is_reader_ocr else 'description'})",
+                                text=image_note or "(nothing came back)")
+            else:
+                yield _step("Read the image for search",
+                            "no reader available — the search is planned from "
+                            "your words alone, which for a photo with no "
+                            "question in it is very little to go on")
 
     yield _line({"status": "Working out what to search for…"})
     # Only alongside an image attached to *this* turn, for the same reason the
@@ -1011,12 +1060,16 @@ def _gather_web(
                                 photo_note=photo_note if images else "")
     if queries is None:
         yield _line({"status": "Could not plan a search; answering without one."})
+        yield _step("Planned searches", "the planner could not be reached")
         return
     if not queries:
         yield _line({"status": ""})
+        yield _step("Planned searches",
+                    "none — the planner judged that a search would not help")
         return
 
     outcome["attempted"] = True
+    yield _step("Planned searches", " · ".join(queries))
     yield _line({"status": "Searching: " + " · ".join(queries)})
     # Concurrently: three searches then several fetches, run one after another,
     # each with its own timeout, is the sum of every round trip before the user
@@ -1027,14 +1080,21 @@ def _gather_web(
     # Interleave so each query contributes, then fetch more candidates than
     # needed since some will be paywalled, JS-only, or plain unreachable.
     results = web.merge_results(groups, limit=max_docs * 2)
+    yield _step("Search results",
+                f"{len(results)} from {len(groups)} query group(s)"
+                + (f"; failures: {'; '.join(failures)}" if failures else ""),
+                urls=[r["url"] for r in results[:12]])
     if not results:
         yield _line({"status": failures[0] if failures else "No search results found."})
         return
 
     urls = [r["url"] for r in results]
     yield _line({"status": "Reading " + ", ".join(_host_of(u) for u in urls[:max_docs]) + "…"})
-    fetched, _ = _run_all(web.fetch, urls, enough=max_docs)
+    fetched, fetch_failures = _run_all(web.fetch, urls, enough=max_docs)
     documents.extend(fetched[:max_docs])
+    yield _step("Pages read", f"{len(fetched)} of {len(urls)} tried"
+                + (f"; failures: {'; '.join(fetch_failures[:4])}" if fetch_failures else ""),
+                urls=[d.get("url", "") for d in fetched[:max_docs]])
 
     # Paywalled, JS-only and dead pages are routine. Their search snippets are
     # already paid for, so use them to fill out the budget rather than throwing
@@ -1046,6 +1106,9 @@ def _gather_web(
 
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
+    yield _step("Context from the web",
+                f"{len(documents)} document(s), "
+                f"{sum(len(d.get('text') or '') for d in documents)} characters")
 
 
 def _model_has_vision(name: str) -> bool:

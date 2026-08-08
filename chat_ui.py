@@ -236,6 +236,25 @@ _PAGE = """<!doctype html>
         color:var(--muted); padding:0.3rem 0; }
       .think-body { white-space:pre-wrap; font-size:var(--fs-sm); color:var(--muted);
         border-top:1px solid var(--border-soft); padding:0.45rem 0; margin-top:0.2rem; }
+      /* The same shape as the thinking panel, because it is the same kind of
+         thing: available, folded, and never in the way. */
+      .steps-body { border-top:1px solid var(--border-soft); padding:0.45rem 0;
+                    margin-top:0.2rem; font-size:var(--fs-xs); }
+      .steprow { display:flex; flex-wrap:wrap; align-items:baseline; gap:0.4rem;
+                 padding:0.2rem 0; color:var(--muted); }
+      .steprow + .steprow { border-top:1px solid var(--border-soft); }
+      .steprow b { color:var(--text); font-weight:600; flex:0 0 auto; }
+      .steprow span { flex:1 1 12rem; min-width:0; }
+      /* Closed it is a word at the end of the line; open it takes the row, so
+         the block it reveals is bounded by the bubble rather than running off
+         the side of it. */
+      .stepmore { flex:0 0 auto; min-width:0; max-width:100%; }
+      .stepmore[open] { flex:1 1 100%; }
+      .stepmore summary { cursor:pointer; color:var(--accent); }
+      .stepmore pre { white-space:pre-wrap; word-break:break-word; margin:0.35rem 0 0;
+        padding:0.5rem 0.6rem; background:var(--code-bg); color:var(--muted);
+        border:1px solid var(--border-soft); border-radius:var(--r1);
+        max-height:18rem; overflow:auto; width:100%; box-sizing:border-box; }
 
       /* ---- The empty conversation ---------------------------------------
          A whole screen used to hold one grey sentence. It is the only moment
@@ -1349,6 +1368,44 @@ _PAGE = """<!doctype html>
         });
       }
 
+      // What the turn actually did, before the model was asked anything: which
+      // photo details were read, what was searched for, what came back, what
+      // was put in front of it. Collapsed, because it is only ever wanted when
+      // an answer looks wrong — and then it is the only thing that helps.
+      function addStep(view, entry) {
+        if (!view || !view.stepsBody || !entry || !entry.step) return;
+        view.steps.hidden = false;
+        const row = document.createElement("div");
+        row.className = "steprow";
+        const name = document.createElement("b");
+        name.textContent = entry.step;
+        row.appendChild(name);
+        if (entry.detail) {
+          const detail = document.createElement("span");
+          // textContent throughout: a step can carry a page title, a search
+          // query or a model name, none of which this app wrote.
+          detail.textContent = entry.detail;
+          row.appendChild(detail);
+        }
+        // The long parts — the text handed to the model, the URLs — fold away
+        // again, so the panel stays a list of one-liners until you want more.
+        const extras = [];
+        if (entry.text) extras.push(entry.text);
+        if (entry.system && entry.system.length) extras.push(entry.system.join("\\n\\n---\\n\\n"));
+        if (entry.urls && entry.urls.length) extras.push(entry.urls.join("\\n"));
+        if (extras.length) {
+          const more = document.createElement("details");
+          more.className = "stepmore";
+          const sum = document.createElement("summary");
+          sum.textContent = "show";
+          const body = document.createElement("pre");
+          body.textContent = extras.join("\\n\\n");
+          more.appendChild(sum); more.appendChild(body);
+          row.appendChild(more);
+        }
+        view.stepsBody.appendChild(row);
+      }
+
       // Split assistant text into visible content + inline <think> reasoning.
       function splitThink(raw) {
         let content = "", thinking = "", last = 0, m;
@@ -1990,6 +2047,8 @@ _PAGE = """<!doctype html>
             '<div class="webstatus" hidden></div>' +
             '<details class="think" hidden><summary>Show thinking</summary>' +
               '<div class="think-body"></div></details>' +
+            '<details class="think steps" hidden><summary>Show what it did</summary>' +
+              '<div class="steps-body"></div></details>' +
             '<div class="bubble" aria-live="polite" aria-atomic="false">…</div>' +
             '<div class="meta"></div>' +
             '<div class="sources" hidden></div>' +
@@ -2001,8 +2060,10 @@ _PAGE = """<!doctype html>
           root: wrap,
           bubble: wrap.querySelector(".bubble"),
           status: wrap.querySelector(".webstatus"),
-          think: wrap.querySelector("details.think"),
+          think: wrap.querySelector("details.think:not(.steps)"),
           thinkBody: wrap.querySelector(".think-body"),
+          steps: wrap.querySelector("details.steps"),
+          stepsBody: wrap.querySelector(".steps-body"),
           meta: wrap.querySelector(".meta"),
           sources: wrap.querySelector(".sources"),
           raw: "",
@@ -2537,6 +2598,7 @@ _PAGE = """<!doctype html>
                 scrollDown();
                 continue;
               }
+              if (obj.debug) { addStep(view, obj.debug); scrollDown(); continue; }
               if (obj.sources) { lastSources = obj.sources; showSources(view, obj.sources); scrollDown(); continue; }
               // /api/chat nests thinking under "message", the same as content.
               // Reading only the top-level field — the /api/generate shape —
