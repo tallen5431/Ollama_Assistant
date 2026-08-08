@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import re
 import sys
 from pathlib import Path
 
@@ -129,3 +130,17 @@ def no_stub_left_behind():
             "reloaded app module, not the dependency it imported from — otherwise "
             "every later test in the session inherits it."
         )
+
+
+def page_script(page: str) -> str:
+    """The page's own script, out of the rendered HTML.
+
+    The longest block, not the first: the page carries a second, tiny script in
+    <head> that applies a saved theme before the stylesheet paints, and every
+    helper that reached for ``<script>`` with a non-greedy match started
+    getting that one instead.
+    """
+    blocks = re.findall(r"<script>(.*?)</script>", page, re.S)
+    if not blocks:
+        raise AssertionError("the page has no script block")
+    return max(blocks, key=len)

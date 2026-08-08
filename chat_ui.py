@@ -21,13 +21,91 @@ _PAGE = """<!doctype html>
     <!-- Inline, so there is no favicon request to 404 on every page load, and a
          home-screen shortcut on a phone gets an icon rather than a blank page. -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 11h16M8 16h16M8 21h10' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
-    <meta name="theme-color" content="#0b1120">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0a0e17" media="(prefers-color-scheme: dark)">
+    <!-- Before the stylesheet, on purpose: a saved theme applied from the main
+         script at the end of <body> paints the other one first, and a white
+         flash at 2am is the whole reason someone chose dark. -->
+    <script>
+      try {
+        const saved = localStorage.getItem("theme");
+        if (saved === "light" || saved === "dark")
+          document.documentElement.setAttribute("data-theme", saved);
+      } catch (e) {}
+    </script>
     <style>
+      /* ------------------------------------------------------------------
+         Tokens. Two themes from one set of names: the light values are the
+         defaults and the dark ones are swapped in under a media query, so a
+         phone that follows the system at night needs no script to have run.
+         data-theme on <html> overrides both, for the times the system is
+         wrong about what you want.
+         ------------------------------------------------------------------ */
       :root {
-        --bg:#0b1120; --panel:#0f172a; --panel2:#111c33; --border:#1e293b;
-        --text:#e5e7eb; --muted:#94a3b8; --accent:#2563eb; --accent2:#1d4ed8;
-        --user:#2563eb; --assistant:#1e293b; --danger:#ef4444; --ok:#22c55e;
+        color-scheme:light;
+        --bg:#f4f6fb; --surface:#ffffff; --surface2:#eef1f8; --surface3:#e2e8f4;
+        --border:#d8dfec; --border-soft:#e7ecf5;
+        --text:#101828; --muted:#5b6b85; --faint:#8a99b3;
+        --accent:#2563eb; --accent-hover:#1d4ed8; --accent-soft:#e5edff;
+        --on-accent:#ffffff;
+        --danger:#dc2626; --ok:#16a34a;
+        --assistant:#ffffff; --assistant-border:#e2e8f4;
+        --code-bg:#f6f8fc;
+        --shadow1:0 1px 2px rgba(16,24,40,0.06);
+        --shadow2:0 12px 32px rgba(16,24,40,0.14);
+        --shadow-bubble:0 1px 1px rgba(16,24,40,0.04);
+        /* Four steps, used everywhere. The page had eleven ad-hoc sizes. */
+        --fs-xs:0.72rem; --fs-sm:0.8125rem; --fs-md:0.9375rem; --fs-lg:1.0625rem;
+        --r1:0.5rem; --r2:0.75rem; --r3:1.1rem; --pill:999px;
       }
+      :root[data-theme="dark"] { color-scheme:dark; }
+      @media (prefers-color-scheme: dark) { :root { color-scheme:dark; } }
+      /* One block, applied by either route. */
+      :root[data-theme="dark"],
+      :root:not([data-theme="light"]) {
+        --dark-bg:#0a0e17; --dark-surface:#121a29; --dark-surface2:#1a2434;
+        --dark-surface3:#233044; --dark-border:#26334a; --dark-border-soft:#1c2637;
+        --dark-text:#e8edf7; --dark-muted:#9aa8c0; --dark-faint:#69788f;
+        --dark-accent:#3b82f6; --dark-accent-hover:#60a5fa;
+        --dark-accent-soft:rgba(59,130,246,0.16);
+        --dark-danger:#f05252; --dark-ok:#22c55e;
+        --dark-assistant:#16202f; --dark-assistant-border:#25324a;
+        --dark-code-bg:#0c1320;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg:var(--dark-bg); --surface:var(--dark-surface);
+          --surface2:var(--dark-surface2); --surface3:var(--dark-surface3);
+          --border:var(--dark-border); --border-soft:var(--dark-border-soft);
+          --text:var(--dark-text); --muted:var(--dark-muted); --faint:var(--dark-faint);
+          --accent:var(--dark-accent); --accent-hover:var(--dark-accent-hover);
+          --accent-soft:var(--dark-accent-soft);
+          --danger:var(--dark-danger); --ok:var(--dark-ok);
+          --assistant:var(--dark-assistant);
+          --assistant-border:var(--dark-assistant-border);
+          --code-bg:var(--dark-code-bg);
+          --shadow1:0 1px 2px rgba(0,0,0,0.4);
+          --shadow2:0 16px 40px rgba(0,0,0,0.5);
+          --shadow-bubble:none;
+        }
+      }
+      :root[data-theme="dark"] {
+        --bg:var(--dark-bg); --surface:var(--dark-surface);
+        --surface2:var(--dark-surface2); --surface3:var(--dark-surface3);
+        --border:var(--dark-border); --border-soft:var(--dark-border-soft);
+        --text:var(--dark-text); --muted:var(--dark-muted); --faint:var(--dark-faint);
+        --accent:var(--dark-accent); --accent-hover:var(--dark-accent-hover);
+        --accent-soft:var(--dark-accent-soft);
+        --danger:var(--dark-danger); --ok:var(--dark-ok);
+        --assistant:var(--dark-assistant);
+        --assistant-border:var(--dark-assistant-border);
+        --code-bg:var(--dark-code-bg);
+        --shadow1:0 1px 2px rgba(0,0,0,0.4);
+        --shadow2:0 16px 40px rgba(0,0,0,0.5);
+        --shadow-bubble:none;
+      }
+
       * { box-sizing:border-box; }
       /* Author display rules outrank the UA [hidden] rule, so every
          flex element here would ignore .hidden without this. */
@@ -36,211 +114,388 @@ _PAGE = """<!doctype html>
       body {
         background:var(--bg); color:var(--text);
         font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-        display:flex; flex-direction:column; height:100dvh;
+        font-size:var(--fs-md);
+        /* A row, not a column: the drawer is a real column of the layout on a
+           desktop and an overlay on a phone, and this is what lets it be both
+           without the script knowing which. */
+        display:flex; flex-direction:row; height:100dvh;
+        -webkit-tap-highlight-color:transparent;
       }
+      .pane { flex:1 1 auto; min-width:0; display:flex; flex-direction:column;
+              height:100dvh; }
+      /* One ring everywhere, in the accent colour. The browser default is
+         orange, which fights a blue app on every focused control. */
+      :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+      .sprite { display:none; }
+      .i { width:1.15em; height:1.15em; flex:0 0 auto; fill:none;
+           stroke:currentColor; stroke-width:1.85; stroke-linecap:round;
+           stroke-linejoin:round; }
+      .i.solid { fill:currentColor; stroke:none; }
+
+      /* ---- Header ------------------------------------------------------- */
       header {
-        display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;
-        padding:0.6rem 1rem; background:var(--panel);
-        border-bottom:1px solid var(--border);
+        display:flex; align-items:center; gap:0.6rem; flex-wrap:nowrap;
+        padding:0.55rem 0.9rem; background:var(--surface);
+        border-bottom:1px solid var(--border-soft);
       }
-      header h1 { font-size:1.05rem; margin:0; font-weight:600; white-space:nowrap; }
-      .status { display:flex; align-items:center; gap:0.35rem; font-size:0.8rem; color:var(--muted); }
-      .dot { width:0.6rem; height:0.6rem; border-radius:50%; background:var(--muted); }
-      .dot.ok { background:var(--ok); } .dot.bad { background:var(--danger); }
+      /* The conversation you are in, not the name of the app — you always know
+         which app you opened, and after twenty saved threads you often do not
+         know which one is on screen. */
+      #chatTitle {
+        font-size:var(--fs-md); margin:0; font-weight:600; white-space:nowrap;
+        overflow:hidden; text-overflow:ellipsis; min-width:0;
+      }
+      .head-title { display:flex; flex-direction:column; min-width:0; }
+      .status { display:flex; align-items:center; gap:0.35rem;
+                font-size:var(--fs-xs); color:var(--muted); }
+      .dot { width:0.5rem; height:0.5rem; border-radius:50%; background:var(--faint);
+             box-shadow:0 0 0 3px transparent; transition:box-shadow 0.2s; }
+      .dot.ok { background:var(--ok); box-shadow:0 0 0 3px rgba(34,197,94,0.15); }
+      .dot.bad { background:var(--danger); box-shadow:0 0 0 3px rgba(240,82,82,0.15); }
       .spacer { flex:1 1 auto; }
-      select, button {
-        font-family:inherit; font-size:0.9rem;
-        background:var(--panel2); color:var(--text);
-        border:1px solid var(--border); border-radius:0.5rem;
-        padding:0.4rem 0.6rem;
+
+      /* ---- Controls ----------------------------------------------------- */
+      select, button, input, textarea {
+        font-family:inherit; font-size:var(--fs-sm);
+        background:var(--surface2); color:var(--text);
+        border:1px solid var(--border); border-radius:var(--r1);
+        padding:0.42rem 0.6rem;
       }
       select { max-width:16rem; }
-      button { cursor:pointer; }
-      button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
-      button.primary:hover { background:var(--accent2); }
-      button.danger { background:var(--danger); border-color:var(--danger); color:#fff; font-weight:600; }
-      button:disabled { opacity:0.55; cursor:default; }
+      button { cursor:pointer; display:inline-flex; align-items:center;
+               justify-content:center; gap:0.35rem; line-height:1.2;
+               transition:background 0.12s, border-color 0.12s, color 0.12s; }
+      button:hover:not(:disabled) { background:var(--surface3); }
+      button.primary { background:var(--accent); border-color:var(--accent);
+                       color:var(--on-accent); font-weight:600; }
+      button.primary:hover:not(:disabled) { background:var(--accent-hover);
+                                            border-color:var(--accent-hover); }
+      button.danger { background:var(--danger); border-color:var(--danger);
+                      color:#fff; font-weight:600; }
+      button.danger:hover:not(:disabled) { filter:brightness(1.08);
+                                           background:var(--danger); }
+      button:disabled { opacity:0.5; cursor:default; }
+      /* Square, icon-only, quiet until you point at it. */
+      .iconbtn { width:2.15rem; height:2.15rem; padding:0; color:var(--muted);
+                 background:transparent; border-color:transparent; }
+      .iconbtn:hover:not(:disabled) { background:var(--surface2); color:var(--text); }
+      .iconbtn .i { width:1.15rem; height:1.15rem; }
+
+      /* ---- Conversation -------------------------------------------------- */
       #chat {
-        flex:1 1 auto; overflow-y:auto; padding:1.25rem 1rem;
-        display:flex; flex-direction:column; gap:0.85rem;
+        flex:1 1 auto; overflow-y:auto; padding:1.5rem 1rem 0.5rem;
+        display:flex; flex-direction:column; gap:0.9rem;
+        scroll-behavior:smooth;
       }
-      .wrap { width:100%; max-width:820px; margin:0 auto; }
+      .wrap { width:100%; max-width:48rem; margin:0 auto; }
       .msg { display:flex; }
       .msg.user { justify-content:flex-end; }
-      .col { display:flex; flex-direction:column; max-width:85%; }
+      .col { display:flex; flex-direction:column; max-width:min(85%,40rem); }
       .msg.user .col { align-items:flex-end; }
-      .bubble { padding:0.65rem 0.85rem; border-radius:0.9rem;
-        white-space:pre-wrap; word-wrap:break-word; line-height:1.45; }
-      .msg.user .bubble { background:var(--user); color:#fff; border-bottom-right-radius:0.2rem; }
-      .msg.assistant .bubble { background:var(--assistant); border-bottom-left-radius:0.2rem; }
-      .msg.error .bubble { background:#3f1d1d; border:1px solid var(--danger); color:#fecaca; }
-      .role { font-size:0.68rem; text-transform:uppercase; letter-spacing:0.04em;
-              color:var(--muted); margin:0 0.3rem 0.2rem; }
-      .meta { font-size:0.7rem; color:var(--muted); margin:0.25rem 0.3rem 0; }
+      .bubble { padding:0.7rem 0.9rem; border-radius:var(--r3);
+        white-space:pre-wrap; word-wrap:break-word; line-height:1.55;
+        font-size:var(--fs-md); box-shadow:var(--shadow-bubble); }
+      .msg.user .bubble { background:var(--accent); color:var(--on-accent);
+        border-bottom-right-radius:0.35rem; }
+      .msg.assistant .bubble { background:var(--assistant);
+        border:1px solid var(--assistant-border); border-bottom-left-radius:0.35rem; }
+      .msg.error .bubble { background:color-mix(in srgb, var(--danger) 12%, var(--surface));
+        border:1px solid var(--danger); color:var(--danger); }
+      .role { font-size:var(--fs-xs); text-transform:uppercase; letter-spacing:0.05em;
+              color:var(--faint); margin:0 0.4rem 0.25rem; font-weight:600; }
+      .meta { font-size:var(--fs-xs); color:var(--faint); margin:0.3rem 0.4rem 0; }
       /* Quiet until you look for it — this sits under every reply. */
-      .replycopy { font-size:0.68rem; padding:0.15rem 0.45rem; margin:0.25rem 0.3rem 0;
-        background:transparent; color:var(--muted); border:1px solid var(--border);
-        border-radius:0.35rem; opacity:0.6; }
+      .replycopy { align-self:flex-start; font-size:var(--fs-xs);
+        padding:0.2rem 0.5rem; margin:0.3rem 0.4rem 0; background:transparent;
+        color:var(--faint); border:1px solid var(--border-soft);
+        border-radius:var(--r1); opacity:0.75; }
       .replycopy:hover { opacity:1; color:var(--text); }
-      .sources { font-size:0.72rem; color:var(--muted); margin:0.3rem 0.3rem 0; }
+      .sources { font-size:var(--fs-xs); color:var(--muted); margin:0.35rem 0.4rem 0; }
       .sources a { color:var(--muted); text-decoration:underline; }
       .sources a:hover { color:var(--text); }
-      .webstatus { font-size:0.75rem; color:var(--muted); font-style:italic;
-        margin:0 0.3rem 0.3rem; }
+      .webstatus { font-size:var(--fs-xs); color:var(--muted); font-style:italic;
+        margin:0 0.4rem 0.3rem; }
       details.think {
-        margin:0 0 0.4rem; background:var(--panel2); border:1px solid var(--border);
-        border-radius:0.6rem; padding:0.2rem 0.55rem;
+        margin:0 0 0.45rem; background:var(--surface2);
+        border:1px solid var(--border-soft); border-radius:var(--r2);
+        padding:0.15rem 0.6rem;
       }
-      details.think summary { cursor:pointer; font-size:0.75rem; color:var(--muted); padding:0.25rem 0; }
-      .think-body { white-space:pre-wrap; font-size:0.85rem; color:var(--muted);
-        border-top:1px solid var(--border); padding:0.4rem 0; margin-top:0.2rem; }
-      .empty { color:var(--muted); text-align:center; margin-top:15vh; font-size:0.95rem; }
-      footer { border-top:1px solid var(--border); background:var(--panel); padding:0.6rem 1rem; }
-      .composer { display:flex; gap:0.5rem; align-items:flex-end; }
+      details.think summary { cursor:pointer; font-size:var(--fs-xs);
+        color:var(--muted); padding:0.3rem 0; }
+      .think-body { white-space:pre-wrap; font-size:var(--fs-sm); color:var(--muted);
+        border-top:1px solid var(--border-soft); padding:0.45rem 0; margin-top:0.2rem; }
+
+      /* ---- The empty conversation ---------------------------------------
+         A whole screen used to hold one grey sentence. It is the only moment
+         the app can say what it is for, and the routines are the answer most
+         of the time, so they are the thing on offer. */
+      .empty { display:flex; flex-direction:column; align-items:center;
+               text-align:center; gap:0.4rem; padding:2.5rem 0.5rem 1rem;
+               color:var(--muted); }
+      .empty-mark { width:3rem; height:3rem; border-radius:var(--r2);
+        background:var(--accent); color:#fff; display:flex; align-items:center;
+        justify-content:center; margin-bottom:0.5rem; box-shadow:var(--shadow1); }
+      .empty-mark .i { width:1.6rem; height:1.6rem; }
+      .empty h2 { margin:0; font-size:var(--fs-lg); color:var(--text);
+                  font-weight:650; }
+      .empty p { margin:0; font-size:var(--fs-sm); max-width:26rem; }
+      .empty-routines { display:flex; flex-wrap:wrap; gap:0.5rem;
+        justify-content:center; margin-top:1.2rem; }
+      .startcard {
+        display:flex; flex-direction:column; align-items:flex-start; gap:0.15rem;
+        text-align:left; min-width:9.5rem; max-width:14rem;
+        padding:0.7rem 0.85rem; border-radius:var(--r2);
+        background:var(--surface); border:1px solid var(--border);
+        box-shadow:var(--shadow1);
+      }
+      .startcard:hover { border-color:var(--accent); background:var(--surface); }
+      .startcard b { font-size:var(--fs-sm); font-weight:600; color:var(--text); }
+      .startcard span { font-size:var(--fs-xs); color:var(--muted);
+        overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+        max-width:100%; }
+
+      /* ---- Footer and composer ------------------------------------------- */
+      footer { background:var(--surface); border-top:1px solid var(--border-soft);
+               padding:0.55rem 1rem 0.7rem; }
+      /* The card is the composer: the box you type in, the photos riding with
+         it and the buttons that act on it are one object, not three stacked
+         rows that happen to be adjacent. */
+      .composer-card {
+        background:var(--surface2); border:1px solid var(--border);
+        border-radius:var(--r3); padding:0.5rem 0.55rem 0.45rem;
+        transition:border-color 0.15s, box-shadow 0.15s;
+      }
+      .composer-card:focus-within { border-color:var(--accent);
+        box-shadow:0 0 0 3px var(--accent-soft); }
+      .composer { display:flex; flex-wrap:wrap; align-items:center; gap:0.35rem; }
       textarea {
-        flex:1 1 auto; min-width:0; resize:none; font-family:inherit; font-size:0.95rem;
-        background:var(--panel2); color:var(--text);
-        border:1px solid var(--border); border-radius:0.7rem;
-        padding:0.6rem 0.75rem; max-height:40vh; min-height:2.6rem; line-height:1.4;
+        flex:1 1 100%; order:-1; min-width:0; resize:none;
+        font-size:var(--fs-md); background:transparent; color:var(--text);
+        border:0; border-radius:0; padding:0.35rem 0.4rem 0.45rem;
+        max-height:40vh; min-height:2.2rem; line-height:1.5;
       }
+      textarea:focus { outline:none; }
+      textarea::placeholder { color:var(--faint); }
       .composer button { flex:0 0 auto; white-space:nowrap; }
-      #mic { font-size:1.1rem; line-height:1; padding:0.5rem 0.6rem; }
-      #mic.rec { background:var(--danger); border-color:var(--danger); animation:pulse 1.2s infinite; }
-      .voicebar { display:flex; align-items:center; gap:0.5rem; margin-bottom:0.5rem; flex-wrap:wrap; }
-      .voicebar-label { font-size:0.75rem; color:var(--muted); white-space:nowrap; }
+      .composer .iconbtn { width:2.3rem; height:2.3rem; }
+      /* Both get the rule: whichever is on screen sits at the right-hand end. */
+      #send, #stop { margin-left:auto; padding:0.5rem 1.1rem;
+                     border-radius:var(--r2); font-size:var(--fs-sm); }
+      #mic.rec { background:var(--danger); border-color:var(--danger); color:#fff;
+                 animation:pulse 1.2s infinite; }
+      #mic .i-stop, #mic.rec .i-mic { display:none; }
+      #mic.rec .i-stop { display:block; }
+      @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.6;} }
+
+      /* ---- The rows above the composer ------------------------------------ */
+      .voicebar { display:flex; align-items:center; gap:0.4rem;
+                  margin-bottom:0.45rem; flex-wrap:wrap; }
+      .voicebar-label { font-size:var(--fs-xs); color:var(--faint); white-space:nowrap; }
+      /* A pill that reads as on or off at a glance. The checkbox is still a
+         real checkbox — it is the label that got the styling, because the
+         label is what a thumb lands on. */
       .voicebar-check {
-        display:flex; align-items:center; gap:0.3rem; cursor:pointer;
-        font-size:0.75rem; color:var(--muted); white-space:nowrap;
+        display:flex; align-items:center; gap:0.35rem; cursor:pointer;
+        font-size:var(--fs-xs); color:var(--muted); white-space:nowrap;
+        padding:0.3rem 0.65rem; border-radius:var(--pill);
+        background:var(--surface2); border:1px solid var(--border);
+        user-select:none;
       }
-      .voicebar-check input { accent-color:var(--accent); margin:0; }
-      #attach, #shot, #camera { font-size:1.05rem; line-height:1; padding:0.5rem 0.6rem; }
-      .thumbs { display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.5rem; }
-      .thumb { position:relative; width:3.5rem; height:3.5rem; border-radius:0.5rem;
-        overflow:hidden; border:1px solid var(--border); }
+      .voicebar-check:hover { border-color:var(--faint); }
+      .voicebar-check input { accent-color:var(--accent); margin:0;
+                              width:0.85rem; height:0.85rem; }
+      .voicebar-check:has(input:checked) { background:var(--accent-soft);
+        border-color:var(--accent); color:var(--text); font-weight:600; }
+      .voicebar-check:has(input:focus-visible) { outline:2px solid var(--accent);
+        outline-offset:2px; }
+      .thumbs { display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.45rem; }
+      .thumb { position:relative; width:3.4rem; height:3.4rem; border-radius:var(--r1);
+        overflow:hidden; border:1px solid var(--border); cursor:pointer; }
       .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
       .thumb button {
-        position:absolute; top:0; right:0; padding:0 0.28rem; font-size:0.7rem;
-        line-height:1.3; border:0; border-radius:0 0 0 0.4rem;
-        background:rgba(0,0,0,0.65); color:#fff;
+        position:absolute; top:0; right:0; padding:0 0.3rem; font-size:0.7rem;
+        line-height:1.4; border:0; border-radius:0 0 0 var(--r1);
+        background:rgba(0,0,0,0.7); color:#fff;
       }
-      .bubble img { max-width:min(320px,100%); border-radius:0.5rem;
+      .thumb button:hover { background:rgba(0,0,0,0.85); }
+      .thumb .stamp { position:absolute; bottom:0; left:0; padding:0 0.25rem;
+        font-size:0.6rem; line-height:1.4; background:rgba(0,0,0,0.7); color:#fff;
+        border-radius:0 var(--r1) 0 0; }
+      /* Whether a photo's own timestamp actually came through. The failure this
+         guards is silent otherwise: with photo details off there is no EXIF, no
+         metadata turn, and an answer to half the question with nothing on
+         screen to say why. */
+      .thumb .stamp.muted { opacity:0.6; }
+      .hint { color:var(--faint); font-size:var(--fs-xs); margin:0.4rem 0.3rem 0;
+              min-height:1rem; }
+      .insecure { margin:0 0.2rem 0.5rem; }
+      .insecure a { color:var(--accent); word-break:break-all; }
+      #voiceModel { flex:0 1 auto; min-width:0; max-width:16rem;
+                    font-size:var(--fs-xs); padding:0.35rem 0.4rem; }
+
+      .bubble img { max-width:min(320px,100%); border-radius:var(--r1);
         margin-bottom:0.35rem; display:block; }
       /* Rendered markdown. white-space:normal because the renderer supplies the
          structure; pre-wrap would double every blank line. */
       .bubble.md { white-space:normal; }
       .bubble.md > *:first-child { margin-top:0; }
       .bubble.md > *:last-child { margin-bottom:0; }
-      .bubble.md p { margin:0.5rem 0; }
+      .bubble.md p { margin:0.55rem 0; }
       .bubble.md h3, .bubble.md h4, .bubble.md h5, .bubble.md h6 {
-        margin:0.7rem 0 0.35rem; font-size:1rem; }
-      .bubble.md ul, .bubble.md ol { margin:0.5rem 0; padding-left:1.2rem; }
-      .bubble.md li { margin:0.15rem 0; }
-      .bubble.md blockquote { margin:0.5rem 0; padding-left:0.7rem;
-        border-left:2px solid var(--border); color:var(--muted); }
-      .bubble.md a { color:#93c5fd; }
-      .bubble.md code { background:rgba(0,0,0,0.35); padding:0.1rem 0.3rem;
+        margin:0.9rem 0 0.4rem; font-size:var(--fs-md); font-weight:650; }
+      .bubble.md ul, .bubble.md ol { margin:0.55rem 0; padding-left:1.3rem; }
+      .bubble.md li { margin:0.2rem 0; }
+      .bubble.md blockquote { margin:0.55rem 0; padding:0.1rem 0 0.1rem 0.8rem;
+        border-left:3px solid var(--border); color:var(--muted); }
+      .bubble.md a { color:var(--accent); }
+      .bubble.md code { background:var(--surface2); padding:0.1rem 0.32rem;
         border-radius:0.3rem; font-size:0.88em;
         font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-      .code { position:relative; margin:0.6rem 0; }
-      .code pre { margin:0; padding:0.7rem 0.8rem; overflow-x:auto;
-        background:#0b1222; border:1px solid var(--border); border-radius:0.6rem; }
-      .code pre code { background:none; padding:0; font-size:0.85em; line-height:1.45; }
+      .msg.user .bubble.md code { background:rgba(255,255,255,0.18); }
+      .msg.user .bubble.md a { color:#fff; }
+      .code { position:relative; margin:0.65rem 0; }
+      .code pre { margin:0; padding:0.75rem 0.85rem; overflow-x:auto;
+        background:var(--code-bg); border:1px solid var(--border);
+        border-radius:var(--r2); }
+      .code pre code { background:none; padding:0; font-size:0.84em; line-height:1.5; }
       .code pre[data-lang]::before { content:attr(data-lang); position:absolute;
-        top:0.35rem; left:0.7rem; font-size:0.65rem; color:var(--muted);
-        text-transform:uppercase; letter-spacing:0.06em; }
-      .code pre[data-lang] { padding-top:1.4rem; }
-      .code .copy { position:absolute; top:0.3rem; right:0.35rem; font-size:0.68rem;
-        padding:0.15rem 0.4rem; background:var(--panel2); color:var(--muted);
-        border:1px solid var(--border); border-radius:0.35rem; opacity:0.75; }
+        top:0.4rem; left:0.85rem; font-size:0.62rem; color:var(--faint);
+        text-transform:uppercase; letter-spacing:0.07em; }
+      .code pre[data-lang] { padding-top:1.5rem; }
+      .code .copy { position:absolute; top:0.35rem; right:0.4rem; font-size:0.66rem;
+        padding:0.18rem 0.45rem; background:var(--surface); color:var(--muted);
+        border:1px solid var(--border); border-radius:var(--r1); opacity:0.8; }
       .code .copy:hover { opacity:1; color:var(--text); }
-      #voiceModel { flex:0 1 auto; min-width:0; max-width:16rem; font-size:0.82rem; padding:0.45rem 0.4rem; }
-      @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.55;} }
-      .hint { color:var(--muted); font-size:0.72rem; margin:0.35rem 0.2rem 0; min-height:1rem; }
-      #menu { font-size:1rem; line-height:1; padding:0.35rem 0.55rem; }
-      .backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:20; }
-      .drawer {
-        position:fixed; top:0; left:0; bottom:0; z-index:21; width:min(20rem,86vw);
-        transition:width 0.12s ease;
-        background:var(--panel); border-right:1px solid var(--border);
-        display:flex; flex-direction:column; padding:0.75rem;
-      }
-      .drawer-head { display:flex; align-items:center; justify-content:space-between;
-        margin-bottom:0.6rem; font-size:0.95rem; }
-      .drawer-head button { padding:0.2rem 0.45rem; font-size:0.8rem; }
-      .drawer-new { width:100%; margin-bottom:0.6rem; font-weight:600; }
-      #convoList { overflow-y:auto; display:flex; flex-direction:column; gap:0.3rem; }
-      .convo { display:flex; align-items:stretch; gap:0.2rem; }
-      .convo-open {
-        flex:1 1 auto; min-width:0; text-align:left; display:flex; flex-direction:column;
-        gap:0.1rem; padding:0.4rem 0.5rem; background:var(--panel2);
-      }
-      .convo.active .convo-open { border-color:var(--accent); }
-      .convo-title { font-size:0.82rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .convo-meta { font-size:0.68rem; color:var(--muted); }
-      .convo-act { flex:0 0 auto; padding:0 0.4rem; font-size:0.75rem; color:var(--muted); }
-      .convo-act:hover { color:var(--text); }
-      .convo-empty { color:var(--muted); font-size:0.8rem; margin:0.4rem 0.2rem; }
 
       /* A comparison table is wider than a phone more often than not, so it
          scrolls inside its own box. Letting it widen the bubble instead would
          put the whole conversation on a horizontal scrollbar. */
-      .tablewrap { overflow-x:auto; margin:0.6rem 0; }
-      .bubble.md table { border-collapse:collapse; font-size:0.85rem; min-width:100%; }
+      .tablewrap { overflow-x:auto; margin:0.65rem 0; }
+      .bubble.md table { border-collapse:collapse; font-size:var(--fs-sm);
+                         min-width:100%; }
       .bubble.md th, .bubble.md td {
-        border:1px solid var(--border); padding:0.3rem 0.55rem;
+        border:1px solid var(--border); padding:0.35rem 0.6rem;
         text-align:left; vertical-align:top;
       }
-      .bubble.md th { background:var(--panel2); font-weight:600; white-space:nowrap; }
-      .bubble.md tbody tr:nth-child(even) td { background:rgba(255,255,255,0.02); }
-      .bubble.md hr { border:0; border-top:1px solid var(--border); margin:0.9rem 0; }
+      .bubble.md th { background:var(--surface2); font-weight:600; white-space:nowrap; }
+      .bubble.md tbody tr:nth-child(even) td { background:var(--surface2); }
+      .bubble.md hr { border:0; border-top:1px solid var(--border); margin:1rem 0; }
+
+      /* ---- Drawer -------------------------------------------------------- */
+      .backdrop { position:fixed; inset:0; background:rgba(3,7,18,0.55);
+                  z-index:20; backdrop-filter:blur(2px); }
+      .drawer {
+        position:fixed; top:0; left:0; bottom:0; z-index:21; width:min(21rem,86vw);
+        transition:width 0.14s ease;
+        background:var(--surface); border-right:1px solid var(--border);
+        display:flex; flex-direction:column; padding:0.7rem;
+        box-shadow:var(--shadow2);
+      }
+      /* Wide enough for a sidebar and there is no reason to dim the app to
+         show a list of its own conversations: the drawer becomes a column of
+         the layout, and the ☰ button collapses it rather than dismissing it. */
+      @media (min-width: 1024px) {
+        .drawer { position:static; height:100dvh; box-shadow:none;
+                  flex:0 0 auto; }
+      }
+      .drawer-head { display:flex; align-items:center; justify-content:space-between;
+        gap:0.4rem; margin-bottom:0.6rem; }
+      .brand { display:flex; align-items:center; gap:0.5rem; min-width:0;
+               padding:0.15rem 0.2rem 0.5rem; }
+      .brand .mark { width:1.6rem; height:1.6rem; border-radius:0.45rem;
+        background:var(--accent); color:#fff; display:flex; align-items:center;
+        justify-content:center; flex:0 0 auto; }
+      .brand .mark .i { width:0.95rem; height:0.95rem; }
+      .brand h1 { font-size:var(--fs-md); margin:0; font-weight:650;
+        white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      /* Capped: the tabs fill a 21rem drawer, but Records widens it to 56rem
+         and three words spread across that read as a navigation bar for the
+         whole app rather than a switch between three lists. */
+      .drawer-tabs { display:flex; gap:0.2rem; background:var(--surface2);
+        border:1px solid var(--border-soft); border-radius:var(--pill);
+        padding:0.2rem; flex:1 1 auto; min-width:0; max-width:22rem; }
+      .tab { font-size:var(--fs-xs); padding:0.35rem 0.7rem; color:var(--muted);
+        background:transparent; border:0; border-radius:var(--pill);
+        flex:1 1 0; min-width:0; }
+      .tab:hover:not(.active) { background:var(--surface3); }
+      .tab.active { color:var(--text); background:var(--surface);
+        border:0; font-weight:600; box-shadow:var(--shadow1); }
+      .drawer-new { width:100%; margin-bottom:0.6rem; font-weight:600;
+        background:var(--accent); border-color:var(--accent);
+        color:var(--on-accent); padding:0.55rem; border-radius:var(--r2); }
+      .drawer-new:hover { background:var(--accent-hover); }
+      #convoList { overflow-y:auto; display:flex; flex-direction:column; gap:0.25rem; }
+      .convo { display:flex; align-items:stretch; gap:0.15rem; border-radius:var(--r1); }
+      .convo-open {
+        flex:1 1 auto; min-width:0; text-align:left; display:flex;
+        flex-direction:column; align-items:flex-start; gap:0.1rem;
+        padding:0.45rem 0.55rem; background:transparent; border-color:transparent;
+      }
+      .convo-open:hover { background:var(--surface2); }
+      .convo.active .convo-open { background:var(--accent-soft);
+        border-color:var(--accent); }
+      .convo-title { font-size:var(--fs-sm); overflow:hidden;
+        text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+      .convo-meta { font-size:var(--fs-xs); color:var(--faint); }
+      .convo-act { flex:0 0 auto; padding:0 0.45rem; font-size:var(--fs-xs);
+        color:var(--faint); background:transparent; border-color:transparent; }
+      .convo-act:hover { color:var(--text); background:var(--surface2); }
+      .convo-empty { color:var(--muted); font-size:var(--fs-sm); margin:0.5rem 0.2rem;
+        line-height:1.5; }
 
       /* One row that scrolls sideways rather than four rows that eat a phone
          screen — the strip has to stay a single line at ten routines. */
-      .chips { display:flex; gap:0.35rem; flex:1 1 auto; min-width:0;
+      .chips { display:flex; gap:0.35rem; flex:0 1 auto; min-width:0;
                overflow-x:auto; scrollbar-width:none; }
       .chips::-webkit-scrollbar { display:none; }
-      .chip { flex:0 0 auto; white-space:nowrap; font-size:0.78rem;
-              padding:0.35rem 0.65rem; border-radius:999px;
-              background:var(--panel2); color:var(--muted); }
+      .chip { flex:0 0 auto; white-space:nowrap; font-size:var(--fs-xs);
+              padding:0.4rem 0.75rem; border-radius:var(--pill);
+              background:var(--surface2); color:var(--muted); }
+      .chip:hover:not(.active) { background:var(--surface3); color:var(--text); }
       .chip.active { background:var(--accent); border-color:var(--accent);
-                     color:#fff; font-weight:600; }
-      .chip-edit { flex:0 0 auto; padding:0.35rem 0.5rem; font-size:0.8rem; color:var(--muted); }
-      .drawer-tabs { display:flex; gap:0.3rem; }
-      .tab { font-size:0.85rem; padding:0.25rem 0.6rem; color:var(--muted); }
-      .tab.active { color:var(--text); border-color:var(--accent); }
+                     color:var(--on-accent); font-weight:600; }
+      .chip-edit { flex:0 0 auto; padding:0.4rem 0.55rem; color:var(--muted); }
       #convoPane, #routinePane { display:flex; flex-direction:column;
                                  flex:1 1 auto; min-width:0; min-height:0; }
-      #routineList { overflow-y:auto; display:flex; flex-direction:column; gap:0.3rem; }
-      #routineEdit { display:flex; flex-direction:column; gap:0.35rem; overflow-y:auto; }
-      #routineEdit label { font-size:0.72rem; color:var(--muted); margin-top:0.2rem; }
-      #routineEdit input, #routineEdit select { width:100%; max-width:none; }
-      #routineEdit input { font-family:inherit; font-size:0.9rem;
-        background:var(--panel2); color:var(--text);
-        border:1px solid var(--border); border-radius:0.5rem; padding:0.4rem 0.6rem; }
-      #routineEdit textarea { min-height:9rem; max-height:none; font-size:0.85rem; }
-      .routine-acts { display:flex; gap:0.4rem; margin-top:0.5rem; }
-      .routine-acts button { flex:1 1 auto; }
-      /* Whether a photo's own timestamp actually came through. The failure this
-         guards is silent otherwise: with photo details off there is no EXIF, no
-         metadata turn, and an answer to half the question with nothing on
-         screen to say why. */
-      .thumb .stamp.muted { opacity:0.55; }
+      #routineList { overflow-y:auto; display:flex; flex-direction:column; gap:0.25rem; }
+      #routineEdit { display:flex; flex-direction:column; gap:0.3rem; overflow-y:auto; }
+      #routineEdit label { font-size:var(--fs-xs); color:var(--muted);
+        margin-top:0.35rem; font-weight:600; }
+      #routineEdit input, #routineEdit select, #routineEdit textarea {
+        width:100%; max-width:none; }
+      #routineEdit textarea { min-height:9rem; max-height:none;
+        font-size:var(--fs-sm); background:var(--surface2);
+        border:1px solid var(--border); border-radius:var(--r1);
+        padding:0.5rem 0.6rem; order:0; flex:none; }
+      .routine-acts { display:flex; gap:0.4rem; margin-top:0.7rem; }
+      .routine-acts button { flex:1 1 auto; padding:0.5rem; }
+
       /* A sheet from the bottom rather than a side drawer: it is reached from
-         the composer, which is where a thumb already is on a phone. */
+         the composer, which is where a thumb already is on a phone. On a
+         desktop the same panel floats clear of the edges instead. */
       .sheet {
         position:fixed; left:0; right:0; bottom:0; z-index:22; max-height:70vh;
-        overflow-y:auto; background:var(--panel);
+        overflow-y:auto; background:var(--surface);
         border-top:1px solid var(--border);
-        border-radius:0.9rem 0.9rem 0 0; padding:0.75rem 0.9rem 1.1rem;
+        border-radius:var(--r3) var(--r3) 0 0; padding:0.8rem 0.95rem 1.2rem;
+        box-shadow:var(--shadow2);
       }
-      .metarow { display:flex; gap:0.6rem; padding:0.28rem 0;
-                 border-bottom:1px solid var(--border); font-size:0.82rem; }
+      @media (min-width: 1024px) {
+        .sheet { left:auto; right:1.5rem; bottom:1.5rem; width:min(30rem,42vw);
+          border:1px solid var(--border); border-radius:var(--r3); }
+      }
+      .metarow { display:flex; gap:0.6rem; padding:0.32rem 0;
+                 border-bottom:1px solid var(--border-soft); font-size:var(--fs-sm); }
       .metarow:last-child { border-bottom:0; }
       .metaname { flex:0 0 9rem; color:var(--muted); }
       .metarow a { color:var(--accent); word-break:break-all; }
-      /* Records are a table, not a list of titles, and on a desktop there is a
-         whole screen next to a 20rem drawer doing nothing. */
-      .drawer.wide { width:min(64rem,94vw); }
+
+      /* ---- Records ------------------------------------------------------- */
+      /* A log wants width, and next to a 21rem sidebar there is a whole screen
+         doing nothing. Capped so the conversation it was opened from is still
+         on screen behind it. */
+      .drawer.wide { width:min(56rem,62vw); }
+      @media (max-width: 1023px) { .drawer.wide { width:min(56rem,94vw); } }
       .exportbar { display:flex; gap:0.4rem; align-items:center; margin:0.3rem 0 0.6rem; }
       .exportbar a { text-decoration:none; }
       .recordfilter { flex-wrap:wrap; margin-bottom:0.4rem; }
@@ -251,10 +506,10 @@ _PAGE = """<!doctype html>
          because that block has to override them, and both selectors weigh the
          same — so the later one wins. */
       #recordList table { border-collapse:collapse; min-width:100%;
-                          font-size:0.8rem; }
+                          font-size:var(--fs-xs); }
       #recordList th, #recordList td { border:1px solid var(--border);
-        padding:0.3rem 0.45rem; text-align:left; vertical-align:top; }
-      #recordList th { background:var(--panel2); font-weight:600;
+        padding:0.35rem 0.5rem; text-align:left; vertical-align:top; }
+      #recordList th { background:var(--surface2); font-weight:600;
                        white-space:nowrap; }
 
       /* Narrow enough and a table stops being readable at any width — the
@@ -267,8 +522,9 @@ _PAGE = """<!doctype html>
           display:block; width:auto; min-width:0;
         }
         #recordList thead { display:none; }
-        #recordList tr { border:1px solid var(--border); border-radius:0.6rem;
-          margin-bottom:0.5rem; padding:0.35rem 0.55rem; position:relative; }
+        #recordList tr { border:1px solid var(--border); border-radius:var(--r2);
+          margin-bottom:0.5rem; padding:0.4rem 0.6rem; position:relative;
+          background:var(--surface2); }
         #recordList td { border:0; padding:0.22rem 0; display:flex; gap:0.6rem; }
         #recordList td::before { content:attr(data-label); flex:0 0 7.5rem;
           color:var(--muted); }
@@ -281,18 +537,16 @@ _PAGE = """<!doctype html>
 
       /* A line under the reply saying what was kept, so a record appearing is
          visible when it happens rather than discovered in a drawer later. */
-      .kept { font-size:0.72rem; color:var(--muted); margin:0.2rem 0 0 0.2rem;
+      .kept { font-size:var(--fs-xs); color:var(--muted); margin:0.3rem 0 0 0.3rem;
               cursor:pointer; }
       .kept:hover { color:var(--text); }
       #recordList { overflow:auto; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
       #recordList a.drawer-new { text-align:center; text-decoration:none;
-                                 padding:0.4rem; color:var(--text); }
-      .thumb { cursor:pointer; }
-      .thumb .stamp { position:absolute; bottom:0; left:0; padding:0 0.2rem;
-        font-size:0.6rem; line-height:1.3; background:rgba(0,0,0,0.65);
-        border-radius:0 0.35rem 0 0; }
+                                 padding:0.45rem; color:var(--on-accent);
+                                 display:flex; align-items:center;
+                                 justify-content:center; }
 
       /* While the keyboard is up, everything above the composer goes away —
          see fitFooter(). Not display:none on the composer itself: the point is
@@ -304,31 +558,27 @@ _PAGE = """<!doctype html>
 
       /* Phones: reclaim vertical space and stop the header wrapping. */
       @media (max-width: 640px) {
-        header { gap:0.5rem; padding:0.5rem 0.7rem; flex-wrap:nowrap; }
-        header h1 { font-size:0.95rem; overflow:hidden; text-overflow:ellipsis; }
+        header { gap:0.4rem; padding:0.45rem 0.6rem; flex-wrap:nowrap; }
         .model-label { display:none; }          /* the dropdown speaks for itself */
         #statusText { display:none; }           /* the coloured dot already says it */
-        #model { max-width:9rem; font-size:0.8rem; padding:0.35rem 0.4rem; }
-        #newChat { font-size:0.8rem; padding:0.35rem 0.5rem; white-space:nowrap; }
-        #chat { padding:0.9rem 0.7rem; }
-        footer { padding:0.5rem 0.7rem; }
+        #model { max-width:8.5rem; font-size:var(--fs-xs); padding:0.35rem 0.4rem; }
+        #newChat span { display:none; }         /* the ＋ is the whole button here */
+        #newChat { padding:0; }
+        #chat { padding:1rem 0.7rem 0.4rem; }
+        footer { padding:0.45rem 0.6rem 0.6rem; }
         .col { max-width:92%; }
         textarea { font-size:1rem; }            /* < 1rem makes iOS zoom on focus */
-        /* Four controls plus the textarea do not fit a phone: measured at
-           360px the input collapsed to 63px, and to a 0px content box at 320px.
-           Wrapping is scoped here — applied globally it moves the textarea onto
-           its own row on the desktop, which is a redesign, not a fix. */
-        .composer { gap:0.35rem; flex-wrap:wrap; }
-        #input { flex:1 1 100%; }
-        .composer button { padding:0.5rem 0.45rem; }
-        button.primary { padding:0.5rem 0.7rem; }
-        .voicebar { gap:0.4rem 0.6rem; }
+        .composer { gap:0.3rem; }
+        button.primary { padding:0.5rem 0.9rem; }
+        .voicebar { gap:0.35rem; margin-bottom:0.4rem; }
         #webnote { display:none; }   /* the tooltip covers it */
         #routinebar, #togglebar { flex-wrap:nowrap; overflow-x:auto;
                                    scrollbar-width:none; }
         #togglebar::-webkit-scrollbar { display:none; }
         #togglebar .voicebar-check { flex:0 0 auto; white-space:nowrap; }
         #exifnote, #webnote { display:none; }   /* the tooltips carry these */
+        .empty { padding:1.5rem 0.5rem 0.5rem; }
+        .startcard { min-width:8rem; }
         /* Every control here measured under 44px, which is the minimum every
            platform guideline asks for; the checkbox rows were 14px tall. The
            padding is on the label rather than the box, because the label is
@@ -336,22 +586,62 @@ _PAGE = """<!doctype html>
         .chip { padding:0.6rem 0.8rem; min-height:44px; display:flex; align-items:center; }
         .voicebar-check { min-height:44px; }
         .composer button { min-height:44px; padding:0.5rem 0.6rem; }
-        #menu, #newChat { min-height:40px; }
+        .composer .iconbtn { width:44px; height:44px; }
+        /* Measured at 34px square before this: .iconbtn is sized for a
+           mouse, and the header is three of them in a row on a phone. */
+        #menu, #theme, #newChat { min-height:40px; min-width:40px;
+                                  width:40px; height:40px; }
       }
-      .insecure { margin:0 0.2rem 0.5rem; }
-      .insecure a { color:var(--accent); word-break:break-all; }
+
+      /* The button shows the theme it would switch you TO, which is the one
+         thing about a theme toggle people read without being told. */
+      #theme .i-sun { display:none; }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) #theme .i-moon { display:none; }
+        :root:not([data-theme="light"]) #theme .i-sun { display:block; }
+      }
+      :root[data-theme="dark"] #theme .i-moon { display:none; }
+      :root[data-theme="dark"] #theme .i-sun { display:block; }
+      :root[data-theme="light"] #theme .i-moon { display:block; }
+      :root[data-theme="light"] #theme .i-sun { display:none; }
     </style>
   </head>
   <body>
+    <!-- One sprite for every icon-only control. Inline SVG rather than emoji:
+         emoji are drawn by the platform in full colour at whatever weight it
+         likes, so a paperclip, a camera and a screenshot button sat side by
+         side in three different visual styles. These inherit currentColor and
+         one stroke width, so a row of them reads as one set of controls. -->
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-clip" viewBox="0 0 24 24"><path d="M20.5 11.6l-8.4 8.4a5 5 0 0 1-7.1-7.1l8.5-8.5a3.5 3.5 0 0 1 4.9 4.9l-8.4 8.4a2 2 0 0 1-2.8-2.8l7.8-7.8"/></symbol>
+      <symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 9a2 2 0 0 1 2-2h2l1.4-2h7.2L17 7h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13.5" r="3.4"/></symbol>
+      <symbol id="i-shot" viewBox="0 0 24 24"><path d="M9 3H5a2 2 0 0 0-2 2v4M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4M15 21h4a2 2 0 0 0 2-2v-4"/></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.4A8.6 8.6 0 0 1 9.6 3.5a8.6 8.6 0 1 0 10.9 10.9z"/></symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l2.1 5.4L19.5 10l-5.4 2.1L12 17.5l-2.1-5.4L4.5 10l5.4-1.6z"/><path d="M18.5 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
+    </svg>
     <div class="backdrop" id="backdrop" hidden></div>
     <aside class="drawer" id="drawer" hidden>
+      <!-- The app names itself here, once. The bar over the conversation says
+           which conversation you are in, which is the thing you cannot work
+           out by looking. -->
+      <div class="brand">
+        <span class="mark"><svg class="i" aria-hidden="true"><use href="#i-spark"></use></svg></span>
+        <h1>__TITLE__</h1>
+      </div>
       <div class="drawer-head">
         <div class="drawer-tabs">
           <button id="tabChats" class="tab active" type="button">Chats</button>
           <button id="tabRoutines" class="tab" type="button">Routines</button>
           <button id="tabRecords" class="tab" type="button">Records</button>
         </div>
-        <button id="drawerClose" title="Close">✕</button>
+        <button id="drawerClose" class="iconbtn" title="Close" type="button"><svg class="i" aria-hidden="true"><use href="#i-close"></use></svg></button>
       </div>
       <div id="convoPane">
         <button class="drawer-new" id="drawerNew" type="button">＋ New chat</button>
@@ -411,77 +701,83 @@ _PAGE = """<!doctype html>
     <aside class="sheet" id="photometa" hidden>
       <div class="drawer-head">
         <strong>📍 Photo details</strong>
-        <button id="metaClose" title="Close">✕</button>
+        <button id="metaClose" class="iconbtn" title="Close" type="button"><svg class="i" aria-hidden="true"><use href="#i-close"></use></svg></button>
       </div>
       <div id="metaBody"></div>
     </aside>
 
-    <header>
-      <button id="menu" title="Saved conversations" hidden>☰</button>
-      <h1>__TITLE__</h1>
-      <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
-      <div class="spacer"></div>
-      <label class="status model-label" for="model">Model</label>
-      <select id="model" title="Choose which local model answers"></select>
-      <button id="newChat" title="Clear the conversation">New chat</button>
-    </header>
+    <div class="pane">
+      <header>
+        <button id="menu" class="iconbtn" title="Saved conversations" type="button" hidden><svg class="i" aria-hidden="true"><use href="#i-menu"></use></svg></button>
+        <div class="head-title"><h2 id="chatTitle">New chat</h2></div>
+        <div class="spacer"></div>
+        <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
+        <label class="status model-label" for="model">Model</label>
+        <select id="model" title="Choose which local model answers"></select>
+        <button id="theme" class="iconbtn" type="button" title="Switch between light and dark"><svg class="i i-sun" aria-hidden="true"><use href="#i-sun"></use></svg><svg class="i i-moon" aria-hidden="true"><use href="#i-moon"></use></svg></button>
+        <button id="newChat" title="Start a new conversation" type="button"><svg class="i" aria-hidden="true"><use href="#i-plus"></use></svg><span>New chat</span></button>
+      </header>
 
-    <main id="chat">
-      <div class="wrap"><div class="empty" id="empty">
-        Send a message to start chatting with your local model.
-      </div></div>
-    </main>
+      <main id="chat">
+        <div class="wrap"><div class="empty" id="empty"></div></div>
+      </main>
 
-    <footer>
-      <div class="wrap">
-        <div class="voicebar" id="voicebar" hidden>
-          <span class="voicebar-label">🎙 Voice</span>
-          <select id="voiceModel" title="Speech recognition language"></select>
+      <footer>
+        <div class="wrap">
+          <div class="voicebar" id="voicebar" hidden>
+            <span class="voicebar-label">🎙 Voice</span>
+            <select id="voiceModel" title="Speech recognition language"></select>
+          </div>
+          <p class="hint insecure" id="insecureNote" hidden></p>
+          <!-- One row, not two. Each toggle hides independently — web access has
+               a server-side kill switch — but two single-checkbox rows cost 48px
+               of a 844px phone before anything has been typed. -->
+          <div class="voicebar" id="togglebar">
+            <label class="voicebar-check" id="webbar" hidden title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
+              <input type="checkbox" id="web"> 🌐 Web
+            </label>
+            <label class="voicebar-check" id="exifbar" hidden title="Read the date, camera and GPS position a photo carries, and tell the model. The app re-encodes images, which strips this, so turning it off means the location never leaves your phone at all. Set PHOTO_META=0 on the server to make off the default.">
+              <input type="checkbox" id="exif"> 📍 Photo details
+            </label>
+            <label class="voicebar-check voicesetting" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
+              <input type="checkbox" id="headset" checked> 🎧 Headphones
+            </label>
+            <label class="voicebar-check voicesetting" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
+              <input type="checkbox" id="autosend"> ⚡ Auto-send
+            </label>
+            <label class="voicebar-check voicesetting" title="Keep the mic open and treat a pause in speech as the end of a message. With Auto-send on, this runs a whole conversation from one tap.">
+              <input type="checkbox" id="continuous"> 🔁 Continuous
+            </label>
+            <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
+          </div>
+          <!-- Above the thumbs and the composer, so the footer reads downwards
+               as: pick a routine, attach its photos, write the message. -->
+          <div class="voicebar" id="routinebar" hidden>
+            <div class="chips" id="routineChips"></div>
+            <button class="chip chip-edit" id="routineEditBtn" type="button"
+                    title="Add or change a saved prompt"><svg class="i" aria-hidden="true"><use href="#i-sliders"></use></svg></button>
+          </div>
+          <!-- The box you type in, the photos riding with the message and the
+               buttons that act on it are one card. They were three rows that
+               happened to be adjacent, which is why the footer read as clutter. -->
+          <div class="composer-card">
+            <div class="thumbs" id="thumbs" hidden></div>
+            <div class="composer">
+              <textarea id="input" rows="1" placeholder="Type a message…"></textarea>
+              <button id="attach" class="iconbtn" type="button" title="Attach an image (needs a vision model)"><svg class="i" aria-hidden="true"><use href="#i-clip"></use></svg></button>
+              <button id="camera" class="iconbtn" type="button" title="Take a photo" hidden><svg class="i" aria-hidden="true"><use href="#i-camera"></use></svg></button>
+              <button id="shot" class="iconbtn" type="button" title="Capture a screenshot to analyse" hidden><svg class="i" aria-hidden="true"><use href="#i-shot"></use></svg></button>
+              <button id="mic" class="iconbtn" type="button" title="Speak (offline transcription)" hidden><svg class="i i-mic" aria-hidden="true"><use href="#i-mic"></use></svg><svg class="i i-stop" aria-hidden="true"><use href="#i-stop"></use></svg></button>
+              <button class="primary" id="send" type="button">Send</button>
+              <button class="danger" id="stop" type="button" hidden>Stop</button>
+            </div>
+          </div>
+          <input type="file" id="file" accept="image/*" multiple hidden>
+          <input type="file" id="cameraFile" accept="image/*" capture="environment" hidden>
+          <p class="hint" id="hint"></p>
         </div>
-        <p class="hint insecure" id="insecureNote" hidden></p>
-        <!-- One row, not two. Each toggle hides independently — web access has
-             a server-side kill switch — but two single-checkbox rows cost 48px
-             of a 844px phone before anything has been typed. -->
-        <div class="voicebar" id="togglebar">
-          <label class="voicebar-check" id="webbar" hidden title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
-            <input type="checkbox" id="web"> 🌐 Web
-          </label>
-          <label class="voicebar-check" id="exifbar" hidden title="Read the date, camera and GPS position a photo carries, and tell the model. The app re-encodes images, which strips this, so turning it off means the location never leaves your phone at all. Set PHOTO_META=0 on the server to make off the default.">
-            <input type="checkbox" id="exif"> 📍 Photo details
-          </label>
-          <label class="voicebar-check voicesetting" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
-            <input type="checkbox" id="headset" checked> 🎧 Headphones
-          </label>
-          <label class="voicebar-check voicesetting" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
-            <input type="checkbox" id="autosend"> ⚡ Auto-send
-          </label>
-          <label class="voicebar-check voicesetting" title="Keep the mic open and treat a pause in speech as the end of a message. With Auto-send on, this runs a whole conversation from one tap.">
-            <input type="checkbox" id="continuous"> 🔁 Continuous
-          </label>
-          <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
-        </div>
-        <!-- Above the thumbs and the composer, so the footer reads downwards
-             as: pick a routine, attach its photos, write the message. -->
-        <div class="voicebar" id="routinebar" hidden>
-          <div class="chips" id="routineChips"></div>
-          <button class="chip chip-edit" id="routineEditBtn" type="button"
-                  title="Add or change a saved prompt">⚙</button>
-        </div>
-        <div class="thumbs" id="thumbs" hidden></div>
-        <div class="composer">
-          <textarea id="input" rows="1" placeholder="Type a message…"></textarea>
-          <button id="attach" title="Attach an image (needs a vision model)">📎</button>
-          <button id="camera" title="Take a photo" hidden>📷</button>
-          <button id="shot" title="Capture a screenshot to analyse" hidden>📸</button>
-          <button id="mic" title="Speak (offline transcription)" hidden>🎤</button>
-          <button class="primary" id="send">Send</button>
-          <button class="danger" id="stop" hidden>Stop</button>
-        </div>
-        <input type="file" id="file" accept="image/*" multiple hidden>
-        <input type="file" id="cameraFile" accept="image/*" capture="environment" hidden>
-        <p class="hint" id="hint"></p>
-      </div>
-    </footer>
+      </footer>
+    </div>
 
     <script>
       const chatEl   = document.getElementById("chat");
@@ -504,6 +800,8 @@ _PAGE = """<!doctype html>
       // dead zone waiting for someone to call that function earlier.
       let exifOn = false;
       const insecureNote = document.getElementById("insecureNote");
+      const chatTitleEl = document.getElementById("chatTitle");
+      const themeBtn = document.getElementById("theme");
       const drawerEl = document.getElementById("drawer");
       const backdropEl = document.getElementById("backdrop");
       const convoListEl = document.getElementById("convoList");
@@ -1476,7 +1774,7 @@ _PAGE = """<!doctype html>
       function hidePhotoDetails() {
         metaEl.hidden = true;
         // The drawer uses the same backdrop, so only take it away if it is ours.
-        if (drawerEl.hidden) backdropEl.hidden = true;
+        if (drawerEl.hidden || railed()) backdropEl.hidden = true;
       }
 
       function addAttachment(att) {
@@ -2191,9 +2489,61 @@ _PAGE = """<!doctype html>
         messages = [];
         pendingImages = []; renderThumbs();
         clearRoutine();
-        chatEl.innerHTML = '<div class="wrap"><div class="empty" id="empty">' +
-          'Send a message to start chatting with your local model.</div></div>';
+        chatEl.innerHTML = '<div class="wrap"><div class="empty" id="empty"></div></div>';
+        paintEmpty();
+        setChatTitle("");
         inputEl.focus();
+      }
+
+      // The bar over the conversation names the conversation. Falling back to
+      // the app's own name told you what you already knew; after twenty saved
+      // threads, which one is on screen is the thing you cannot work out by
+      // looking at it.
+      function setChatTitle(text) {
+        chatTitleEl.textContent = text || "New chat";
+        chatTitleEl.title = text || "";
+      }
+
+      // A whole screen used to hold one grey sentence. It is the only moment
+      // the app gets to say what it is for, and on this app the answer is
+      // usually a routine — so the routines are what it offers.
+      function paintEmpty() {
+        const host = document.getElementById("empty");
+        if (!host) return;
+        host.innerHTML = "";
+        const mark = document.createElement("div");
+        mark.className = "empty-mark";
+        mark.innerHTML = '<svg class="i" aria-hidden="true">' +
+                         '<use href="#i-spark"></use></svg>';
+        host.appendChild(mark);
+        const head = document.createElement("h2");
+        head.textContent = "Ask your local model anything";
+        host.appendChild(head);
+        const sub = document.createElement("p");
+        sub.textContent = "Nothing leaves your own hardware. Attach a photo and " +
+          "it can read what is in it — and, with photo details on, when and " +
+          "where it was taken.";
+        host.appendChild(sub);
+        if (!routines.length) return;
+        const grid = document.createElement("div");
+        grid.className = "empty-routines";
+        // Four: enough to show what a routine is, few enough to stay one row
+        // on a phone. The rest are a tap away on the strip above the composer.
+        for (const routine of routines.slice(0, 4)) {
+          const card = document.createElement("button");
+          card.type = "button"; card.className = "startcard";
+          const name = document.createElement("b");
+          // textContent, never innerHTML: a routine name is stored text.
+          name.textContent = routine.name;
+          const note = document.createElement("span");
+          note.textContent = routine.photos
+            ? routine.photos + (routine.photos === 1 ? " photo" : " photos")
+            : "Saved prompt";
+          card.appendChild(name); card.appendChild(note);
+          card.addEventListener("click", () => { pickRoutine(routine); inputEl.focus(); });
+          grid.appendChild(card);
+        }
+        host.appendChild(grid);
       }
 
 
@@ -2231,6 +2581,7 @@ _PAGE = """<!doctype html>
           return;
         }
         for (const convo of list) {
+          if (convo.id === currentConvoId) setChatTitle(convo.title);
           const row = document.createElement("div");
           row.className = "convo" + (convo.id === currentConvoId ? " active" : "");
 
@@ -2378,16 +2729,32 @@ _PAGE = """<!doctype html>
         if (convo.model && modelEl.querySelector('option[value="' + convo.model + '"]')) {
           modelEl.value = convo.model;
         }
-        closeDrawer();
+        setChatTitle(convo.title);
+        dismissDrawer();
         refreshConversations();
         scrollDown(true);
       }
 
+      // Wide enough for a sidebar and the drawer is a column of the layout
+      // rather than something laid over it: no dimming, and picking a
+      // conversation does not make the list you picked it from disappear.
+      const wideScreen = window.matchMedia("(min-width: 1024px)");
+      function railed() { return wideScreen.matches; }
+
       function openDrawer(pane) {
-        drawerEl.hidden = false; backdropEl.hidden = false;
+        drawerEl.hidden = false; backdropEl.hidden = railed();
         showPane(pane === "routines" || pane === "records" ? pane : "chats");
       }
       function closeDrawer() { drawerEl.hidden = true; backdropEl.hidden = true; }
+      // Only when it is in the way. On a rail it is furniture, not a dialog.
+      function dismissDrawer() { if (!railed()) closeDrawer(); }
+
+      wideScreen.addEventListener("change", (e) => {
+        // Narrowing with the rail open would leave it covering the
+        // conversation with nothing dimmed to say it is over the top.
+        if (e.matches) backdropEl.hidden = true;
+        else if (!drawerEl.hidden) closeDrawer();
+      });
 
       // ---- Routines ----
       // A saved prompt you tap instead of typing. Picking one drops its text
@@ -2412,6 +2779,7 @@ _PAGE = """<!doctype html>
             !routines.some(r => r.id === pendingRoutine.routine.id)) clearRoutine();
         routineBar.hidden = false;
         renderRoutineChips();
+        paintEmpty();
       }
 
       function renderRoutineChips() {
@@ -3084,7 +3452,7 @@ _PAGE = """<!doctype html>
           }
         };
         srcNode.connect(procNode); procNode.connect(audioCtx.destination);
-        recording = true; micBtn.classList.add("rec"); micBtn.textContent = "⏹";
+        recording = true; micBtn.classList.add("rec");
         hintEl.textContent = continuousEl.checked
           ? "Listening… pause to send an utterance. Tap the mic to stop."
           : "Listening… tap the mic to stop.";
@@ -3092,7 +3460,7 @@ _PAGE = """<!doctype html>
 
       async function stopMic() {
         if (!recording) return;
-        recording = false; micBtn.classList.remove("rec"); micBtn.textContent = "🎤";
+        recording = false; micBtn.classList.remove("rec");
         try { procNode.disconnect(); srcNode.disconnect(); } catch (e) {}
         if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
         const captured = buffers;
@@ -3285,10 +3653,10 @@ _PAGE = """<!doctype html>
       rPhotosEl.addEventListener("change", routineWarnUpdate);
       rWebEl.addEventListener("change", routineWarnUpdate);
       document.getElementById("drawerClose").addEventListener("click", closeDrawer);
-      backdropEl.addEventListener("click", () => { closeDrawer(); hidePhotoDetails(); });
+      backdropEl.addEventListener("click", () => { dismissDrawer(); hidePhotoDetails(); });
       document.getElementById("metaClose").addEventListener("click", hidePhotoDetails);
       document.getElementById("drawerNew").addEventListener("click", function () {
-        newChat(); closeDrawer();
+        newChat(); dismissDrawer();
       });
 
       sendBtn.addEventListener("click", trySend);
@@ -3318,6 +3686,25 @@ _PAGE = """<!doctype html>
         loadModels();
         checkVoice();
       });
+
+      // ---- Theme ----
+      // Auto is the default and the stylesheet does it on its own; this is for
+      // the times the system is wrong — a phone that follows the clock while
+      // you are reading in daylight, and the reverse at night. The <head>
+      // script has already applied any saved choice, so this only has to flip.
+      themeBtn.addEventListener("click", () => {
+        const system = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const now = document.documentElement.getAttribute("data-theme") ||
+                    (system ? "dark" : "light");
+        const next = now === "dark" ? "light" : "dark";
+        document.documentElement.setAttribute("data-theme", next);
+        try { localStorage.setItem("theme", next); } catch (e) {}
+      });
+
+      // On a wide screen the conversation list is furniture, and starting with
+      // it already there is one fewer tap on every visit.
+      if (railed()) { drawerEl.hidden = false; showPane("chats"); }
+      paintEmpty();
 
       loadModels();
       checkVoice();

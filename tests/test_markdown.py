@@ -14,6 +14,7 @@ import subprocess
 import pytest
 
 import chat_ui
+from conftest import page_script
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
@@ -22,7 +23,7 @@ SENTINEL = chr(1)   # the code-span placeholder, built without typing it literal
 
 def render(text: str) -> str:
     """Run the shipped renderMarkdown over one input and return its HTML."""
-    page_js = re.search(r"<script>(.*?)</script>", chat_ui.render_page("t"), re.S).group(1)
+    page_js = page_script(chat_ui.render_page("t"))
     start = page_js.index("const MD_SENTINEL_RE")
     end = page_js.index("// Painted once")
     script = page_js[start:end] + f"\nprocess.stdout.write(renderMarkdown({json.dumps(text)}));"

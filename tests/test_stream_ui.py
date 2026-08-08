@@ -22,12 +22,13 @@ import subprocess
 import pytest
 
 import chat_ui
+from conftest import page_script
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
 
 def _page() -> str:
-    return re.search(r"<script>(.*?)</script>", chat_ui.render_page("t"), re.S).group(1)
+    return page_script(chat_ui.render_page("t"))
 
 
 def _slice(page: str, start: str, end: str) -> str:

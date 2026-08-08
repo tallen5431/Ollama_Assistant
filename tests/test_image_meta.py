@@ -25,6 +25,7 @@ import pytest
 
 import app as app_module
 import chat_ui
+from conftest import page_script
 import store
 import web
 
@@ -158,7 +159,7 @@ def build_jpeg(little_endian: bool = False, gps: bool = True, rich: bool = False
 
 def _parser_source() -> str:
     """The EXIF functions exactly as the browser receives them."""
-    page = re.search(r"<script>(.*?)</script>", chat_ui.render_page("t"), re.S).group(1)
+    page = page_script(chat_ui.render_page("t"))
     at = page.index("function parseExif")
     return page[at:page.index("// Degrees/minutes/seconds", at)] + _dms_of(page)
 
@@ -833,7 +834,7 @@ class TestTheAppSaysWhyOnScreen:
         They are split across concatenations in the source, so a substring test
         checks the line wrapping rather than what the user is told.
         """
-        page = re.search(r"<script>(.*?)</script>", chat_ui.render_page("t"), re.S).group(1)
+        page = page_script(chat_ui.render_page("t"))
         at = page.index("      function noteMissingPlace")
         body = page[at:page.index("      function addAttachment", at)]
         script = tmp_path / "note.js"
@@ -951,7 +952,7 @@ class TestThePhotoDetailsPanel:
         """Both use the same backdrop; taking it away under the drawer is wrong."""
         page = self.page()
         at = page.index("function hidePhotoDetails")
-        assert "if (drawerEl.hidden) backdropEl.hidden = true;" in page[at:at + 400]
+        assert "if (drawerEl.hidden || railed()) backdropEl.hidden = true;" in page[at:at + 400]
 
     def test_the_x_removes_the_attachment_and_the_image_opens_details(self):
         """Two taps on one 3.5rem square must not fight over the same job."""

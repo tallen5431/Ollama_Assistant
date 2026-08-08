@@ -583,5 +583,9 @@ class TestTheFooterLeavesRoomToRead:
         page = self.page()
         for rule in (".chip { padding:0.6rem 0.8rem; min-height:44px;",
                      ".voicebar-check { min-height:44px; }",
-                     ".composer button { min-height:44px;"):
+                     ".composer button { min-height:44px;",
+                     ".composer .iconbtn { width:44px; height:44px; }",
+                     # The header is three icon buttons in a row, and .iconbtn
+                     # is sized for a mouse: measured 34px square on a phone.
+                     "#menu, #theme, #newChat { min-height:40px; min-width:40px;"):
             assert rule in page, rule

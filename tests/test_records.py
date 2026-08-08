@@ -419,8 +419,12 @@ class TestTheLayoutFitsWhereItIsShown:
         assert table < card, "the narrow-screen block has to be able to override"
 
     def test_the_drawer_takes_the_room_a_log_needs(self):
+        """Capped rather than maximal: on a wide screen the drawer is a column
+        beside the conversation, so a log that took 64rem pushed the thread it
+        was opened from off the screen."""
         page = self.page()
-        assert ".drawer.wide { width:min(64rem,94vw); }" in page
+        assert ".drawer.wide { width:min(56rem,62vw); }" in page
+        assert "@media (max-width: 1023px) { .drawer.wide { width:min(56rem,94vw); } }" in page
         assert 'drawerEl.classList.toggle("wide", which === "records");' in page
 
     def test_the_other_panes_stay_narrow(self):
