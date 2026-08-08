@@ -131,7 +131,15 @@ class TestWhatGetsStored:
         ('{"message": "a string"}', ""),
     ])
     def test_only_reply_text_is_accumulated(self, line, text):
-        assert app_module._content_of(line) == text
+        assert app_module._message_field(line, "content") == text
+
+    @pytest.mark.parametrize("line, text", [
+        ('{"message": {"thinking": "hmm"}}', "hmm"),
+        ('{"message": {"content": "hi"}}', ""),
+        ("not json at all", ""),
+    ])
+    def test_and_the_reasoning_is_read_the_same_way(self, line, text):
+        assert app_module._message_field(line, "thinking") == text
 
 
 # --------------------------------------------------------------------------
@@ -381,3 +389,85 @@ class TestThePanelsSurviveTheDevice:
         window = js[at:at + 300]
         assert "view.thinkBody.textContent = msg.thinking;" in window
         assert "view.think.hidden = false;" in window
+
+
+class TestTheDetachedStreamItself:
+    """One helper now carries both the chat turn and the voice download, so its
+    edges are worth pinning down rather than rediscovering per caller.
+
+    Its other contract — that a producer's own ``finally`` completes before the
+    stream closes, which is what lets a turn be saved before the browser is
+    told the reply ended — is enforced by
+    ``TestTheRouteWritesTheTurn::test_a_finished_reply_is_stored``. Asserting it
+    here would only restate the try/finally that provides it.
+    """
+
+    def emit_lines(self, produce):
+        import app as mod
+        with mod.app.test_request_context("/"):
+            resp = mod._detached_stream(produce, "test")
+            return b"".join(x.encode() if isinstance(x, str) else x
+                            for x in resp.response).decode()
+
+    def test_what_is_emitted_is_what_arrives(self):
+        assert self.emit_lines(lambda emit: [emit("a\n"), emit("b\n")]) == "a\nb\n"
+
+    def test_a_producer_that_raises_says_so_rather_than_stopping_dead(self):
+        """A thread has nowhere to raise to: without this the client sees a
+        stream that simply ends, which reads as a reply that was cut short."""
+        def boom(emit):
+            emit("first\n")
+            raise RuntimeError("producer died")
+        out = self.emit_lines(boom)
+        assert out.startswith("first\n")
+        assert "error" in out.splitlines()[-1]
+
+    def test_producing_nothing_is_an_empty_stream_not_a_hang(self):
+        assert self.emit_lines(lambda emit: None) == ""
+
+
+class TestTurnsDoNotTreadOnEachOther:
+    def test_three_at_once_still_alternate(self, client, monkeypatch):
+        """One conversation, three tabs. Half a turn, or two questions in a
+        row, is what a missing transaction looks like from the drawer."""
+        def slow(model, messages, **kw):
+            for i in range(4):
+                time.sleep(0.02)
+                yield json.dumps({"message": {"content": f"[{i}]"}})
+            yield json.dumps({"done": True})
+        monkeypatch.setattr(app_module, "chat_stream", slow)
+        convo = store.create("race")["id"]
+
+        def fire(tag):
+            client.post("/api/chat", json={
+                "model": "m", "conversation_id": convo,
+                "messages": [{"role": "user", "content": tag}]}).get_data()
+
+        threads = [threading.Thread(target=fire, args=(f"q{i}",)) for i in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for _ in range(80):
+            time.sleep(0.05)
+            if len(store.get(convo)["messages"]) >= 6:
+                break
+        roles = [m["role"] for m in store.get(convo)["messages"]]
+        assert len(roles) % 2 == 0, f"half a turn was written: {roles}"
+        assert roles == ["user", "assistant"] * (len(roles) // 2), roles
+
+    def test_the_cancel_registry_does_not_grow(self):
+        before = len(app_module._TURNS)
+        for i in range(50):
+            flag = app_module._start_turn(f"c{i}")
+            app_module._end_turn(f"c{i}", flag)
+        assert len(app_module._TURNS) == before
+
+    def test_an_old_turn_ending_leaves_its_replacement_alone(self):
+        """Otherwise the second tab's Stop button stops nothing."""
+        first = app_module._start_turn("shared")
+        second = app_module._start_turn("shared")
+        app_module._end_turn("shared", first)
+        assert app_module._TURNS.get("shared") is second
+        app_module._end_turn("shared", second)
+        assert "shared" not in app_module._TURNS

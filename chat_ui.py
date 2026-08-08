@@ -787,7 +787,7 @@ _PAGE = """<!doctype html>
           </select>
           <label for="rRecord">Keep a record of each run</label>
           <input id="rRecord" placeholder="distance, elapsed, average speed">
-          <p class="convo-empty" id="rRecordNote">Field names, comma separated.
+          <p class="convo-empty">Field names, comma separated.
             After every run the model restates its own answer as these, and the
             row lands in Records. Leave empty to keep nothing.</p>
           <p class="convo-empty" id="routineWarn"></p>

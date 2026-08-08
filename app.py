@@ -25,7 +25,6 @@ import queue
 import socket
 import sqlite3
 import threading
-import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from typing import Any, Dict, Iterator, List, Optional
@@ -725,30 +724,8 @@ def api_chat() -> Any:
             if images and not _model_has_vision(model):
                 reader, is_ocr_reader = _image_reader(model)
                 if reader:
-                    yield _line({"status": f"Reading the image with {reader}…"})
-                    describing = not is_ocr_reader
-                    try:
-                        transcript = web.read_images(images, reader, ocr=is_ocr_reader,
-                                                     answering_model=model)
-                        # An OCR model that found nothing is not the end of it:
-                        # a photo of a plant has no text, and telling the user
-                        # to go change a dropdown while a vision model sits idle
-                        # is a poor answer to "what is this?".
-                        if transcript is None and is_ocr_reader:
-                            describer = _describing_model(model)
-                            if describer:
-                                yield _line({"status": f"No text in it — looking at it with {describer}…"})
-                                transcript = web.read_images(images, describer, ocr=False,
-                                                             answering_model=model)
-                                describing = True
-                        context = web.image_context(transcript, ocr=not describing)
-                    except web.ReadFailed as exc:
-                        # A reader-model OOM is routine when a 30b model holds
-                        # the GPU. Reporting it as "no readable text was found"
-                        # is a confident, wrong claim about the user's image.
-                        logger.warning("Image read via %s failed: %s", reader, exc)
-                        yield _line({"status": f"{reader} could not read the image."})
-                        context = web.image_failed_context()
+                    transcript, context = yield from _read_images_for(
+                        model, images, reader, is_ocr_reader)
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
                     convo = web.with_context(web.strip_images(turns), context)
@@ -788,8 +765,8 @@ def api_chat() -> Any:
                         for t in convo if t.get("role") == "system"])
             for line in chat_stream(model, convo, options=options,
                                     keep_alive=get_keep_alive() or None):
-                answer.append(_content_of(line))
-                thinking.append(_thinking_of(line))
+                answer.append(_message_field(line, "content"))
+                thinking.append(_message_field(line, "thinking"))
                 yield line + "\n"
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
@@ -809,10 +786,9 @@ def api_chat() -> Any:
     # stops generating — which is why a saved turn on its own only kept the
     # first sentence. Producing on a thread and relaying through a queue means
     # the model finishes its answer whether or not anyone is still listening.
-    lines: "queue.Queue[Optional[str]]" = queue.Queue()
     cancel = _start_turn(convo_id)
 
-    def produce() -> None:
+    def produce(emit: Any) -> None:
         try:
             for line in run_turn():
                 if cancel.is_set():
@@ -820,29 +796,19 @@ def api_chat() -> Any:
                 entry = _debug_of(line)
                 if entry is not None:
                     kept_steps.append(entry)
-                lines.put(line)
+                emit(line)
         finally:
             _end_turn(convo_id, cancel)
-            # Written before the sentinel, not after: the browser refreshes its
-            # list the moment the stream ends, and putting the save afterwards
-            # made that a race the list usually lost — a finished thread with
-            # no title until something else happened to refresh it.
+            # In produce's own finally, so it completes before the stream
+            # closes: the browser refreshes its list the moment the reply ends,
+            # and saving afterwards made that a race the list usually lost — a
+            # finished thread with no title until something else refreshed it.
             # Saved even when cancelled: Stop usually means "I have read
             # enough", and the half you read is worth keeping.
             _keep_turn(convo_id, last_user, "".join(answer), kept_sources,
                        "".join(thinking), kept_steps)
-            lines.put(None)
 
-    threading.Thread(target=produce, name="chat-turn", daemon=True).start()
-
-    def relay() -> Iterator[str]:
-        while True:
-            line = lines.get()
-            if line is None:
-                return
-            yield line
-
-    return Response(stream_with_context(relay()), mimetype="application/x-ndjson")
+    return _detached_stream(produce, "chat-turn")
 
 
 # One in-flight turn per conversation, so Stop only needs to name the thread.
@@ -880,8 +846,12 @@ def api_chat_cancel() -> Any:
     return jsonify({"cancelled": flag is not None})
 
 
-def _thinking_of(line: str) -> str:
-    """The reasoning in one of Ollama's NDJSON lines, if it carries any."""
+def _message_field(line: str, field: str) -> str:
+    """One field of the ``message`` object in an Ollama NDJSON line.
+
+    Tolerant on purpose: this runs on every line of every reply, and a line
+    that is not what was expected is not worth ending a turn over.
+    """
     try:
         obj = json.loads(line)
     except (ValueError, TypeError):
@@ -889,19 +859,7 @@ def _thinking_of(line: str) -> str:
     message = obj.get("message") if isinstance(obj, dict) else None
     if not isinstance(message, dict):
         return ""
-    return str(message.get("thinking") or "")
-
-
-def _content_of(line: str) -> str:
-    """The reply text in one of Ollama's NDJSON lines, if it carries any."""
-    try:
-        obj = json.loads(line)
-    except (ValueError, TypeError):
-        return ""
-    message = obj.get("message") if isinstance(obj, dict) else None
-    if not isinstance(message, dict):
-        return ""
-    return str(message.get("content") or "")
+    return str(message.get(field) or "")
 
 
 def _keep_turn(convo_id: Optional[str], user: Dict[str, Any], reply: str,
@@ -942,6 +900,47 @@ def _step(name: str, detail: str = "", **extra: Any) -> str:
         entry["detail"] = detail
     entry.update(extra)
     return _line({"debug": entry})
+
+
+def _detached_stream(produce: Any, name: str) -> Response:
+    """Run ``produce`` on a thread and relay the lines it emits to the client.
+
+    A WSGI response is *pulled*: when the client stops asking for the next
+    chunk, the generator stops being advanced and the work stops with it. That
+    is right for work whose only purpose is the response, and wrong for work
+    worth finishing — a reply the server can write down, a download that is
+    most of the way through a gigabyte.
+
+    ``produce`` is called with an ``emit`` function and may block for as long
+    as it likes. Anything it does in its own ``finally`` happens before the
+    stream closes, which is what lets a turn be saved before the browser is
+    told the reply has ended.
+    """
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def run() -> None:
+        try:
+            produce(lines.put)
+        except Exception:  # noqa: BLE001 - a thread has nowhere to raise to
+            # Both callers report their own failures, so this is the backstop
+            # for the one that forgets: without it the exception goes to the
+            # thread's default handler and the client sees a stream that simply
+            # stops, which reads as a finished reply that was cut short.
+            logger.exception("The %s stream failed", name)
+            lines.put(_line({"error": "The server stopped part-way through."}))
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=run, name=name, daemon=True).start()
+
+    def relay() -> Iterator[str]:
+        while True:
+            line = lines.get()
+            if line is None:
+                return
+            yield line
+
+    return Response(stream_with_context(relay()), mimetype="application/x-ndjson")
 
 
 def _debug_of(line: str) -> Optional[Dict[str, Any]]:
@@ -1150,6 +1149,48 @@ def _gather_web(
                 f"{sum(len(d.get('text') or '') for d in documents)} characters")
 
 
+def _read_images_for(model: str, images: List[str], reader: str,
+                     is_ocr_reader: bool) -> Any:
+    """Read this turn's images for a model that cannot see them.
+
+    An image attached to a model without eyes used to force a switch, which
+    meant giving up your best model exactly when you were debugging with a
+    screenshot. Transcribing it and handing the text over lets a coder model
+    keep the question.
+
+    Yields status lines and returns ``(transcript, context)``: the transcript
+    so the search planner can reuse it rather than paying for a second pass,
+    and the context to put in front of the answering model.
+    """
+    yield _line({"status": f"Reading the image with {reader}…"})
+    describing = not is_ocr_reader
+    try:
+        transcript = web.read_images(images, reader, ocr=is_ocr_reader,
+                                     answering_model=model)
+        # An OCR model that found nothing is not the end of it: a photo of a
+        # plant has no text, and telling the user to go change a dropdown while
+        # a vision model sits idle is a poor answer to "what is this?".
+        if transcript is None and is_ocr_reader:
+            describer = _describing_model(model)
+            if describer:
+                yield _line({"status": f"No text in it — looking at it with {describer}…"})
+                transcript = web.read_images(images, describer, ocr=False,
+                                             answering_model=model)
+                describing = True
+        yield _step("Read the image",
+                    f"{reader} ({'description' if describing else 'OCR'})",
+                    text=transcript or "(nothing came back)")
+        return transcript, web.image_context(transcript, ocr=not describing)
+    except web.ReadFailed as exc:
+        # A reader-model OOM is routine when a 30b model holds the GPU.
+        # Reporting it as "no readable text was found" is a confident, wrong
+        # claim about the user's image.
+        logger.warning("Image read via %s failed: %s", reader, exc)
+        yield _line({"status": f"{reader} could not read the image."})
+        yield _step("Read the image", f"{reader} failed: {exc}")
+        return None, web.image_failed_context()
+
+
 def _model_has_vision(name: str) -> bool:
     """Whether the answering model can read an image itself.
 
@@ -1326,40 +1367,28 @@ def api_voice_download() -> Any:
     # request is indistinguishable from a broken one, which is what this
     # looked like. The work runs on a thread so a slow line cannot stall the
     # relay, and the client sees a percentage the whole way down.
-    lines: "queue.Queue[Optional[str]]" = queue.Queue()
-    sent = [0.0]
+    def produce(emit: Any) -> None:
+        sent = [0.0]
 
-    def progress(done: int, total: int) -> None:
-        # Rate limited to whole percents: a 1.8 GB file in 256KB chunks is
-        # 7000 callbacks, and 7000 lines of JSON is its own small download.
-        share = (done / total) if total else 0.0
-        if total and share - sent[0] < 0.01 and done < total:
-            return
-        sent[0] = share
-        lines.put(_line({"downloaded": done, "total": total,
-                         "percent": round(share * 100)}))
+        def progress(done: int, total: int) -> None:
+            # Rate limited to whole percents: a 1.8 GB file in 256KB chunks is
+            # 7000 callbacks, and 7000 lines of JSON is its own small download.
+            share = (done / total) if total else 0.0
+            if total and share - sent[0] < 0.01 and done < total:
+                return
+            sent[0] = share
+            emit(_line({"downloaded": done, "total": total,
+                        "percent": round(share * 100)}))
 
-    def fetch() -> None:
         try:
-            lines.put(_line(voice.download_model(str(model_id), progress)))
+            emit(_line(voice.download_model(str(model_id), progress)))
         except ValueError as exc:
-            lines.put(_line({"error": str(exc)}))
+            emit(_line({"error": str(exc)}))
         except Exception as exc:  # noqa: BLE001 - report, never 500 mid-stream
             logger.exception("Voice model download failed")
-            lines.put(_line({"error": f"Download failed: {exc}"}))
-        finally:
-            lines.put(None)
+            emit(_line({"error": f"Download failed: {exc}"}))
 
-    threading.Thread(target=fetch, name="voice-download", daemon=True).start()
-
-    def relay() -> Iterator[str]:
-        while True:
-            line = lines.get()
-            if line is None:
-                return
-            yield line
-
-    return Response(stream_with_context(relay()), mimetype="application/x-ndjson")
+    return _detached_stream(produce, "voice-download")
 
 
 @app.route("/api/transcribe", methods=["POST"])

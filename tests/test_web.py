@@ -809,7 +809,6 @@ class TestReviewRegressions:
 
     def test_deadline_expires(self):
         """A wall-clock budget, so a slow-drip server can't hold a worker."""
-        import time as _t
 
         budget = web._Deadline(5)
         assert not budget.expired()
@@ -1334,7 +1333,6 @@ class _Pages:
 
     def __call__(self, url, headers=None, **kw):
         self.seen.append({"url": url, "ua": (headers or {}).get("User-Agent", "")})
-        outer = self
 
         class _Resp:
             ok = True

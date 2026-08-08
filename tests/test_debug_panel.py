@@ -17,7 +17,6 @@ import pytest
 
 import app as app_module
 import chat_ui
-import web
 from conftest import page_script
 
 

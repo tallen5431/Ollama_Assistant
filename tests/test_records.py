@@ -13,7 +13,6 @@ import importlib
 import io
 import json
 import re
-import sqlite3
 
 import pytest
 
