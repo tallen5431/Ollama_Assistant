@@ -237,6 +237,17 @@ _PAGE = """<!doctype html>
       .metarow:last-child { border-bottom:0; }
       .metaname { flex:0 0 9rem; color:var(--muted); }
       .metarow a { color:var(--accent); word-break:break-all; }
+      /* A line under the reply saying what was kept, so a record appearing is
+         visible when it happens rather than discovered in a drawer later. */
+      .kept { font-size:0.72rem; color:var(--muted); margin:0.2rem 0 0 0.2rem;
+              cursor:pointer; }
+      .kept:hover { color:var(--text); }
+      #recordList { overflow:auto; }
+      #recordList .editable { min-width:5rem; cursor:text; }
+      #recordList .editable:focus { outline:1px solid var(--accent); }
+      #recordList table { font-size:0.78rem; }
+      #recordList a.drawer-new { text-align:center; text-decoration:none;
+                                 padding:0.4rem; color:var(--text); }
       .thumb { cursor:pointer; }
       .thumb .stamp { position:absolute; bottom:0; left:0; padding:0 0.2rem;
         font-size:0.6rem; line-height:1.3; background:rgba(0,0,0,0.65);
@@ -297,6 +308,7 @@ _PAGE = """<!doctype html>
         <div class="drawer-tabs">
           <button id="tabChats" class="tab active" type="button">Chats</button>
           <button id="tabRoutines" class="tab" type="button">Routines</button>
+          <button id="tabRecords" class="tab" type="button">Records</button>
         </div>
         <button id="drawerClose" title="Close">✕</button>
       </div>
@@ -338,6 +350,11 @@ _PAGE = """<!doctype html>
             <option value="1">Turn on for this routine</option>
             <option value="0">Turn off for this routine</option>
           </select>
+          <label for="rRecord">Keep a record of each run</label>
+          <input id="rRecord" placeholder="distance, elapsed, average speed">
+          <p class="convo-empty" id="rRecordNote">Field names, comma separated.
+            After every run the model restates its own answer as these, and the
+            row lands in Records. Leave empty to keep nothing.</p>
           <p class="convo-empty" id="routineWarn"></p>
           <div class="routine-acts">
             <button class="primary" id="rSave" type="button">Save</button>
@@ -345,6 +362,9 @@ _PAGE = """<!doctype html>
             <button class="danger" id="rDelete" type="button" hidden>Delete</button>
           </div>
         </div>
+      </div>
+      <div id="recordPane" hidden>
+        <div id="recordList"></div>
       </div>
     </aside>
     <aside class="sheet" id="photometa" hidden>
@@ -476,6 +496,10 @@ _PAGE = """<!doctype html>
       const rWebEl   = document.getElementById("rWeb");
       const rMetaEl  = document.getElementById("rMeta");
       const rSaveBtn  = document.getElementById("rSave");
+      const rRecordEl = document.getElementById("rRecord");
+      const recordPaneEl = document.getElementById("recordPane");
+      const recordListEl = document.getElementById("recordList");
+      const tabRecordsEl = document.getElementById("tabRecords");
       const rDeleteBtn = document.getElementById("rDelete");
 
       let messages = [];       // conversation sent to /api/chat for context
@@ -2320,7 +2344,7 @@ _PAGE = """<!doctype html>
 
       function openDrawer(pane) {
         drawerEl.hidden = false; backdropEl.hidden = false;
-        showPane(pane === "routines" ? "routines" : "chats");
+        showPane(pane === "routines" || pane === "records" ? pane : "chats");
       }
       function closeDrawer() { drawerEl.hidden = true; backdropEl.hidden = true; }
 
@@ -2486,18 +2510,181 @@ _PAGE = """<!doctype html>
         // and one that arrives while a stream is still running; disarming
         // there put the toggles back and dropped the count while the message
         // was still sitting in the composer waiting to be sent.
-        if (await send()) clearRoutine();
+        if (!(await send())) return;
+        clearRoutine();
+        // Read back out of messages[] rather than out of send(), which is
+        // covered by the node tests slice by slice and is not worth widening
+        // for this. The last turn is the assistant one that just committed.
+        const last = messages[messages.length - 1];
+        if (last && last.role === "assistant") {
+          const bubbles = chatEl.querySelectorAll(".msg.assistant");
+          const root = bubbles.length ? bubbles[bubbles.length - 1] : null;
+          keepRecord(routine, last.content, root ? { root: root } : null);
+        }
+      }
+
+      // ---- Records ----
+      // What a routine run wrote down. The paragraph is the answer; this is the
+      // thing you still want in a year — 68 miles, 3 h 08 min, on the 7th of
+      // August. Kept as fields so it can be a table, a CSV, or a row in
+      // whatever the owner already runs.
+
+      let records = [], recordColumns = [];
+
+      async function refreshRecords() {
+        if (!historyOn) return;
+        try {
+          const resp = await fetch("api/records");
+          if (!resp.ok) return;
+          const data = await resp.json();
+          records = Array.isArray(data.records) ? data.records : [];
+          recordColumns = Array.isArray(data.columns) ? data.columns : [];
+        } catch (e) { return; }
+      }
+
+      // Fired once the reply is complete, not from inside the stream: the
+      // streaming path is delicate and a record is worth less than the answer
+      // already on screen. A failure here is silent by design — the reply
+      // stands on its own.
+      async function keepRecord(routine, answer, view) {
+        if (!historyOn || !routine || !routine.record || !routine.record.length) return;
+        if (!answer || !answer.trim()) return;
+        try {
+          const resp = await fetch("api/records", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              answer: answer, fields: routine.record,
+              routine_id: routine.id, routine_name: routine.name,
+              conversation_id: currentConvoId, model: modelEl.value || null }) });
+          if (!resp.ok) return;
+          const data = await resp.json();
+          if (data.record && view) showKept(view, data.record, routine.record);
+        } catch (e) { /* the answer is what matters; this is the extra */ }
+      }
+
+      // A line under the reply, so a record being kept is visible at the moment
+      // it happens rather than discovered later in a drawer.
+      function showKept(view, record, order) {
+        const line = document.createElement("div");
+        line.className = "kept";
+        // Ordered by what the routine declared, not by the object's keys:
+        // Flask's jsonify sorts them, so the wire order is alphabetical and
+        // "average speed" led a trip record that starts with the distance.
+        const names = (order && order.length ? order : Object.keys(record.fields));
+        const pairs = names.filter(n => record.fields[n])
+                           .map(n => [n, record.fields[n]]);
+        line.textContent = "🗒 Kept: " + pairs.map(p => p[0] + " " + p[1]).join(" · ");
+        line.title = "Saved to Records. Tap to open them.";
+        line.addEventListener("click", () => openDrawer("records"));
+        view.root.appendChild(line);
+      }
+
+      function renderRecords() {
+        recordListEl.innerHTML = "";
+        if (!records.length) {
+          const note = document.createElement("p");
+          note.className = "convo-empty";
+          note.textContent = "Nothing kept yet. Give a routine some field names " +
+            "and every run of it writes a row here.";
+          recordListEl.appendChild(note);
+          return;
+        }
+
+        const bar = document.createElement("div");
+        bar.className = "routine-acts";
+        const csv = document.createElement("a");
+        csv.className = "drawer-new"; csv.href = "api/records.csv";
+        csv.textContent = "⤓ CSV"; csv.setAttribute("download", "records.csv");
+        const jsonLink = document.createElement("a");
+        jsonLink.className = "drawer-new"; jsonLink.href = "api/records";
+        jsonLink.textContent = "⤓ JSON"; jsonLink.target = "_blank";
+        jsonLink.rel = "noopener noreferrer";
+        bar.appendChild(csv); bar.appendChild(jsonLink);
+        recordListEl.appendChild(bar);
+
+        const wrap = document.createElement("div");
+        wrap.className = "tablewrap";
+        const table = document.createElement("table");
+        const head = document.createElement("tr");
+        for (const label of ["When", "Routine"].concat(recordColumns).concat([""])) {
+          const th = document.createElement("th");
+          th.textContent = label;
+          head.appendChild(th);
+        }
+        const thead = document.createElement("thead");
+        thead.appendChild(head);
+        table.appendChild(thead);
+
+        const body = document.createElement("tbody");
+        for (const record of records) {
+          const row = document.createElement("tr");
+          const when = document.createElement("td");
+          when.textContent = new Date(record.created_at * 1000)
+            .toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+          row.appendChild(when);
+          const who = document.createElement("td");
+          who.textContent = record.routine_name;   // never innerHTML: stored text
+          row.appendChild(who);
+          for (const name of recordColumns) {
+            const cell = document.createElement("td");
+            // Editable, because the fields were pulled out of prose by a model
+            // and a log you cannot correct is one you stop trusting.
+            cell.contentEditable = "true";
+            cell.className = "editable";
+            cell.textContent = record.fields[name] || "";
+            cell.addEventListener("blur", () => {
+              const value = cell.textContent.trim();
+              if (value === (record.fields[name] || "")) return;
+              record.fields[name] = value;
+              editRecord(record.id, name, value);
+            });
+            row.appendChild(cell);
+          }
+          const act = document.createElement("td");
+          const rm = document.createElement("button");
+          rm.className = "convo-act"; rm.type = "button"; rm.textContent = "✕";
+          rm.title = "Delete this record";
+          rm.addEventListener("click", () => dropRecord(record));
+          act.appendChild(rm);
+          row.appendChild(act);
+          body.appendChild(row);
+        }
+        table.appendChild(body);
+        wrap.appendChild(table);
+        recordListEl.appendChild(wrap);
+      }
+
+      async function editRecord(id, name, value) {
+        const fields = {};
+        fields[name] = value;
+        try {
+          await fetch("api/records/" + id, {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fields: fields }) });
+        } catch (e) { /* the cell already shows what you typed */ }
+      }
+
+      async function dropRecord(record) {
+        if (!window.confirm("Delete this record?")) return;
+        try {
+          const resp = await fetch("api/records/" + record.id, { method: "DELETE" });
+          if (!resp.ok) return;
+        } catch (e) { return; }
+        await refreshRecords();
+        renderRecords();
       }
 
       // ---- Routines: the drawer ----
 
-      function showPane(which) {
-        const wantRoutines = which === "routines";
-        convoPaneEl.hidden = wantRoutines;
-        routinePaneEl.hidden = !wantRoutines;
-        tabChatsEl.classList.toggle("active", !wantRoutines);
-        tabRoutinesEl.classList.toggle("active", wantRoutines);
-        if (wantRoutines) { closeRoutineEditor(); renderRoutineList(); }
+      async function showPane(which) {
+        convoPaneEl.hidden = which !== "chats";
+        routinePaneEl.hidden = which !== "routines";
+        recordPaneEl.hidden = which !== "records";
+        tabChatsEl.classList.toggle("active", which === "chats");
+        tabRoutinesEl.classList.toggle("active", which === "routines");
+        tabRecordsEl.classList.toggle("active", which === "records");
+        if (which === "routines") { closeRoutineEditor(); renderRoutineList(); }
+        else if (which === "records") { await refreshRecords(); renderRecords(); }
         else refreshConversations();
       }
 
@@ -2542,6 +2729,7 @@ _PAGE = """<!doctype html>
         rNameEl.value = routine ? routine.name : "";
         rBodyEl.value = routine ? routine.body : "";
         rPhotosEl.value = String(routine ? routine.photos : 0);
+        rRecordEl.value = routine && routine.record ? routine.record.join(", ") : "";
         rMetaEl.value = routine && routine.photo_meta !== null ? (routine.photo_meta ? "1" : "0") : "";
         rWebEl.value = routine && routine.web !== null ? (routine.web ? "1" : "0") : "";
         rDeleteBtn.hidden = !routine;
@@ -2583,7 +2771,9 @@ _PAGE = """<!doctype html>
         const tri = (value) => (value === "" ? null : value === "1");
         const payload = { name: name, body: body,
                           photos: Number(rPhotosEl.value) || 0,
-                          web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value) };
+                          web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value),
+                          record: rRecordEl.value.split(",")
+                            .map(f => f.trim()).filter(Boolean) };
         savingRoutine = true;
         rSaveBtn.disabled = true;
         try {
@@ -2990,6 +3180,7 @@ _PAGE = """<!doctype html>
       routineEditBtn.addEventListener("click", () => openDrawer("routines"));
       tabChatsEl.addEventListener("click", () => showPane("chats"));
       tabRoutinesEl.addEventListener("click", () => showPane("routines"));
+      tabRecordsEl.addEventListener("click", () => showPane("records"));
       routineNewBtn.addEventListener("click", () => openRoutineEditor(null));
       rSaveBtn.addEventListener("click", saveRoutine);
       document.getElementById("rCancel").addEventListener("click", closeRoutineEditor);

@@ -66,8 +66,23 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages (conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated
     ON conversations (updated_at DESC);
+-- What a routine run produced, as fields rather than prose. Deliberately not
+-- foreign-keyed to routines: deleting the routine you used last year must not
+-- delete the year of records you kept with it, which is why the name is copied
+-- in rather than looked up.
+CREATE TABLE IF NOT EXISTS records (
+    id              TEXT PRIMARY KEY,
+    routine_id      TEXT,
+    routine_name    TEXT NOT NULL,
+    conversation_id TEXT,
+    fields          TEXT NOT NULL,
+    created_at      REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_routines_position
     ON routines (position, created_at);
+CREATE INDEX IF NOT EXISTS idx_records_created
+    ON records (created_at DESC);
 """
 
 # Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
@@ -77,7 +92,11 @@ CREATE INDEX IF NOT EXISTS idx_routines_position
 # A whole new *table* needs no entry here — executescript runs the schema on
 # every connection, so an existing database grows it on the next request. Only
 # a new column in an existing table does.
-_ADDED_COLUMNS = (("messages", "image_meta", "TEXT"),)
+_ADDED_COLUMNS = (
+    ("messages", "image_meta", "TEXT"),
+    # What a routine records after each run: a JSON list of field names.
+    ("routines", "record", "TEXT"),
+)
 
 _TITLE_MAX = 60
 
@@ -348,6 +367,31 @@ def _tri_column(value: Any) -> Optional[bool]:
     return None if value is None else bool(value)
 
 
+# What one run of a routine may write down. Names only — the values come from
+# the answer. Kept small: a record with twenty columns is a form, and nobody
+# fills in a form at the roadside.
+_RECORD_FIELDS_MAX = 12
+_RECORD_NAME_MAX = 32
+
+
+def _record_fields(raw: Any) -> List[str]:
+    """The field-name list off a routine row, however it was stored."""
+    if not raw:
+        return []
+    try:
+        names = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(names, list):
+        return []
+    out = []
+    for name in names[:_RECORD_FIELDS_MAX]:
+        clean = " ".join(str(name or "").split())[:_RECORD_NAME_MAX].strip()
+        if clean and clean not in out:
+            out.append(clean)
+    return out
+
+
 def _routine_row(row: sqlite3.Row) -> Dict[str, Any]:
     return {
         "id": row["id"],
@@ -357,6 +401,7 @@ def _routine_row(row: sqlite3.Row) -> Dict[str, Any]:
         "web": _tri_column(row["web"]),
         "photo_meta": _tri_column(row["photo_meta"]),
         "position": row["position"],
+        "record": _record_fields(row["record"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -368,6 +413,7 @@ def create_routine(
     photos: int = 0,
     web: Optional[bool] = None,
     photo_meta: Optional[bool] = None,
+    record: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Save a routine and return its record."""
     now = time.time()
@@ -375,6 +421,7 @@ def create_routine(
     name = _routine_name(name)
     body = (body or "")[:_ROUTINE_BODY_MAX]
     photos = max(0, min(_ROUTINE_PHOTOS_MAX, int(photos or 0)))
+    record = _record_fields(record)
     with _connect() as conn:
         # New ones go on the end of the strip. Ordering by "recently used" would
         # move a tap target that a thumb has learned where to find.
@@ -388,16 +435,17 @@ def create_routine(
         ).fetchone()["next"]
         conn.execute(
             "INSERT INTO routines"
-            " (id, name, body, photos, web, photo_meta, position, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, name, body, photos, web, photo_meta, position, record,"
+            "  created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, name, body, photos,
              None if web is None else int(web),
              None if photo_meta is None else int(photo_meta),
-             position, now, now),
+             position, json.dumps(record) if record else None, now, now),
         )
     return {"id": rid, "name": name, "body": body, "photos": photos,
             "web": web, "photo_meta": photo_meta, "position": position,
-            "created_at": now, "updated_at": now}
+            "record": record, "created_at": now, "updated_at": now}
 
 
 def list_routines(limit: int = 100) -> List[Dict[str, Any]]:
@@ -412,7 +460,8 @@ def list_routines(limit: int = 100) -> List[Dict[str, Any]]:
 # Only these may be written, and the SET clause is built from this tuple rather
 # than from anything the request said — the column names are never interpolated
 # from input.
-_ROUTINE_COLUMNS = ("name", "body", "photos", "web", "photo_meta", "position")
+_ROUTINE_COLUMNS = ("name", "body", "photos", "web", "photo_meta",
+                    "position", "record")
 
 
 def update_routine(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -439,6 +488,9 @@ def update_routine(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]
             updates[column] = max(0, min(_ROUTINE_PHOTOS_MAX, int(value or 0)))
         elif column in ("web", "photo_meta"):
             updates[column] = None if value is None else int(bool(value))
+        elif column == "record":
+            names = _record_fields(value)
+            updates[column] = json.dumps(names) if names else None
         else:
             updates[column] = float(value)
     if not updates:
@@ -578,6 +630,142 @@ def create_starters() -> List[Dict[str, Any]]:
                          "web": web, "photo_meta": photo_meta, "position": position,
                          "created_at": now, "updated_at": now})
     return made
+
+
+# -------------------------------------------------------------------
+# Records — what a routine run wrote down
+# -------------------------------------------------------------------
+#
+# A row per run: which routine, when, and the fields it produced. This is the
+# thing you keep — a year of trips outlives the conversations that made them,
+# and outlives the routine too, which is why the name is copied in rather than
+# joined and why deleting a routine leaves its records alone.
+
+_RECORD_VALUE_MAX = 300       # a field, not an essay
+
+
+def _record_row(row: sqlite3.Row) -> Dict[str, Any]:
+    try:
+        fields = json.loads(row["fields"])
+    except (TypeError, ValueError):
+        fields = {}
+    return {
+        "id": row["id"],
+        "routine_id": row["routine_id"],
+        "routine_name": row["routine_name"],
+        "conversation_id": row["conversation_id"],
+        "fields": fields if isinstance(fields, dict) else {},
+        "created_at": row["created_at"],
+    }
+
+
+def _clean_fields(fields: Any) -> Dict[str, str]:
+    """Whatever came back from the extraction, as a flat dict of short strings."""
+    if not isinstance(fields, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in list(fields.items())[:_RECORD_FIELDS_MAX]:
+        name = " ".join(str(key or "").split())[:_RECORD_NAME_MAX].strip()
+        if not name:
+            continue
+        if value is None or value is False:
+            text = ""
+        elif isinstance(value, (list, tuple)):
+            text = ", ".join(str(v) for v in value)
+        else:
+            text = str(value)
+        out[name] = " ".join(text.split())[:_RECORD_VALUE_MAX]
+    return out
+
+
+def add_record(
+    routine_name: str,
+    fields: Dict[str, Any],
+    routine_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Keep one run. None when there was nothing worth keeping.
+
+    A record whose every field came back empty is not a record — it is the
+    extraction having failed, and storing it would put a blank row in a log the
+    owner is meant to be able to trust.
+    """
+    clean = _clean_fields(fields)
+    if not any(v for v in clean.values()):
+        return None
+    now = time.time()
+    rid = uuid.uuid4().hex
+    name = _routine_name(routine_name) or "Routine"
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO records"
+            " (id, routine_id, routine_name, conversation_id, fields, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (rid, routine_id or None, name, conversation_id or None,
+             json.dumps(clean), now),
+        )
+    return {"id": rid, "routine_id": routine_id or None, "routine_name": name,
+            "conversation_id": conversation_id or None, "fields": clean,
+            "created_at": now}
+
+
+def list_records(routine_name: str = "", limit: int = 500) -> List[Dict[str, Any]]:
+    """Records, newest first, optionally for one routine."""
+    with _connect() as conn:
+        if routine_name:
+            rows = conn.execute(
+                "SELECT * FROM records WHERE routine_name = ?"
+                " ORDER BY created_at DESC LIMIT ?", (routine_name, limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM records ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [_record_row(row) for row in rows]
+
+
+def update_record(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Correct a record. None when there is no such record.
+
+    Editable on purpose: the fields are extracted by a model from its own prose,
+    which is good enough to be worth keeping and not good enough to be beyond
+    question. A log you cannot correct is one you stop trusting.
+    """
+    clean = _clean_fields(fields)
+    if not clean:
+        return None
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM records WHERE id = ?", (rid,)).fetchone()
+        if row is None:
+            return None
+        # Merged, not replaced. Correcting one cell from the table would
+        # otherwise silently drop every column the edit did not mention, which
+        # is a poor property for the thing you are keeping records in.
+        merged = dict(_record_row(row)["fields"])
+        merged.update(clean)
+        conn.execute("UPDATE records SET fields = ? WHERE id = ?",
+                     (json.dumps(_clean_fields(merged)), rid))
+        row = conn.execute("SELECT * FROM records WHERE id = ?", (rid,)).fetchone()
+    return _record_row(row) if row else None
+
+
+def delete_record(rid: str) -> bool:
+    """Remove one record. False when it didn't exist."""
+    with _connect() as conn:
+        return conn.execute("DELETE FROM records WHERE id = ?", (rid,)).rowcount > 0
+
+
+def record_columns(records: List[Dict[str, Any]]) -> List[str]:
+    """Every field name across these records, in the order first seen.
+
+    Routines change, so two runs of the same one can disagree about their
+    columns. A table has to show both rather than the intersection.
+    """
+    columns: List[str] = []
+    for record in records:
+        for name in record.get("fields", {}):
+            if name not in columns:
+                columns.append(name)
+    return columns
 
 
 def stats() -> Dict[str, int]:

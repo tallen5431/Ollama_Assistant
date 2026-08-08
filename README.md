@@ -34,6 +34,9 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   can set the toggles it needs and refuse to send until its photos are attached,
   so "two odometer photos → how far did I drive and how long did it take" is two
   taps. Four are shipped. See "Routines" below.
+- 🗒 **Records** — a routine can keep a row per run. Two odometer photos become
+  *distance 68 miles · elapsed 3 h 08 min* in a table you can correct and pull
+  out as CSV or JSON with `curl`. See "Records" below.
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
@@ -515,6 +518,60 @@ forces web access on sends the photo's coordinates to the search planner, whose
 queries go out to a search engine. The editor says so at the moment you pick it,
 `WEB_SHARE_LOCATION=0` prevents it, and no shipped routine does it.
 
+## Records
+
+A routine can keep a record of every run. Give it field names and each run
+writes a row you can look at, correct, and export.
+
+The trip case: **🚗 Trip** with `distance, elapsed, average speed`. Photograph
+the odometer twice, tap the chip, send — and under the reply a line appears:
+
+```
+🗒 Kept: distance 68 miles · elapsed 3 h 08 min · average speed 21.7 mph
+```
+
+☰ → **Records** shows the table, newest first:
+
+| When | Routine | distance | elapsed | average speed |
+| --- | --- | --- | --- | --- |
+| 07/08/26, 16:45 | 🚗 Trip | 68 miles | 3 h 08 min | 21.7 mph |
+
+**How the fields are found.** The model that just answered is asked to restate
+its own answer as those fields, as JSON — temperature 0, a hard token cap, and
+nothing invented: a field the answer didn't state comes back empty rather than
+guessed. Extraction rather than pattern-matching, because the answers are prose
+and no regex survives the next model.
+
+It is good, not beyond question, and the app doesn't pretend otherwise: **every
+cell is editable**. Tap it, type, and it saves. A log you can't correct is one
+you stop trusting.
+
+It never costs you an answer. The extraction runs after the reply has finished,
+not inside the stream, so a model that's asleep or that returns something
+unparseable costs you a row and nothing else. Nothing extractable means no row,
+rather than a blank one — a blank record is worse than none.
+
+**Getting it out.** Two links in the Records pane, and both are ordinary
+endpoints, so another machine can pull them:
+
+```bash
+curl -s http://nucbox:8070/api/records.csv > trips.csv
+curl -s http://nucbox:8070/api/records | jq '.records[].fields'
+curl -s 'http://nucbox:8070/api/records.csv?routine=🚗%20Trip'
+```
+
+The CSV timestamps are ISO 8601, so a spreadsheet and a database both parse
+them, and the columns are the union of every field across the log — a routine
+whose fields changed doesn't lose the older runs' data.
+
+Records outlive the routine that made them. Deleting **🚗 Trip** doesn't touch
+a year of trips; the routine's name is copied into each row rather than looked
+up, so the log stands on its own.
+
+> ⚠️ Records are stored in the same `chat.db` and are readable by anyone who can
+> reach the app — the same exposure conversation history has, and the same
+> answer: turn Basic Auth on if this is reachable by anything you don't control.
+
 ## Photo details
 
 A photo carries a small record of its own making — when the shutter fired, which
@@ -655,6 +712,11 @@ make it likes.
 | `POST /api/routines/starters` | Install the shipped routines, skipping names already taken. Idempotent |
 | `PATCH /api/routines/<id>` | Change any subset of those fields. An absent key leaves it alone; an explicit `null` clears a forcing |
 | `DELETE /api/routines/<id>` | Remove one |
+| `GET /api/records`   | Kept records, newest first, plus the union of their columns. `?routine=` narrows it |
+| `POST /api/records`  | Restate an answer as fields and keep it — body `{ "answer", "fields": [...], "routine_name"?, "routine_id"?, "conversation_id"?, "model"? }`. Returns `{"record": null}` when nothing could be pulled out, which is an outcome rather than an error |
+| `PATCH /api/records/<id>` | Correct fields — body `{ "fields": {...} }`. Merges, so an edit never drops a column it didn't mention |
+| `DELETE /api/records/<id>` | Remove one |
+| `GET /api/records.csv` | The whole log as CSV, ISO timestamps, `?routine=` narrows it |
 | `GET /api/voice/models` | Available + downloadable Vosk speech models |
 | `POST /api/voice/download` | Download a catalog model — body `{ "id": "fr" }` |
 | `POST /api/transcribe` | Speech-to-text: POST WAV audio (`?model=<id>` optional), returns `{ "text": ... }` |
@@ -684,6 +746,7 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `authz.py`        | Optional HTTP Basic Auth |
 | `voice.py`        | Offline speech-to-text with Vosk |
 | `web.py`          | Optional web fetching/search used to ground answers |
-| `store.py`        | SQLite conversation history |
+| `store.py`        | SQLite conversation history, routines and records |
+| `records.py`      | Restating a routine's answer as the fields it declared |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |

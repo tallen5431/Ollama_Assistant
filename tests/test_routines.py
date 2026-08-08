@@ -227,23 +227,33 @@ class TestItDoesNotBreakTheDatabase:
         assert store.delete(convo["id"]) is True
         assert len(store.list_routines()) == 4, "deleting a chat is not deleting routines"
 
-    def test_an_older_database_gains_the_table(self, tmp_path, monkeypatch):
-        """A chat.db written before routines existed."""
+    @pytest.mark.parametrize("table", ["routines", "records"])
+    def test_an_older_database_gains_a_table_it_never_had(self, tmp_path,
+                                                          monkeypatch, table):
+        """A chat.db written before that table existed.
+
+        No migration needed for a whole table — executescript runs the schema
+        on every connection — but that is only true while the schema really is
+        run every time, which is what this holds down.
+        """
         path = tmp_path / "old.db"
         monkeypatch.setenv("CHAT_DB", str(path))
-        conn = sqlite3.connect(str(path))
-        before = re.sub(r"CREATE TABLE IF NOT EXISTS routines.*?\);", "",
+        before = re.sub(rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\);", "",
                         store._SCHEMA, flags=re.S)
-        before = re.sub(r"CREATE INDEX IF NOT EXISTS idx_routines_position.*?;", "",
+        before = re.sub(rf"CREATE INDEX IF NOT EXISTS idx_{table}_\w+.*?;", "",
                         before, flags=re.S)
-        assert "routines" not in before
+        assert f"TABLE IF NOT EXISTS {table}" not in before
+        conn = sqlite3.connect(str(path))
         conn.executescript(before)
         conn.commit()
         conn.close()
 
         assert store.list_routines() == []
+        assert store.list_records() == []
         made = store.create_routine("🚗 Trip", "b", photos=2)
         assert store.list_routines()[0]["id"] == made["id"]
+        kept = store.add_record("🚗 Trip", {"distance": "68 miles"})
+        assert store.list_records()[0]["id"] == kept["id"]
 
 
 # --------------------------------------------------------------------------
@@ -443,7 +453,7 @@ class TestThePage:
         the message was still sitting in the composer waiting to be sent.
         """
         page = self.page()
-        assert "if (await send()) clearRoutine();" in page
+        assert "if (!(await send())) return;\n        clearRoutine();" in page
         assert "|| busy) return false;" in page, "send() must report a refusal"
 
     def test_clearing_takes_its_own_text_back_out(self):

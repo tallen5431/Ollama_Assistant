@@ -17,11 +17,14 @@ Configuration is entirely via environment variables — see config.py / authz.py
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import socket
 import sqlite3
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -31,6 +34,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import authz
+import records
 import store
 import voice
 import web
@@ -332,7 +336,7 @@ def api_conversation_add_message(convo_id: str) -> Any:
 # What a PATCH is allowed to change. Membership is tested against the request
 # body rather than read with .get(), because null is a real value here: absent
 # means "leave it alone", explicit null means "stop forcing this toggle".
-_ROUTINE_FIELDS = ("name", "body", "photos", "web", "photo_meta")
+_ROUTINE_FIELDS = ("name", "body", "photos", "web", "photo_meta", "record")
 
 
 def _tri(value: Any) -> Optional[bool]:
@@ -370,9 +374,11 @@ def api_routine_create() -> Any:
         return jsonify({"error": "Missing 'name'"}), 400
     if not text:
         return jsonify({"error": "Missing 'body'"}), 400
+    record = body.get("record")
     return jsonify(store.create_routine(
         name, text, _count(body.get("photos")),
         _tri(body.get("web")), _tri(body.get("photo_meta")),
+        record if isinstance(record, list) else None,
     ))
 
 
@@ -405,6 +411,8 @@ def api_routine_update(routine_id: str) -> Any:
             fields[field] = str(body[field] or "").strip()
         elif field == "photos":
             fields[field] = _count(body[field])
+        elif field == "record":
+            fields[field] = body[field] if isinstance(body[field], list) else []
         else:
             fields[field] = _tri(body[field])
     if not fields:
@@ -423,6 +431,91 @@ def api_routine_delete(routine_id: str) -> Any:
     if not store.delete_routine(routine_id):
         return jsonify({"error": "No such routine"}), 404
     return jsonify({"ok": True})
+
+
+# -------------------------------------------------------------------
+# Records — what a routine run wrote down
+# -------------------------------------------------------------------
+
+
+@app.route("/api/records", methods=["GET"])
+def api_records() -> Any:
+    """Kept records, newest first. ``?routine=`` narrows to one."""
+    rows = store.list_records(str(request.args.get("routine") or ""))
+    return jsonify({"records": rows, "columns": store.record_columns(rows)})
+
+
+@app.route("/api/records", methods=["POST"])
+def api_record_create() -> Any:
+    """Restate a routine's answer as its declared fields, and keep it.
+
+    Called by the browser once the reply has finished, rather than from inside
+    the streaming generator: that path is delicate, and a record is worth less
+    than the answer already on screen. A failure here is a 200 with no record.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = {}
+    answer = str(body.get("answer") or "").strip()
+    fields = body.get("fields")
+    if not answer:
+        return jsonify({"error": "Missing 'answer'"}), 400
+    if not isinstance(fields, list) or not fields:
+        return jsonify({"error": "Missing 'fields'"}), 400
+
+    model = str(body.get("model") or "") or get_default_model()
+    extracted = records.extract(answer, [str(f) for f in fields], model)
+    kept = store.add_record(
+        str(body.get("routine_name") or "Routine"), extracted,
+        str(body.get("routine_id") or "") or None,
+        str(body.get("conversation_id") or "") or None,
+    )
+    # 200 either way. "Nothing could be pulled out of that answer" is an
+    # outcome, not an error, and the reply it came from is still on screen.
+    return jsonify({"record": kept})
+
+
+@app.route("/api/records/<record_id>", methods=["PATCH"])
+def api_record_update(record_id: str) -> Any:
+    """Correct a record. The extraction is good, not beyond question."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("fields"), dict):
+        return jsonify({"error": "Missing 'fields'"}), 400
+    record = store.update_record(record_id, body["fields"])
+    if record is None:
+        return jsonify({"error": "No such record"}), 404
+    return jsonify({"ok": True, "record": record})
+
+
+@app.route("/api/records/<record_id>", methods=["DELETE"])
+def api_record_delete(record_id: str) -> Any:
+    """Remove one record."""
+    if not store.delete_record(record_id):
+        return jsonify({"error": "No such record"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/records.csv", methods=["GET"])
+def api_records_csv() -> Any:
+    """The whole log as CSV, for a spreadsheet or another machine's importer.
+
+    A real endpoint rather than a download built in the browser: pulling this
+    with curl from wherever the records are meant to end up is the point.
+    """
+    rows = store.list_records(str(request.args.get("routine") or ""))
+    columns = store.record_columns(rows)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["taken_at", "routine"] + columns)
+    for row in rows:
+        stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
+        writer.writerow([stamp, row["routine_name"]] +
+                        [row["fields"].get(name, "") for name in columns])
+    return Response(
+        buffer.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="records.csv"'},
+    )
 
 
 @app.route("/api/chat", methods=["POST"])
