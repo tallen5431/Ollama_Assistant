@@ -21,6 +21,7 @@ _PAGE = """<!doctype html>
     <!-- Inline, so there is no favicon request to 404 on every page load, and a
          home-screen shortcut on a phone gets an icon rather than a blank page. -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 11h16M8 16h16M8 21h10' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+    <link rel="manifest" href="manifest.webmanifest">
     <meta name="color-scheme" content="light dark">
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0a0e17" media="(prefers-color-scheme: dark)">
@@ -107,6 +108,14 @@ _PAGE = """<!doctype html>
       }
 
       * { box-sizing:border-box; }
+      /* Smooth scrolling and sliding panels are decoration; someone who has
+         asked their system for less motion has usually asked for a reason. */
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration:0.01ms !important; animation-iteration-count:1 !important;
+          transition-duration:0.01ms !important; scroll-behavior:auto !important;
+        }
+      }
       /* Author display rules outrank the UA [hidden] rule, so every
          flex element here would ignore .hidden without this. */
       [hidden] { display:none !important; }
@@ -182,10 +191,13 @@ _PAGE = """<!doctype html>
       .iconbtn .i { width:1.15rem; height:1.15rem; }
 
       /* ---- Conversation -------------------------------------------------- */
+      /* No scroll-behavior:smooth here. Following a stream assigns scrollTop
+         on every token, and an animated assignment fires scroll events part of
+         the way there — which atBottom() reads as the user having scrolled
+         away, so the follow switches itself off mid-reply. */
       #chat {
         flex:1 1 auto; overflow-y:auto; padding:1.5rem 1rem 0.5rem;
         display:flex; flex-direction:column; gap:0.9rem;
-        scroll-behavior:smooth;
       }
       .wrap { width:100%; max-width:48rem; margin:0 auto; }
       .msg { display:flex; }
@@ -253,6 +265,19 @@ _PAGE = """<!doctype html>
       .startcard span { font-size:var(--fs-xs); color:var(--muted);
         overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
         max-width:100%; }
+
+      /* Sits over the conversation, clear of the composer, and only appears
+         once you have scrolled away from the bottom. */
+      .chatarea { position:relative; flex:1 1 auto; min-height:0; display:flex; }
+      /* Filled rather than quiet: it sits over the reply it is offering to
+         take you to, and a muted circle on a dark bubble was barely there. */
+      .tolatest { position:absolute; bottom:0.6rem; left:50%;
+        transform:translateX(-50%);
+        z-index:5; width:2.3rem; height:2.3rem; padding:0; border-radius:50%;
+        background:var(--accent); border:1px solid var(--accent);
+        color:var(--on-accent); box-shadow:var(--shadow2); }
+      .tolatest:hover { background:var(--accent-hover);
+                        border-color:var(--accent-hover); }
 
       /* ---- Footer and composer ------------------------------------------- */
       footer { background:var(--surface); border-top:1px solid var(--border-soft);
@@ -424,6 +449,33 @@ _PAGE = """<!doctype html>
         background:var(--accent); border-color:var(--accent);
         color:var(--on-accent); padding:0.55rem; border-radius:var(--r2); }
       .drawer-new:hover { background:var(--accent-hover); }
+      /* The search box reads as one control: the magnifier and the clear
+         button live inside the field's own border rather than beside it. */
+      .searchbar { display:flex; align-items:center; gap:0.4rem; margin-bottom:0.5rem;
+        padding:0 0.5rem; background:var(--surface2);
+        border:1px solid var(--border); border-radius:var(--pill); }
+      .searchbar:focus-within { border-color:var(--accent);
+        box-shadow:0 0 0 3px var(--accent-soft); }
+      .searchbar .i { color:var(--faint); width:1rem; height:1rem; }
+      .searchbar input { flex:1 1 auto; min-width:0; background:transparent;
+        border:0; padding:0.5rem 0; font-size:var(--fs-sm); }
+      .searchbar input:focus { outline:none; }
+      .searchbar input::-webkit-search-cancel-button { display:none; }
+      .searchbar .iconbtn { width:1.6rem; height:1.6rem; }
+      .searchhead { font-size:var(--fs-xs); color:var(--faint); font-weight:600;
+        text-transform:uppercase; letter-spacing:0.05em;
+        margin:0.7rem 0.3rem 0.2rem; }
+      .searchhead:first-child { margin-top:0.1rem; }
+      /* Two lines of context under a title, wrapped rather than truncated —
+         the matched phrase is the reason the row is there. */
+      .convo-meta.hit { white-space:normal; line-height:1.4;
+        display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+        overflow:hidden; }
+      .hitrecord { border:1px solid var(--border-soft); border-radius:var(--r1);
+        margin-bottom:0.25rem; }
+      .storage { margin:0.6rem 0.3rem 0.2rem; }
+      .storage-act { align-self:flex-start; margin:0.1rem 0.3rem 0.4rem; }
+      .expired { font-style:italic; }
       #convoList { overflow-y:auto; display:flex; flex-direction:column; gap:0.25rem; }
       .convo { display:flex; align-items:stretch; gap:0.15rem; border-radius:var(--r1); }
       .convo-open {
@@ -442,6 +494,12 @@ _PAGE = """<!doctype html>
       .convo-act:hover { color:var(--text); background:var(--surface2); }
       .convo-empty { color:var(--muted); font-size:var(--fs-sm); margin:0.5rem 0.2rem;
         line-height:1.5; }
+      /* Thirty threads is a wall of titles. Days give it somewhere to land. */
+      .daymark { font-size:var(--fs-xs); color:var(--faint); font-weight:600;
+        text-transform:uppercase; letter-spacing:0.05em;
+        margin:0.7rem 0.3rem 0.15rem; position:sticky; top:0;
+        background:var(--surface); padding:0.15rem 0; }
+      .daymark:first-child { margin-top:0; }
 
       /* One row that scrolls sideways rather than four rows that eat a phone
          screen — the strip has to stay a single line at ten routines. */
@@ -624,6 +682,8 @@ _PAGE = """<!doctype html>
       <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
       <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></symbol>
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.4A8.6 8.6 0 0 1 9.6 3.5a8.6 8.6 0 1 0 10.9 10.9z"/></symbol>
+      <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></symbol>
       <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l2.1 5.4L19.5 10l-5.4 2.1L12 17.5l-2.1-5.4L4.5 10l5.4-1.6z"/><path d="M18.5 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
     </svg>
     <div class="backdrop" id="backdrop" hidden></div>
@@ -645,6 +705,14 @@ _PAGE = """<!doctype html>
       </div>
       <div id="convoPane">
         <button class="drawer-new" id="drawerNew" type="button">＋ New chat</button>
+        <!-- A month in and the list is titles you no longer recognise. This
+             looks inside the messages and the records, not just the titles. -->
+        <div class="searchbar">
+          <svg class="i" aria-hidden="true"><use href="#i-search"></use></svg>
+          <input id="convoSearch" type="search" autocomplete="off"
+                 placeholder="Search chats and records" aria-label="Search chats and records">
+          <button id="searchClear" class="iconbtn" type="button" title="Clear the search" hidden><svg class="i" aria-hidden="true"><use href="#i-close"></use></svg></button>
+        </div>
         <div id="convoList"></div>
       </div>
       <!-- A div, not a form: a form in this page can submit and navigate away.
@@ -718,9 +786,20 @@ _PAGE = """<!doctype html>
         <button id="newChat" title="Start a new conversation" type="button"><svg class="i" aria-hidden="true"><use href="#i-plus"></use></svg><span>New chat</span></button>
       </header>
 
-      <main id="chat">
-        <div class="wrap"><div class="empty" id="empty"></div></div>
-      </main>
+      <!-- The button is anchored to this, not to the pane: #chat scrolls, so a
+           child of it would scroll away, and the pane's bottom edge is under
+           the composer. -->
+      <div class="chatarea">
+        <main id="chat">
+          <div class="wrap"><div class="empty" id="empty"></div></div>
+        </main>
+        <!-- Scrolling up during a long reply stops the view following it,
+             which is right — but then getting back meant flicking down through
+             everything that arrived while you were reading. -->
+        <button id="toLatest" class="tolatest" type="button" title="Jump to the latest" hidden>
+          <svg class="i" aria-hidden="true"><use href="#i-down"></use></svg>
+        </button>
+      </div>
 
       <footer>
         <div class="wrap">
@@ -882,7 +961,17 @@ _PAGE = """<!doctype html>
         // counts as the user expressing a preference.
         if (lastAutoTop >= 0 && Math.abs(chatEl.scrollTop - lastAutoTop) < 2) return;
         stickBottom = atBottom();
+        showToLatest();
       }, { passive: true });
+
+      // The button and the follow are the same state seen twice: it is offered
+      // exactly when the view has stopped following, and taking it puts the
+      // follow back on.
+      const toLatestEl = document.getElementById("toLatest");
+      function showToLatest() {
+        toLatestEl.hidden = stickBottom || chatEl.scrollHeight <= chatEl.clientHeight + 8;
+      }
+      toLatestEl.addEventListener("click", () => scrollDown(true));
 
       function scrollDown(force) {
         if (force) stickBottom = true;
@@ -897,6 +986,7 @@ _PAGE = """<!doctype html>
           if (!stickBottom) return;
           chatEl.scrollTop = chatEl.scrollHeight;
           lastAutoTop = chatEl.scrollTop;
+          showToLatest();
         });
       }
 
@@ -1885,7 +1975,7 @@ _PAGE = """<!doctype html>
             '<div class="webstatus" hidden></div>' +
             '<details class="think" hidden><summary>Show thinking</summary>' +
               '<div class="think-body"></div></details>' +
-            '<div class="bubble">…</div>' +
+            '<div class="bubble" aria-live="polite" aria-atomic="false">…</div>' +
             '<div class="meta"></div>' +
             '<div class="sources" hidden></div>' +
           '</div></div>';
@@ -2232,7 +2322,10 @@ _PAGE = """<!doctype html>
         // the retry the app has just invited.
         if ((!text && !images.length) || busy) return false;
         let went = true, queued = false;
-        busy = true; sendBtn.disabled = true; stopBtn.hidden = false;
+        // Hidden, not merely disabled: a greyed-out Send next to a red Stop
+        // is two buttons for one decision.
+        busy = true; sendBtn.disabled = true; sendBtn.hidden = true;
+        stopBtn.hidden = false;
         pendingImages = []; renderThumbs();
         const userView = addUser(text, images);
         // Ollama takes images as bare base64 alongside the text, not as a data URL.
@@ -2249,10 +2342,13 @@ _PAGE = """<!doctype html>
         }
         messages.push(userMsg);
         inputEl.value = ""; autosize();
-        // Deliberately not saved yet: a failed turn is rolled back on screen and
-        // in messages[], and writing first would leave the store holding a turn
-        // the UI discarded — which a retry then duplicates. Committed by
-        // commitTurn() once the turn has actually produced something.
+        // The thread has to exist before the stream starts, because the server
+        // is the one that writes the turn down now and it needs somewhere to
+        // put it. A turn that then produces nothing leaves an empty thread, so
+        // remember whether this call is what created it — see dropIfEmpty().
+        const hadThread = !!currentConvoId;
+        await ensureConversation(text);
+        const createdThread = !hadThread && !!currentConvoId;
 
         const view = addAssistant();
         // Abort handling runs after newChat() may have swapped `messages`;
@@ -2292,15 +2388,27 @@ _PAGE = """<!doctype html>
           return true;
         }
 
-        let turnSaved = false;
-        async function commitTurn(reply, sources) {
-          if (turnSaved || messages !== thread) return;
-          turnSaved = true;
-          await ensureConversation(text);
-          await saveMessage("user", text, userMsg.images || null, null,
-                            userMsg.image_meta || null);
-          if (reply) await saveMessage("assistant", reply, null, sources || null);
+        // The server writes the turn — see _keep_turn in app.py — because it
+        // is still there when the tab is not. This end only has to catch up
+        // with the list, and to take away a thread that was created for a turn
+        // which then produced nothing.
+        function commitTurn() {
+          if (messages !== thread) return;
+          // Safe to read straight away: the server writes the turn before it
+          // closes the stream, so by the time this runs it is already there.
           refreshConversations();
+        }
+
+        async function dropIfEmpty() {
+          if (!createdThread || !currentConvoId) return;
+          try {
+            const resp = await fetch("api/conversations/" + currentConvoId);
+            if (resp.ok && !((await resp.json()).messages || []).length) {
+              await fetch("api/conversations/" + currentConvoId, { method: "DELETE" });
+              if (messages === thread) currentConvoId = null;
+              refreshConversations();
+            }
+          } catch (e) { /* a tidy-up is never worth an error on screen */ }
         }
         controller = new AbortController();
         let rawContent = "", thinkingField = "", started = false, usage = null, lastSources = null;
@@ -2337,6 +2445,9 @@ _PAGE = """<!doctype html>
               model: modelEl.value || undefined,
               messages: withRecentImages(messages),
               web: webEl.checked || undefined,
+              // Where to write this turn down when it is finished — including
+              // when this tab is not the thing that finishes it.
+              conversation_id: currentConvoId || undefined,
             }),
             signal: controller.signal,
           });
@@ -2403,7 +2514,7 @@ _PAGE = """<!doctype html>
             view.raw = finalContent;
             if (view.copyBtn) view.copyBtn.hidden = false;
             if (messages === thread) messages.push({ role: "assistant", content: finalContent });
-            commitTurn(finalContent, lastSources);
+            commitTurn();
             if (usage) view.meta.textContent = fmtUsage(usage);
           } else {
             // The request completed but the model said nothing. Recording the
@@ -2413,6 +2524,7 @@ _PAGE = """<!doctype html>
             view.root.remove();
             went = false;
             const returned = rollBackTurn();
+            dropIfEmpty();
             markError("The model returned an empty reply." +
                       (returned ? " Your message is back in the box." : ""));
           }
@@ -2423,7 +2535,7 @@ _PAGE = """<!doctype html>
             if (partial) {
               view.bubble.textContent = partial + "  ⏹ stopped";
               if (messages === thread) messages.push({ role: "assistant", content: partial });
-              commitTurn(partial, lastSources);   // Stop still produced an answer
+              commitTurn();   // Stop still produced an answer, and the server kept it
             } else {
               // Stopped before any visible text — which for a reasoning model is
               // the whole scratchpad, i.e. exactly when Stop gets pressed. The
@@ -2432,6 +2544,7 @@ _PAGE = """<!doctype html>
               // two user roles.
               view.root.remove();
               went = false;
+              dropIfEmpty();
               // Only claim the message came back if it did: with the composer
               // already holding something else it is not restored, and saying
               // otherwise sent people looking for a photo that had been dropped.
@@ -2450,11 +2563,12 @@ _PAGE = """<!doctype html>
               view.status.textContent = "Interrupted: " + (err.message || err);
               view.status.hidden = false;
               if (messages === thread) messages.push({ role: "assistant", content: partial });
-              commitTurn(partial, lastSources);
+              commitTurn();
             } else {
               view.root.remove();
               went = false;
               rollBackTurn();
+              dropIfEmpty();
               markError(err.message || String(err));
             }
             setStatus("bad", "error");
@@ -2462,7 +2576,8 @@ _PAGE = """<!doctype html>
         } finally {
           stopWaitTimer();
           releaseWakeLock();
-          busy = false; sendBtn.disabled = false; stopBtn.hidden = true;
+          busy = false; sendBtn.disabled = false; sendBtn.hidden = false;
+          stopBtn.hidden = true;
           controller = null;
           if (pendingAutoSend) {
             pendingAutoSend = false;
@@ -2481,7 +2596,20 @@ _PAGE = """<!doctype html>
         return went;
       }
 
-      function stop() { if (controller) controller.abort(); }
+      function stop() {
+        // The server keeps generating after this tab stops listening — that is
+        // the whole point — so aborting here alone would leave a 30b model
+        // running for another minute. keepalive, because Stop is also what
+        // gets pressed on the way out of the page.
+        if (currentConvoId) {
+          fetch("api/chat/cancel", {
+            method: "POST", keepalive: true,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ conversation_id: currentConvoId }),
+          }).catch(() => {});
+        }
+        if (controller) controller.abort();
+      }
 
       function newChat() {
         if (controller) controller.abort();
@@ -2556,6 +2684,22 @@ _PAGE = """<!doctype html>
       let visionDefault = null;  // server's pick: smallest non-OCR vision model
       let ocrAvailable = null;   // an installed transcriber, if there is one
 
+      // Today / Yesterday / a weekday for the last week / a date. Thirty
+      // threads is otherwise a wall of titles with nowhere for the eye to land.
+      function dayOf(ts) {
+        const then = new Date(ts * 1000), now = new Date();
+        const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const days = Math.floor((midnight - new Date(
+          then.getFullYear(), then.getMonth(), then.getDate())) / 86400000);
+        if (days <= 0) return "Today";
+        if (days === 1) return "Yesterday";
+        if (days < 7) return then.toLocaleDateString(undefined, { weekday: "long" });
+        if (then.getFullYear() === now.getFullYear()) {
+          return then.toLocaleDateString(undefined, { month: "long", day: "numeric" });
+        }
+        return then.toLocaleDateString(undefined, { year: "numeric", month: "long" });
+      }
+
       function when(ts) {
         const secs = Math.max(0, Date.now() / 1000 - ts);
         if (secs < 60) return "just now";
@@ -2567,6 +2711,10 @@ _PAGE = """<!doctype html>
 
       async function refreshConversations() {
         if (!historyOn) return;
+        // A save, a delete or a finished turn all refresh the list. With a
+        // search on screen that would silently replace the results with every
+        // conversation, which reads as the search having failed.
+        if (searchQuery()) { runSearch(); return; }
         let list = [];
         try {
           list = (await (await fetch("api/conversations")).json()).conversations || [];
@@ -2580,8 +2728,19 @@ _PAGE = """<!doctype html>
           convoListEl.appendChild(p);
           return;
         }
+        let lastDay = null;
         for (const convo of list) {
           if (convo.id === currentConvoId) setChatTitle(convo.title);
+          // The list is newest first, so the days come out in order and each
+          // one only has to be announced when it changes.
+          const day = dayOf(convo.updated_at);
+          if (day !== lastDay) {
+            lastDay = day;
+            const mark = document.createElement("p");
+            mark.className = "daymark";
+            mark.textContent = day;
+            convoListEl.appendChild(mark);
+          }
           const row = document.createElement("div");
           row.className = "convo" + (convo.id === currentConvoId ? " active" : "");
 
@@ -2627,6 +2786,117 @@ _PAGE = """<!doctype html>
         showHistoryCost();
       }
 
+      // A photo that has passed the retention cutoff. The message and the
+      // reply are still there; saying the picture is gone is better than a
+      // gap where one used to be.
+      function expiredPhotoNote(count) {
+        const note = document.createElement("p");
+        note.className = "meta expired";
+        note.textContent = count === 1
+          ? "📷 the photo has passed the keep-for period"
+          : "📷 " + count + " photos have passed the keep-for period";
+        return note;
+      }
+
+      // ---- Search ----
+      // Everything you have said and everything a routine wrote down. A month
+      // in, the conversation list is a column of titles you no longer
+      // recognise, and the thing you actually remember is a word from inside
+      // the answer.
+      const searchEl = document.getElementById("convoSearch");
+      const searchClearEl = document.getElementById("searchClear");
+      let searchTimer = null;
+
+      function searchQuery() { return searchEl.value.trim(); }
+
+      function onSearchInput() {
+        searchClearEl.hidden = !searchEl.value;
+        // Debounced: this scans the messages table, and one query per
+        // keystroke would run it eight times to answer the eighth.
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(runSearch, 180);
+      }
+
+      async function runSearch() {
+        const query = searchQuery();
+        if (!query) { refreshConversations(); return; }
+        let found;
+        try {
+          const resp = await fetch("api/search?q=" + encodeURIComponent(query));
+          if (!resp.ok) return;
+          found = await resp.json();
+        } catch (e) { return; }
+        // Typing moved on while this was in flight; that answer is stale.
+        if (searchQuery() !== query) return;
+        paintSearch(found, query);
+      }
+
+      function paintSearch(found, query) {
+        convoListEl.innerHTML = "";
+        const chats = found.conversations || [], kept = found.records || [];
+        if (!chats.length && !kept.length) {
+          const none = document.createElement("p");
+          none.className = "convo-empty";
+          none.textContent = "Nothing matches " + JSON.stringify(query) + ".";
+          convoListEl.appendChild(none);
+          return;
+        }
+        if (chats.length) {
+          convoListEl.appendChild(searchHeading(
+            chats.length === 1 ? "1 conversation" : chats.length + " conversations"));
+        }
+        for (const convo of chats) {
+          const row = document.createElement("div");
+          row.className = "convo" + (convo.id === currentConvoId ? " active" : "");
+          const open = document.createElement("button");
+          open.className = "convo-open"; open.type = "button";
+          const title = document.createElement("span");
+          title.className = "convo-title"; title.textContent = convo.title;
+          const line = document.createElement("span");
+          line.className = "convo-meta hit";
+          // textContent, never innerHTML: this is a slice of a stored message.
+          line.textContent = convo.snippet || when(convo.updated_at);
+          open.appendChild(title); open.appendChild(line);
+          open.addEventListener("click", () => loadConversation(convo.id));
+          row.appendChild(open);
+          convoListEl.appendChild(row);
+        }
+        if (kept.length) {
+          convoListEl.appendChild(searchHeading(
+            kept.length === 1 ? "1 record" : kept.length + " records"));
+          for (const record of kept) {
+            const row = document.createElement("button");
+            row.className = "convo-open hitrecord"; row.type = "button";
+            const name = document.createElement("span");
+            name.className = "convo-title";
+            name.textContent = record.routine_name;
+            const vals = document.createElement("span");
+            vals.className = "convo-meta hit";
+            vals.textContent = Object.keys(record.fields)
+              .map(k => k + ": " + record.fields[k]).join(" · ");
+            row.appendChild(name); row.appendChild(vals);
+            // The record's own pane can filter and export; this only has to
+            // get you there.
+            row.addEventListener("click", () => showPane("records"));
+            convoListEl.appendChild(row);
+          }
+        }
+      }
+
+      function searchHeading(text) {
+        const head = document.createElement("p");
+        head.className = "searchhead";
+        head.textContent = text;
+        return head;
+      }
+
+      function clearSearch() {
+        searchEl.value = "";
+        searchClearEl.hidden = true;
+        if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+        refreshConversations();
+      }
+
       // What history is costing on disk. Attached images are stored with their
       // message, so an image-heavy history grows quickly and there was no way
       // to see that short of looking at the file.
@@ -2637,10 +2907,51 @@ _PAGE = """<!doctype html>
           const mb = s.bytes / (1024 * 1024);
           const size = mb >= 1 ? mb.toFixed(1) + " MB" : Math.round(s.bytes / 1024) + " KB";
           const note = document.createElement("p");
-          note.className = "convo-empty";
+          note.className = "convo-empty storage";
           note.textContent = s.messages + " messages · " + size + " on disk";
           convoListEl.appendChild(note);
+
+          // Photos are nearly all of that number, and what is worth having a
+          // year later is the reading that came off the photo rather than the
+          // photo. Saying so where the number is, is the only place it means
+          // anything.
+          const days = s.photo_keep_days;
+          if (typeof days !== "number") return;
+          const policy = document.createElement("p");
+          policy.className = "convo-empty storage";
+          policy.textContent = days > 0
+            ? "Photos are kept for " + (days === 1 ? "a day" : days + " days") +
+              "; the text stays for good."
+            : "Photos are kept for good (PHOTO_KEEP_DAYS=0).";
+          convoListEl.appendChild(policy);
+          if (days <= 0) return;
+          const now = document.createElement("button");
+          now.type = "button"; now.className = "chip storage-act";
+          now.textContent = "Free up space now";
+          now.title = "Drop stored photos older than the cutoff. Every word is kept.";
+          now.addEventListener("click", () => forgetPhotosNow(now, days));
+          convoListEl.appendChild(now);
         } catch (e) { /* a footnote is never worth an error */ }
+      }
+
+      async function forgetPhotosNow(btn, days) {
+        if (!confirm("Drop stored photos older than " + days + " days?\\n\\n" +
+                     "Every message, reply and record is kept — only the " +
+                     "pictures go, and only from conversations older than that.")) return;
+        btn.disabled = true; btn.textContent = "Working…";
+        try {
+          const resp = await fetch("api/photos/forget", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ days: days }) });
+          const done = await resp.json();
+          hintEl.textContent = done.messages
+            ? "Freed " + Math.round((done.bytes || 0) / 1024) + " KB from " +
+              done.messages + (done.messages === 1 ? " photo." : " photos.")
+            : "Nothing was old enough to drop.";
+        } catch (e) {
+          hintEl.textContent = "Could not free space just now.";
+        }
+        refreshConversations();
       }
 
       // Create on first use rather than on page load, so idly opening the app
@@ -2675,21 +2986,6 @@ _PAGE = """<!doctype html>
         return currentConvoId;
       }
 
-      async function saveMessage(role, content, images, sources, meta) {
-        if (!historyOn || !currentConvoId) return;
-        try {
-          const resp = await fetch("api/conversations/" + currentConvoId + "/messages", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ role: role, content: content,
-                                   images: images || null, sources: sources || null,
-                                   image_meta: meta || null }) });
-          if (!resp.ok) {
-            const data = await resp.json().catch(function () { return {}; });
-            noteHistoryBroken(data.error);
-          } else { historyBroken = false; }
-        } catch (e) { noteHistoryBroken(); }
-      }
-
       async function loadConversation(id) {
         let convo;
         try {
@@ -2710,7 +3006,15 @@ _PAGE = """<!doctype html>
             return { b64: b64, url: "data:image/jpeg;base64," + b64 };
           });
           if (msg.role === "user") {
-            addUser(msg.content, imgs);
+            const row = addUser(msg.content, imgs);
+            // The photo has passed the keep-for period but its own record of
+            // when and where it was taken did not, because that is a different
+            // column and it is the part still worth having. Say so rather than
+            // leaving a message that reads as if nothing was ever attached.
+            const col = row && row.querySelector(".col");
+            if (!imgs.length && msg.image_meta && msg.image_meta.length && col) {
+              col.appendChild(expiredPhotoNote(msg.image_meta.length));
+            }
             const entry = { role: "user", content: msg.content };
             if (imgs.length) entry.images = imgs.map(function (i) { return i.b64; });
             if (imgs.length && msg.image_meta) entry.image_meta = msg.image_meta;
@@ -3686,6 +3990,26 @@ _PAGE = """<!doctype html>
         loadModels();
         checkVoice();
       });
+
+      // A sidebar you can reach without the mouse. Ctrl/⌘+K is what every
+      // other app with a search box has trained people to press.
+      document.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+          e.preventDefault();
+          openDrawer("chats");
+          searchEl.focus(); searchEl.select();
+          return;
+        }
+        // Escape closes whatever is over the top, innermost first. On a rail
+        // there is nothing over the top, so it does nothing — which is right.
+        if (e.key !== "Escape") return;
+        if (!metaEl.hidden) { hidePhotoDetails(); return; }
+        if (!drawerEl.hidden && !railed()) closeDrawer();
+      });
+
+      searchEl.addEventListener("input", onSearchInput);
+      searchEl.addEventListener("keydown", (e) => { if (e.key === "Escape") clearSearch(); });
+      searchClearEl.addEventListener("click", () => { clearSearch(); searchEl.focus(); });
 
       // ---- Theme ----
       // Auto is the default and the stylesheet does it on its own; this is for

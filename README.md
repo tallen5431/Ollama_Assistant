@@ -120,6 +120,7 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
 | `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
 | `PHOTO_META`        | `1`                         | Whether a browser that has never touched the toggle starts with **📍 Photo details** on. `0` makes off the default |
+| `PHOTO_KEEP_DAYS`   | `30`                        | How long stored photos stay in the history. Every word is kept for good; only the pixels expire. `0` keeps them for good too |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
@@ -357,7 +358,23 @@ opens the list; conversations are named from their first message and can be
 renamed or deleted. **New chat** starts a fresh thread.
 
 A conversation is only created once you send something, so idly opening the app
-doesn't litter the list.
+doesn't litter the list — and a turn that produces nothing takes its thread away
+again.
+
+**The reply is written down by the server, not the browser.** That matters on a
+phone: lock the screen past the wake lock, switch apps, or hand off from wifi to
+cellular in the middle of a long answer, and the tab that asked the question is
+no longer there when the answer arrives. The model also keeps generating once
+nobody is listening — a WSGI response is *pulled*, so tying the work to the
+connection meant a dropped phone kept only the first sentence. Reopen the app
+and the whole answer is waiting in the thread. **Stop** still stops it: the
+button tells the server as well as closing the connection, and keeps whatever
+had been said by then.
+
+**Search** looks inside the messages and the records, not just the titles — the
+box is at the top of the ☰ list. Typing "A23" finds the thread where that only
+ever appeared in a reply; typing "Brighton" also turns up the trip a routine
+wrote down. Escape or the ✕ clears it.
 
 > ⚠️ **Anything stored here is readable by anyone who can reach the app.** Until
 > now there was nothing to steal; with history on, your past conversations are
@@ -375,6 +392,16 @@ time. Which means an image-heavy history grows the database. The drawer shows
 what it currently costs, and deleting conversations genuinely gives the space
 back — the file is compacted when enough of it has become dead space, rather
 than only marking pages free.
+
+**Photos expire; words do not.** The browser caps a re-encode at about 900KB,
+which is roughly 1.2MB of base64 in the row, so a two-photo routine run every
+day is most of a gigabyte a year — and what is worth having a year later is the
+reading that came off the photo, not the photo. After `PHOTO_KEEP_DAYS` (default
+30) the pixels are dropped and everything else stays: the question, the reply,
+the record, and the photo's own note of when and where it was taken. A thread
+whose photos have gone says so rather than showing a gap. The sweep runs itself
+at most once an hour; **Free up space now** in the drawer applies it on demand.
+`PHOTO_KEEP_DAYS=0` keeps every photo for good.
 
 Only the most recent image-bearing turn re-sends its attachments to the model.
 Re-uploading every screenshot in a thread on every turn was slow over a phone
@@ -706,7 +733,11 @@ make it likes.
 | `GET /healthz`       | Plain `ok` health probe (stays open even when auth is on) |
 | `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
-| `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...] }` or `{ "prompt": "..." }`. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
+| `POST /api/chat`     | Chat completion. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
+| `POST /api/chat/cancel` | Stop the turn running for a conversation — body `{ "conversation_id" }`. Needed because generation outlives the connection |
+| `GET /api/search`    | Find a phrase across conversations and records — `?q=`. Returns `{ "conversations": [...], "records": [...] }`; under two characters returns both empty |
+| `POST /api/photos/forget` | Apply the photo retention now — body `{ "days"? }`, defaulting to `PHOTO_KEEP_DAYS`. Returns what it dropped |
+| `GET /manifest.webmanifest` | Web app manifest, so a home-screen shortcut opens without browser chrome |
 | `GET /api/routines`  | Every saved routine, in strip order |
 | `POST /api/routines` | Save one — body `{ "name", "body", "photos"?, "web"?, "photo_meta"? }`. `web`/`photo_meta` are `true`/`false`/`null`, where null means "leave the toggle alone" |
 | `POST /api/routines/starters` | Install the shipped routines, skipping names already taken. Idempotent |

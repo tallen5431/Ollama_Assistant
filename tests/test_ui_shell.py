@@ -231,3 +231,94 @@ class TestTheComposerIsOneObject:
         text = page()
         assert ".composer-card:focus-within { border-color:var(--accent);" in text
         assert "textarea:focus { outline:none; }" in text
+
+
+class TestGettingBackToTheLatest:
+    """Scrolling up during a long reply stops the view following it — right,
+    but then getting back meant flicking down through everything that arrived
+    while you were reading.
+    """
+
+    def page(self):
+        return chat_ui.render_page("t")
+
+    def test_the_button_is_the_follow_flag_seen_twice(self):
+        js = page_script(self.page())
+        at = js.index("function showToLatest")
+        assert "toLatestEl.hidden = stickBottom ||" in js[at:at + 250]
+
+    def test_taking_it_goes_through_the_same_path_the_stream_does(self):
+        """Two ways to reach the bottom is two things to keep in step."""
+        js = page_script(self.page())
+        assert 'toLatestEl.addEventListener("click", () => scrollDown(true));' in js
+
+    def test_it_does_not_appear_when_there_is_nothing_to_scroll(self):
+        js = page_script(self.page())
+        at = js.index("function showToLatest")
+        assert "chatEl.scrollHeight <= chatEl.clientHeight + 8" in js[at:at + 250]
+
+    def test_the_conversation_never_scrolls_smoothly(self):
+        """Following assigns scrollTop on every token. Animated, those
+        assignments fire scroll events part of the way there, atBottom() reads
+        that as the user scrolling away, and the follow switches itself off
+        mid-reply — measured on a 1512px desktop.
+        """
+        text = self.page()
+        at = text.index("      #chat {")
+        assert "scroll-behavior" not in text[at:text.index("}", at)]
+
+
+class TestTheListHasSomewhereForTheEyeToLand:
+    def page(self):
+        return chat_ui.render_page("t")
+
+    def test_conversations_are_grouped_by_day(self):
+        js = page_script(self.page())
+        at = js.index("function dayOf")
+        window = js[at:at + 900]
+        for label in ('"Today"', '"Yesterday"', 'weekday: "long"'):
+            assert label in window, label
+
+    def test_a_day_is_announced_only_when_it_changes(self):
+        """The list is newest first, so they already come out in order."""
+        js = page_script(self.page())
+        assert "if (day !== lastDay) {" in js
+
+    def test_a_thread_from_another_year_says_which(self):
+        js = page_script(self.page())
+        at = js.index("function dayOf")
+        assert 'year: "numeric"' in js[at:at + 900]
+
+
+class TestTheKeyboardReachesIt:
+    def page(self):
+        return chat_ui.render_page("t")
+
+    def test_ctrl_k_opens_the_drawer_on_the_search_box(self):
+        js = page_script(self.page())
+        at = js.index('e.key === "k"')
+        window = js[at - 200:at + 300]
+        assert 'openDrawer("chats");' in window and "searchEl.focus()" in window
+        assert "e.metaKey" in window, "⌘K on a Mac"
+
+    def test_escape_closes_the_innermost_thing_first(self):
+        js = page_script(self.page())
+        at = js.index('if (e.key !== "Escape") return;')
+        window = js[at:at + 300]
+        assert window.index("hidePhotoDetails()") < window.index("closeDrawer()")
+
+    def test_escape_leaves_a_rail_alone(self):
+        """There is nothing over the top of anything to dismiss."""
+        js = page_script(self.page())
+        at = js.index('if (e.key !== "Escape") return;')
+        assert "!drawerEl.hidden && !railed()" in js[at:at + 300]
+
+
+class TestItRespectsALessMotionSetting:
+    def test_animations_and_smooth_scrolling_are_turned_off(self):
+        text = chat_ui.render_page("t")
+        at = text.index("@media (prefers-reduced-motion: reduce)")
+        window = text[at:at + 400]
+        assert "animation-duration:0.01ms !important" in window
+        assert "transition-duration:0.01ms !important" in window
+        assert "scroll-behavior:auto !important" in window

@@ -61,7 +61,13 @@ const webEl = { checked: false };
 let pendingImages = [], messages = [], busy = false, controller = null, pendingAutoSend = false;
 // send() reads this to decide whether a photo's own date goes with it.
 let exifOn = true;
-let errors = [], saved = { rows: [], conversation: false };
+// The store is the server's job now: /api/chat is given the thread id and
+// writes the turn itself, so what this side is responsible for is creating the
+// thread before the stream starts and taking it away again if the turn
+// produced nothing. `saved` records exactly that.
+let errors = [], saved = { conversation: false, dropped: false, sentId: null };
+let currentConvoId = null;
+let threadEmpty = true;
 function renderThumbs() {}
 function autosize() {}
 function clearPlaceholder() {}
@@ -71,8 +77,10 @@ function markError(m) { errors.push(m); }
 function paintMarkdown(e, raw) { e.textContent = raw; }
 function fmtUsage() { return ""; }
 function showSources() {}
-async function ensureConversation() { saved.conversation = true; }
-async function saveMessage(role, content) { saved.rows.push(role); }
+async function ensureConversation() {
+  saved.conversation = true;
+  if (!currentConvoId) currentConvoId = "convo-1";
+}
 function refreshConversations() {}
 let lastView = null;
 function addAssistant() {
@@ -87,7 +95,14 @@ class AbortController { constructor() { this.signal = {}; } abort() {} }
 class TextDecoder { decode(buf) { return buf ? Buffer.from(buf).toString("utf8") : ""; } }
 
 let SCRIPT = [], ABORT_AFTER = -1, TYPE_DURING = null;
-async function fetch() {
+async function fetch(url, opts) {
+  // dropIfEmpty() asks the server what is in the thread and deletes it when
+  // the answer is nothing.
+  if (typeof url === "string" && url.indexOf("api/conversations/") === 0) {
+    if (opts && opts.method === "DELETE") { saved.dropped = true; return { ok: true }; }
+    return { ok: true, json: async () => (threadEmpty ? {} : { messages: [1, 2] }) };
+  }
+  if (opts && opts.body) saved.sentId = JSON.parse(opts.body).conversation_id || null;
   let i = 0;
   return { ok: true, body: { getReader: () => ({
     async read() {
@@ -103,14 +118,18 @@ async function fetch() {
 
 async function run(script, abortAfter, typed, typeDuring) {
   SCRIPT = script; ABORT_AFTER = abortAfter; TYPE_DURING = typeDuring;
-  messages = []; saved = { rows: [], conversation: false }; errors = [];
+  messages = []; errors = [];
+  saved = { conversation: false, dropped: false, sentId: null };
+  currentConvoId = null; threadEmpty = true;
   chatEl.children = []; pendingImages = [];
   inputEl.value = typed;
   await send();
   for (let t = 0; t < 8; t++) await Promise.resolve();
   return {
     messageRoles: messages.map(m => m.role),
-    savedRoles: saved.rows,
+    threadMade: saved.conversation,
+    threadDropped: saved.dropped,
+    sentThreadId: saved.sentId,
     input: inputEl.value,
     onScreen: chatEl.children.filter(c => !c.removed).length,
     errors, hint: hintEl.textContent,
@@ -146,13 +165,15 @@ class TestTurnBookkeeping:
     def test_a_normal_reply_is_kept_everywhere(self):
         r = drive([{"message": {"content": "4"}}, {"done": True}])
         assert r["messageRoles"] == ["user", "assistant"]
-        assert r["savedRoles"] == ["user", "assistant"]
+        assert r["threadMade"] and not r["threadDropped"]
+        assert r["sentThreadId"] == "convo-1", \
+            "the server writes the turn, so it has to be told which thread"
         assert r["input"] == ""
 
     def test_stop_after_some_text_keeps_the_partial(self):
         r = drive([{"message": {"content": "The ans"}}, {"message": {"content": "wer"}}], abort_after=2)
         assert r["messageRoles"] == ["user", "assistant"]
-        assert r["savedRoles"] == ["user", "assistant"]
+        assert not r["threadDropped"], "Stop still produced an answer to keep"
 
     def test_stop_during_reasoning_rolls_the_whole_turn_back(self):
         """For a reasoning model this is the entire scratchpad — the usual case.
@@ -162,7 +183,7 @@ class TestTurnBookkeeping:
         """
         r = drive([{"message": {"content": "", "thinking": "thinking hard"}}], abort_after=1)
         assert r["messageRoles"] == []
-        assert r["savedRoles"] == []
+        assert r["threadDropped"], "the thread made for this turn has to go too"
         assert r["onScreen"] == 0
         assert r["input"] == "what is 2+2?", "the typed message must come back"
         assert "back in the box" in r["hint"]
@@ -170,7 +191,7 @@ class TestTurnBookkeeping:
     def test_an_empty_reply_rolls_back_and_says_so(self):
         r = drive([{"done": True}])
         assert r["messageRoles"] == []
-        assert r["savedRoles"] == []
+        assert r["threadDropped"], "an empty reply must not leave an empty thread"
         assert any("empty reply" in e for e in r["errors"])
         assert r["input"] == "what is 2+2?"
 
@@ -217,7 +238,7 @@ class TestReasoningStream:
     def test_a_reply_that_is_only_reasoning_is_not_recorded_as_an_answer(self):
         r = drive([{"message": {"content": "", "thinking": "hmm"}}, {"done": True}])
         assert r["messageRoles"] == []
-        assert r["savedRoles"] == []
+        assert r["threadDropped"]
 
 
 class TestSplitThink:
@@ -300,6 +321,11 @@ class TestScrollFollowing:
               scrollHeight: 1000, clientHeight: 200, scrollTop: 800,
               addEventListener(name, fn) { listener = fn; },
             };
+            // The jump-to-latest button is the same state seen twice, so it
+            // lives in this slice and looks itself up from here.
+            const document = {
+              getElementById: () => ({ hidden: true, addEventListener() {} }),
+            };
             function requestAnimationFrame(fn) { fn(); }
             function scrollTo(top) { chatEl.scrollTop = top; listener(); }
             """,
@@ -344,6 +370,9 @@ class TestScrollFollowing:
             const chatEl = {
               scrollHeight: 2000, clientHeight: 200, scrollTop: 1800,
               addEventListener(name, fn) { listener = fn; },
+            };
+            const document = {
+              getElementById: () => ({ hidden: true, addEventListener() {} }),
             };
             function requestAnimationFrame(fn) { pendingFrame = fn; }
             function runFrame() { const f = pendingFrame; pendingFrame = null; if (f) f(); }

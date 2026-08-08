@@ -139,6 +139,18 @@ def get_vision_model() -> str:
     return os.getenv("WEB_VISION_MODEL", "").strip()
 
 
+def get_photo_keep_days() -> float:
+    """How long a stored photo stays in the history, in days. 0 keeps forever.
+
+    Photos are the bulk of what history costs — the browser caps a re-encode at
+    roughly 900KB, which is 1.2MB of base64 text in the row — and what is worth
+    having a year later is the reading that came off the picture, not the
+    picture. That reading is already in the reply and, for a routine, in the
+    records. So the pixels expire on a timer and the words never do.
+    """
+    return max(0.0, _number("PHOTO_KEEP_DAYS", 30.0))
+
+
 def get_web_max_docs() -> int:
     """How many fetched pages to put in front of the model at once."""
     return max(1, int(_number("WEB_MAX_DOCS", 3)))

@@ -314,6 +314,83 @@ def add_message(
     return True
 
 
+def save_turn(
+    convo_id: str,
+    user: Dict[str, Any],
+    reply: str,
+    sources: Optional[List[Dict[str, str]]] = None,
+) -> bool:
+    """Write a question and its answer together, or write neither.
+
+    The browser used to save both, after the stream finished. That is fine
+    until the tab is not there when it finishes — a phone that locks past its
+    wake lock, an app switch, a Tailscale handoff from wifi to cellular — and
+    then a reply the server spent two minutes generating exists nowhere at all.
+    This is the server writing down what it produced, so a reload finds it.
+
+    Both halves in one transaction because half a turn is worse than none: a
+    question with no answer reads as an unanswered question rather than as a
+    dropped connection.
+    """
+    if not convo_id or not (reply or "").strip():
+        return False
+    now = time.time()
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT title FROM conversations WHERE id = ?", (convo_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        seq = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM messages"
+            " WHERE conversation_id = ?", (convo_id,),
+        ).fetchone()["next"]
+        content = str(user.get("content") or "")
+        images = user.get("images") or None
+        meta = user.get("image_meta") or None
+        conn.execute(
+            "INSERT INTO messages"
+            " (conversation_id, seq, role, content, images, sources, image_meta, created_at)"
+            " VALUES (?, ?, 'user', ?, ?, NULL, ?, ?)",
+            (convo_id, seq, content,
+             json.dumps(images) if images else None,
+             json.dumps(meta) if meta and any(meta) else None, now),
+        )
+        conn.execute(
+            "INSERT INTO messages"
+            " (conversation_id, seq, role, content, images, sources, image_meta, created_at)"
+            " VALUES (?, ?, 'assistant', ?, NULL, ?, NULL, ?)",
+            (convo_id, seq + 1, reply,
+             json.dumps(sources) if sources else None, now),
+        )
+        if row["title"] in ("", "New chat"):
+            conn.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (_title_from(content), now, convo_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?", (now, convo_id)
+            )
+    return True
+
+
+def is_empty(convo_id: str) -> bool:
+    """Whether a conversation has no messages at all.
+
+    The browser now creates the thread before the reply starts, so that the
+    server has somewhere to write it. A turn that produces nothing therefore
+    leaves an empty thread behind, and this is how the browser knows to take it
+    away again rather than leaving a row named after a question nobody answered.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM messages WHERE conversation_id = ? LIMIT 1", (convo_id,)
+        ).fetchone()
+    return row is None
+
+
 def rename(convo_id: str, title: str) -> bool:
     """Set a conversation's title. Returns False when it doesn't exist."""
     with _connect() as conn:
@@ -766,6 +843,125 @@ def record_columns(records: List[Dict[str, Any]]) -> List[str]:
             if name not in columns:
                 columns.append(name)
     return columns
+
+
+_SEARCH_LIMIT = 60
+_SNIPPET_PAD = 60
+
+
+def _snippet(text: str, needle: str) -> str:
+    """The part of a message the match is in, with a little either side."""
+    at = text.lower().find(needle.lower())
+    if at < 0:
+        return text[:2 * _SNIPPET_PAD].strip()
+    start = max(0, at - _SNIPPET_PAD)
+    end = min(len(text), at + len(needle) + _SNIPPET_PAD)
+    return ("…" if start else "") + text[start:end].strip() + ("…" if end < len(text) else "")
+
+
+def search(query: str, limit: int = _SEARCH_LIMIT) -> Dict[str, List[Dict[str, Any]]]:
+    """Find a phrase in the conversations and in the records.
+
+    LIKE rather than FTS5: this database holds one household's chat history —
+    thousands of rows, not millions — where a scan costs single-digit
+    milliseconds and needs no second copy of every message kept in step by
+    triggers. The failure mode of a stale index is a search that quietly misses
+    what you are looking for, which is the one thing a search must not do.
+    """
+    needle = (query or "").strip()
+    if len(needle) < 2:
+        return {"conversations": [], "records": []}
+    like = "%" + needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    limit = max(1, min(int(limit or _SEARCH_LIMIT), 200))
+    with _connect() as conn:
+        # One row per conversation, carrying the newest message that matched —
+        # a thread where a word appears nine times is one result, not nine.
+        rows = conn.execute(
+            "SELECT c.id, c.title, c.updated_at,"
+            "       (SELECT m.content FROM messages m"
+            "         WHERE m.conversation_id = c.id AND m.content LIKE ? ESCAPE '\\'"
+            "         ORDER BY m.seq DESC LIMIT 1) AS hit"
+            "  FROM conversations c"
+            " WHERE c.title LIKE ? ESCAPE '\\'"
+            "    OR EXISTS (SELECT 1 FROM messages m"
+            "                WHERE m.conversation_id = c.id"
+            "                  AND m.content LIKE ? ESCAPE '\\')"
+            " ORDER BY c.updated_at DESC LIMIT ?",
+            (like, like, like, limit),
+        ).fetchall()
+        found = [
+            {"id": r["id"], "title": r["title"], "updated_at": r["updated_at"],
+             "snippet": _snippet(r["hit"], needle) if r["hit"] else ""}
+            for r in rows
+        ]
+        # Records are searched on their values, which is where "Uber" or a
+        # date actually lives; the routine name is searched too.
+        kept = [
+            _record_row(r) for r in conn.execute(
+                "SELECT * FROM records"
+                " WHERE routine_name LIKE ? ESCAPE '\\' OR fields LIKE ? ESCAPE '\\'"
+                " ORDER BY created_at DESC LIMIT ?", (like, like, limit)).fetchall()
+        ]
+    return {"conversations": found, "records": kept}
+
+
+# Photos are the bulk of what history costs: the browser caps a re-encode at
+# about 900KB, which is 1.2MB of base64 in the row, and a two-photo routine run
+# every day is most of a gigabyte a year. What is worth keeping a year later is
+# almost never the picture of the odometer — it is the number that was read off
+# it, which is already in the text and in the records. So the pixels expire and
+# the words do not.
+_SWEEP_EVERY = 3600.0
+_last_sweep = 0.0
+
+
+def forget_images(older_than_days: float) -> Dict[str, int]:
+    """Drop stored photos older than the cutoff, keeping every word.
+
+    Returns what it did. ``older_than_days`` of 0 or less keeps them forever.
+    """
+    days = float(older_than_days or 0)
+    if days <= 0:
+        return {"messages": 0, "bytes": 0}
+    cutoff = time.time() - days * 86400.0
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(images)), 0) AS b"
+            "  FROM messages WHERE images IS NOT NULL AND created_at < ?", (cutoff,)
+        ).fetchone()
+        if not row["n"]:
+            return {"messages": 0, "bytes": 0}
+        conn.execute(
+            "UPDATE messages SET images = NULL"
+            " WHERE images IS NOT NULL AND created_at < ?", (cutoff,)
+        )
+        done = {"messages": row["n"], "bytes": row["b"]}
+    logger.info("Forgot %d stored photo(s), %d KB of text", done["messages"],
+                done["bytes"] // 1024)
+    # The rows are now dead space; hand it back if there is enough to bother.
+    compact()
+    return done
+
+
+def maybe_forget_images(older_than_days: float) -> Dict[str, int]:
+    """forget_images, at most once an hour.
+
+    Hung off ordinary traffic rather than a timer thread: this app is one
+    process serving one household, and a background thread that has to be
+    started, stopped and kept out of the tests earns its keep only if the work
+    cannot wait for the next request. This can.
+    """
+    global _last_sweep
+    now = time.time()
+    if now - _last_sweep < _SWEEP_EVERY:
+        return {"messages": 0, "bytes": 0}
+    _last_sweep = now
+    try:
+        return forget_images(older_than_days)
+    except sqlite3.Error as exc:      # a sweep must never cost a request
+        logger.warning("Could not sweep old photos: %s", exc)
+        return {"messages": 0, "bytes": 0}
 
 
 def stats() -> Dict[str, int]:

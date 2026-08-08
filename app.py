@@ -21,12 +21,14 @@ import csv
 import io
 import json
 import os
+import queue
 import socket
 import sqlite3
+import threading
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -48,6 +50,7 @@ from config import (
     get_max_body_bytes,
     get_num_ctx,
     get_ollama_base,
+    get_photo_keep_days,
     get_photo_meta_default,
     get_planner_model,
     get_share_photo_location,
@@ -128,6 +131,40 @@ if AUTH_ENABLED:
 def index() -> Any:
     """Serve the chat page."""
     return render_page(get_app_title())
+
+
+@app.route("/manifest.webmanifest", methods=["GET"])
+def manifest() -> Any:
+    """Make a home-screen shortcut open as an app rather than a browser tab.
+
+    Worth about 100px of a 844px phone — the address bar and the tab strip —
+    on the device this is mostly used from, and it gives the shortcut a name
+    and an icon instead of a screenshot of the page.
+    """
+    title = get_app_title()
+    resp = jsonify({
+        "name": title,
+        "short_name": title[:12],
+        "start_url": ".",
+        "scope": ".",
+        "display": "standalone",
+        "orientation": "any",
+        "background_color": "#0a0e17",
+        "theme_color": "#0a0e17",
+        "icons": [{"src": _ICON, "sizes": "any", "type": "image/svg+xml",
+                   "purpose": "any maskable"}],
+    })
+    resp.headers["Content-Type"] = "application/manifest+json"
+    return resp
+
+
+# The same mark the page uses for its favicon, as a data URL so there is no
+# second file to serve and no request to 404 behind the server manager.
+_ICON = (
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'"
+    "%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M8 11h16M8 "
+    "16h16M8 21h10' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E"
+)
 
 
 @app.route("/healthz", methods=["GET"], strict_slashes=False)
@@ -266,13 +303,40 @@ def _store_unavailable(exc: sqlite3.Error) -> Any:
 @app.route("/api/conversations/stats", methods=["GET"])
 def api_conversation_stats() -> Any:
     """What history is costing on disk, for the drawer to show."""
-    return jsonify(store.stats())
+    out = store.stats()
+    out["photo_keep_days"] = get_photo_keep_days()
+    return jsonify(out)
 
 
 @app.route("/api/conversations", methods=["GET"])
 def api_conversations() -> Any:
     """Every stored conversation, most recently updated first."""
+    # Hung off the one request every client makes on every visit, and rate
+    # limited to once an hour inside the store. A timer thread would have to be
+    # started, stopped and kept out of the tests to do work that can wait.
+    store.maybe_forget_images(get_photo_keep_days())
     return jsonify({"conversations": store.list_conversations()})
+
+
+@app.route("/api/search", methods=["GET"])
+def api_search() -> Any:
+    """Find a phrase across the saved conversations and the kept records."""
+    return jsonify(store.search(request.args.get("q", "")))
+
+
+@app.route("/api/photos/forget", methods=["POST"])
+def api_forget_photos() -> Any:
+    """Apply the photo retention now, rather than waiting for the sweep."""
+    days = request.get_json(silent=True) or {}
+    if not isinstance(days, dict):
+        days = {}
+    # The body may name its own cutoff, so "free up space now" can offer a
+    # shorter one than the standing policy without changing the policy.
+    try:
+        cutoff = float(days.get("days", get_photo_keep_days()))
+    except (TypeError, ValueError):
+        cutoff = get_photo_keep_days()
+    return jsonify(store.forget_images(max(0.0, cutoff)))
 
 
 @app.route("/api/conversations", methods=["POST"])
@@ -571,13 +635,25 @@ def api_chat() -> Any:
         return jsonify({"model": model, "reply": reply})
 
     use_web = bool(body.get("web")) and web_enabled()
+    # Which stored thread this turn belongs to, if any. The browser used to
+    # write the reply down itself once the stream finished, which is fine right
+    # up until the tab is not there when it finishes: a phone that locks past
+    # its wake lock, an app switch, a handoff from wifi to cellular. Two
+    # minutes of a 30b model's work then existed nowhere at all. Given the id,
+    # this end writes the turn down as soon as it has one — including when the
+    # client is the thing that went away.
+    convo_id = body.get("conversation_id")
+    convo_id = convo_id if isinstance(convo_id, str) and convo_id else None
+    last_user = messages[-1] if isinstance(messages[-1], dict) else {}
+    answer: List[str] = []
+    kept_sources: List[Dict[str, str]] = []
 
     # Streaming path — pass Ollama's NDJSON lines straight through, preceded by
     # any web-grounding progress. Any failure (including one raised mid-stream
     # while iterating) is turned into a final JSON error line rather than a bare
     # HTTP 500, so the UI can show why.
-    @stream_with_context
-    def generate() -> Any:
+    def run_turn() -> Iterator[str]:
+        """The whole turn, as NDJSON lines. Any failure becomes a final line."""
         try:
             # Always send num_ctx, not only on web turns: changing a model's
             # load options mid-conversation makes Ollama reload the runner and
@@ -671,18 +747,125 @@ def api_chat() -> Any:
                         web.build_context(documents,
                                           char_budget=web.context_budget(get_num_ctx())),
                     )
-                    yield _line(
-                        {"sources": [{"url": d["url"], "title": d["title"]} for d in documents]}
-                    )
+                    kept_sources.extend(
+                        {"url": d["url"], "title": d["title"]} for d in documents)
+                    yield _line({"sources": list(kept_sources)})
             for line in chat_stream(model, convo, options=options,
                                     keep_alive=get_keep_alive() or None):
+                answer.append(_content_of(line))
                 yield line + "\n"
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
             message = str(exc) or exc.__class__.__name__
             yield json.dumps({"error": message}) + "\n"
 
-    return Response(generate(), mimetype="application/x-ndjson")
+    if not convo_id:
+        # Nothing to write down, so nothing to protect: stream straight through
+        # and let a departed client stop the work, as it always has. This is
+        # the path an API client and a history-less browser take.
+        return Response(stream_with_context(run_turn()),
+                        mimetype="application/x-ndjson")
+
+    # With somewhere to save it, the work outlives the connection. A WSGI
+    # response is pulled by the client: when the phone locks or the app is
+    # switched away, the server stops being asked for the next chunk and so
+    # stops generating — which is why a saved turn on its own only kept the
+    # first sentence. Producing on a thread and relaying through a queue means
+    # the model finishes its answer whether or not anyone is still listening.
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+    cancel = _start_turn(convo_id)
+
+    def produce() -> None:
+        try:
+            for line in run_turn():
+                if cancel.is_set():
+                    break     # closes chat_stream, which lets Ollama go
+                lines.put(line)
+        finally:
+            _end_turn(convo_id, cancel)
+            # Written before the sentinel, not after: the browser refreshes its
+            # list the moment the stream ends, and putting the save afterwards
+            # made that a race the list usually lost — a finished thread with
+            # no title until something else happened to refresh it.
+            # Saved even when cancelled: Stop usually means "I have read
+            # enough", and the half you read is worth keeping.
+            _keep_turn(convo_id, last_user, "".join(answer), kept_sources)
+            lines.put(None)
+
+    threading.Thread(target=produce, name="chat-turn", daemon=True).start()
+
+    def relay() -> Iterator[str]:
+        while True:
+            line = lines.get()
+            if line is None:
+                return
+            yield line
+
+    return Response(stream_with_context(relay()), mimetype="application/x-ndjson")
+
+
+# One in-flight turn per conversation, so Stop only needs to name the thread.
+# Without this the detached producer would keep a 30b model busy for a minute
+# after the button that exists to stop it was pressed.
+_TURNS: Dict[str, threading.Event] = {}
+_TURNS_LOCK = threading.Lock()
+
+
+def _start_turn(convo_id: str) -> threading.Event:
+    flag = threading.Event()
+    with _TURNS_LOCK:
+        earlier = _TURNS.get(convo_id)
+        if earlier is not None:
+            earlier.set()      # a second turn in one thread supersedes the first
+        _TURNS[convo_id] = flag
+    return flag
+
+
+def _end_turn(convo_id: str, flag: threading.Event) -> None:
+    with _TURNS_LOCK:
+        if _TURNS.get(convo_id) is flag:
+            _TURNS.pop(convo_id, None)
+
+
+@app.route("/api/chat/cancel", methods=["POST"])
+def api_chat_cancel() -> Any:
+    """Stop the turn running for a conversation, if there is one."""
+    body = request.get_json(silent=True)
+    convo_id = body.get("conversation_id") if isinstance(body, dict) else None
+    with _TURNS_LOCK:
+        flag = _TURNS.get(convo_id) if isinstance(convo_id, str) else None
+    if flag is not None:
+        flag.set()
+    return jsonify({"cancelled": flag is not None})
+
+
+def _content_of(line: str) -> str:
+    """The reply text in one of Ollama's NDJSON lines, if it carries any."""
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return ""
+    message = obj.get("message") if isinstance(obj, dict) else None
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("content") or "")
+
+
+def _keep_turn(convo_id: Optional[str], user: Dict[str, Any], reply: str,
+               sources: List[Dict[str, str]]) -> None:
+    """Write the question and its answer down. Never raises into the stream."""
+    if not convo_id:
+        return
+    # The stored reply is the answer, not the model talking to itself: a
+    # reasoning block is scratch work, and a thread reopened tomorrow should
+    # read the way it read today.
+    text = web.strip_thinking(reply).strip()
+    if not text:
+        return
+    try:
+        store.save_turn(convo_id, user, text, sources or None)
+    except Exception:  # noqa: BLE001 - history is the extra, never the turn
+        logger.exception("Could not save the turn to %s", convo_id)
 
 
 def _line(obj: Dict[str, Any]) -> str:
