@@ -180,6 +180,19 @@ _PAGE = """<!doctype html>
       .convo-act:hover { color:var(--text); }
       .convo-empty { color:var(--muted); font-size:0.8rem; margin:0.4rem 0.2rem; }
 
+      /* A comparison table is wider than a phone more often than not, so it
+         scrolls inside its own box. Letting it widen the bubble instead would
+         put the whole conversation on a horizontal scrollbar. */
+      .tablewrap { overflow-x:auto; margin:0.6rem 0; }
+      .bubble.md table { border-collapse:collapse; font-size:0.85rem; min-width:100%; }
+      .bubble.md th, .bubble.md td {
+        border:1px solid var(--border); padding:0.3rem 0.55rem;
+        text-align:left; vertical-align:top;
+      }
+      .bubble.md th { background:var(--panel2); font-weight:600; white-space:nowrap; }
+      .bubble.md tbody tr:nth-child(even) td { background:rgba(255,255,255,0.02); }
+      .bubble.md hr { border:0; border-top:1px solid var(--border); margin:0.9rem 0; }
+
       /* One row that scrolls sideways rather than four rows that eat a phone
          screen — the strip has to stay a single line at ten routines. */
       .chips { display:flex; gap:0.35rem; flex:1 1 auto; min-width:0;
@@ -500,6 +513,80 @@ _PAGE = """<!doctype html>
       const MD_SENTINEL = String.fromCharCode(1);
       const MD_SLOT = new RegExp(MD_SENTINEL + "(\\\\d+)" + MD_SENTINEL, "g");
 
+      // ---- Maths written as TeX ----
+      // Models reach for LaTeX the moment an answer contains arithmetic, and
+      // this page has no maths renderer: no build step and nothing from a CDN,
+      // so KaTeX is not on the table for a handful of subtractions. Unwrapping
+      // it into plain text gives what a person reads anyway — "68 / 3.13 ≈ 21.7"
+      // beats a raw \\frac on a phone, and beats it by a mile unrendered.
+      const TEX_SYMBOLS = [
+        [/\\\\approx/g, "≈"], [/\\\\times/g, "×"], [/\\\\cdot/g, "·"],
+        [/\\\\div/g, "÷"], [/\\\\pm/g, "±"], [/\\\\mp/g, "∓"],
+        [/\\\\leq?\\b/g, "≤"], [/\\\\geq?\\b/g, "≥"], [/\\\\neq/g, "≠"],
+        [/\\\\rightarrow/g, "→"], [/\\\\to\\b/g, "→"], [/\\\\infty/g, "∞"],
+        [/\\\\degree|\\\\deg\\b/g, "°"],
+      ];
+
+      function texToText(body) {
+        let out = body;
+        // \\text{…} and its relatives are pure wrapping; \\frac wants to become a
+        // division that reads left to right. Repeated because these nest.
+        for (let pass = 0; pass < 4; pass++) {
+          out = out.replace(/\\\\(?:text|mathrm|mathbf|mathit|operatorname)\\s*\\{([^{}]*)\\}/g, "$1");
+          out = out.replace(/\\\\(?:d|t)?frac\\s*\\{([^{}]*)\\}\\s*\\{([^{}]*)\\}/g, "($1) / ($2)");
+          out = out.replace(/\\\\sqrt\\s*\\{([^{}]*)\\}/g, "√($1)");
+        }
+        for (const pair of TEX_SYMBOLS) out = out.replace(pair[0], pair[1]);
+        out = out.replace(/\\\\left|\\\\right/g, "")
+                 .replace(/\\\\[,;:!]/g, " ")
+                 .replace(/\\\\\\\\/g, " ")
+                 .replace(/\\\\([%$&#_{}])/g, "$1")
+                 // Brackets the fraction rule added, dropped again where neither
+                 // side needs them: "(68) / (3.13)" is worse than "68 / 3.13".
+                 .replace(/\\(([^()\\s]+)\\) \\/ \\(([^()\\s]+)\\)/g, "$1 / $2");
+        return out.replace(/\\s+/g, " ").trim();
+      }
+
+      function unTex(t) {
+        return t.replace(
+          /\\$\\$([\\s\\S]+?)\\$\\$|\\$([^$\\n]+?)\\$|\\\\\\(([\\s\\S]+?)\\\\\\)|\\\\\\[([\\s\\S]+?)\\\\\\]/g,
+          function (whole, a, b, c, d) {
+            const dollars = a !== undefined ? a : b;
+            if (dollars !== undefined) {
+              // A dollar pair is only maths if there is a TeX command between
+              // them. "It cost $100,407 and then $5 more" is two prices in most
+              // replies and a formula in none — and it read as one, losing both
+              // signs and the space between them.
+              if (dollars.indexOf("\\\\") < 0) return whole;
+              return texToText(dollars);
+            }
+            // \\( \\) and \\[ \\] say what they are; nothing else uses them.
+            return texToText(c !== undefined ? c : d);
+          });
+      }
+
+      // ---- Tables ----
+      // A model asked to compare two things reaches for a pipe table almost
+      // every time, and without this the whole grid came out as one paragraph
+      // of pipes and dashes joined by <br> — which is how the odometer answer
+      // arrived: correct numbers, unreadable layout.
+      const TABLE_DIVIDER_RE = /^\\s*\\|?(?:\\s*:?-{1,}:?\\s*\\|)+\\s*:?-{1,}:?\\s*\\|?\\s*$/;
+
+      function tableCells(line) {
+        let row = line.trim();
+        // The outer pipes are optional in the format models actually emit.
+        if (row.slice(0, 1) === "|") row = row.slice(1);
+        if (row.slice(-1) === "|") row = row.slice(0, -1);
+        return row.split("|").map(function (c) { return c.trim(); });
+      }
+
+      function alignOf(spec) {
+        const left = spec.slice(0, 1) === ":", right = spec.slice(-1) === ":";
+        if (left && right) return " style=\\"text-align:center\\"";
+        if (right) return " style=\\"text-align:right\\"";
+        return "";
+      }
+
       function inlineMd(t) {
         // Lift code spans out before anything else runs. Applying the emphasis
         // and link rules to inlineMd's own output means markdown *inside* a code
@@ -510,6 +597,7 @@ _PAGE = """<!doctype html>
           spans.push(code);
           return MD_SENTINEL + (spans.length - 1) + MD_SENTINEL;
         });
+        out = unTex(out);
         // Emphasis needs a non-space character inside both delimiters, as
         // CommonMark requires. Without that, prose like "SELECT * FROM a …
         // SELECT * FROM b" turns everything between two unrelated asterisks
@@ -565,7 +653,8 @@ _PAGE = """<!doctype html>
                    body + "</code></pre></div>");
         }
 
-        for (const line of lines) {
+        for (let ln = 0; ln < lines.length; ln++) {
+          const line = lines[ln];
           // A fence is only a fence at the start of a line — an inline triple
           // backtick mid-sentence used to swallow the rest of the reply.
           const fenceMatch = line.match(/^\\s*```(.*)$/);
@@ -598,6 +687,49 @@ _PAGE = """<!doctype html>
           }
 
           if (!line.trim()) { flushAll(); continue; }
+
+          // A thematic break: three or more of the same mark on a line of its
+          // own. It arrived as a literal "***" paragraph between two sections.
+          if (/^ {0,3}([-*_])(?:\\s*\\1){2,}\\s*$/.test(line)) {
+            flushAll();
+            out.push("<hr>");
+            continue;
+          }
+
+          // A pipe table, but only when the next line is the divider — that is
+          // what tells a real table from prose that happens to contain a pipe.
+          if (line.indexOf("|") >= 0 && ln + 1 < lines.length &&
+              TABLE_DIVIDER_RE.test(lines[ln + 1])) {
+            const head = tableCells(line);
+            const align = tableCells(lines[ln + 1]).map(alignOf);
+            const rows = [];
+            let at = ln + 2;
+            while (at < lines.length && lines[at].trim() && lines[at].indexOf("|") >= 0) {
+              rows.push(tableCells(lines[at]));
+              at += 1;
+            }
+            // Only if the divider agrees with the header about the column
+            // count; otherwise this is prose and belongs in a paragraph.
+            if (align.length === head.length) {
+              flushAll();
+              const cell = function (tag, text, i) {
+                return "<" + tag + (align[i] || "") + ">" + inlineMd(text) + "</" + tag + ">";
+              };
+              out.push('<div class="tablewrap"><table><thead><tr>' +
+                head.map(function (h, i) { return cell("th", h, i); }).join("") +
+                "</tr></thead><tbody>" +
+                rows.map(function (r) {
+                  // Pad or trim to the header, so one short row cannot shear
+                  // the rest of the grid sideways.
+                  const cells = [];
+                  for (let i = 0; i < head.length; i++) cells.push(cell("td", r[i] || "", i));
+                  return "<tr>" + cells.join("") + "</tr>";
+                }).join("") +
+                "</tbody></table></div>");
+              ln = at - 1;
+              continue;
+            }
+          }
 
           const heading = line.match(/^ {0,3}(#{1,6})\\s+(.*)$/);
           if (heading) {

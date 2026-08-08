@@ -37,8 +37,11 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
-- ✍️ **Formatted replies** — markdown is rendered, with labelled code blocks and
-  a copy button. Matters most with the coder models.
+- ✍️ **Formatted replies** — markdown is rendered: labelled code blocks with a
+  copy button, lists, quotes, headings, and tables (which scroll sideways on a
+  phone rather than stretching the page). Formulas written in LaTeX are unwrapped
+  into plain text — there's no maths renderer here, and `68 / 3.13 ≈ 21.7` beats
+  a raw `\frac` either way.
 - 📍 **Photo details (optional)** — a photo remembers when and where it was
   taken; the picture itself doesn't show it and re-encoding on upload throws it
   away. Turn **📍 Photo details** on and the date, time of day, camera and
