@@ -378,7 +378,16 @@ def api_routine_create() -> Any:
 
 @app.route("/api/routines/starters", methods=["POST"])
 def api_routine_starters() -> Any:
-    """Install the shipped routines, skipping any name already taken."""
+    """Install the shipped routines, skipping any name already taken.
+
+    The JSON requirement is the point of the check, not a formality: it is the
+    only routines route that reads no body, so without it a plain HTML form on
+    any page could POST here cross-origin — a form post is a "simple" request
+    and is never preflighted. Every other route here is already unreachable
+    that way, by needing JSON or a method a form cannot send.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Expected a JSON request"}), 415
     return jsonify({"routines": store.create_starters()})
 
 

@@ -147,6 +147,22 @@ class TestTheStarters:
         assert len(store.list_routines()) == 4
         assert store.available() is True, "the race must not leave a transaction open"
 
+
+    def test_two_routines_saved_at_once_keep_distinct_positions(self):
+        """Otherwise their order on the strip falls to the created_at tiebreak."""
+        import threading
+        store.create("warm the schema")
+        threads = [threading.Thread(target=store.create_routine, args=(f"r{i}", "b"))
+                   for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        positions = [r["position"] for r in store.list_routines()]
+        assert len(positions) == 12
+        assert len(set(positions)) == 12, positions
+        assert store.available() is True
+
     def test_they_survive_a_rename_of_one(self):
         store.create_starters()
         store.update_routine(store.list_routines()[0]["id"], {"name": "mine"})
@@ -313,9 +329,22 @@ class TestTheRoutes:
         assert client.delete(f"/api/routines/{made['id']}").status_code == 404
 
     def test_the_starters_route_is_idempotent(self, client):
-        assert len(client.post("/api/routines/starters").get_json()["routines"]) == 4
-        assert client.post("/api/routines/starters").get_json()["routines"] == []
+        assert len(client.post("/api/routines/starters", json={}).get_json()["routines"]) == 4
+        assert client.post("/api/routines/starters", json={}).get_json()["routines"] == []
         assert len(client.get("/api/routines").get_json()["routines"]) == 4
+
+    def test_the_starters_route_cannot_be_posted_by_a_plain_form(self, client):
+        """It is the only routines route with no body to require.
+
+        A form post is a "simple" request and is never preflighted, so without
+        this a page on any other site could POST here from the owner's browser.
+        Every other route already needs JSON or a method a form cannot send.
+        """
+        assert client.post("/api/routines/starters", data={"x": "y"}).status_code == 415
+        assert client.post("/api/routines/starters",
+                           data="x=y",
+                           content_type="text/plain").status_code == 415
+        assert client.get("/api/routines").get_json()["routines"] == []
 
     def test_a_broken_database_is_a_503_with_json(self, client, tmp_path, monkeypatch):
         """Not Flask's HTML error page, which the UI would parse as nothing."""
@@ -419,3 +448,62 @@ class TestThePage:
         """Turning it off after attaching has to mean the details do not go."""
         page = self.page()
         assert "if (exifOn && meta.some(Boolean))" in page
+
+    def test_a_rolled_back_turn_does_not_spend_the_routine(self):
+        """Stop hands the message back, so the routine has to still be armed.
+
+        Reporting "the turn went, however it ended" also had clearRoutine strip
+        the restored prompt straight back out of the composer, because it was
+        still a verbatim prefix — Stop deleted 1500 characters without trace.
+        """
+        page = self.page()
+        assert "let went = true" in page
+        assert page.count("went = false;") == 3, \
+            "empty reply, stopped-with-nothing, and errored-with-nothing"
+        assert "return went;" in page
+
+    def test_dictation_goes_through_the_guard_on_both_paths(self):
+        """A dictated turn is still a send, and still owes a routine its photos."""
+        page = self.page()
+        assert "if (autoSendEl.checked && !busy) { trySend(); return; }" in page
+        assert "setTimeout(trySend, 0)" in page
+        assert "{ send(); return; }" not in page
+
+    def test_the_queued_dictation_does_not_return_out_of_finally(self):
+        """A return inside finally replaces the value the function was giving back.
+
+        It reported every queued dictation as a turn that never went, so the
+        routine stayed armed with its own message already sent.
+        """
+        page = self.page()
+        at = page.index("if (pendingAutoSend) {")
+        assert "return;" not in page[at:page.index("return went;", at)], \
+            "nothing may return out of send()'s finally"
+
+    def test_the_armed_chip_is_drawn_from_what_the_guard_uses(self):
+        """Editing a routine while armed had the chip and Send disagree."""
+        page = self.page()
+        assert "saved.id === armed ? pendingRoutine.routine : saved" in page
+
+    def test_the_prompt_box_stops_where_the_store_does(self):
+        page = self.page()
+        assert 'id="rBody" rows="8" spellcheck="false" maxlength="4000"' in page
+        assert "the prompt was trimmed to" in page, "and says so if it still trimmed"
+
+    def test_saving_is_single_flight(self):
+        """editingRoutineId is not set until after the await, so two taps create two."""
+        page = self.page()
+        assert "if (savingRoutine) return;" in page
+        assert "rSaveBtn.disabled = true;" in page
+
+    def test_deleting_only_disarms_once_it_is_gone(self):
+        page = self.page()
+        at = page.index("async function deleteRoutine")
+        body = page[at:page.index("async function addStarters", at)]
+        assert body.index("resp.ok") < body.index("clearRoutine()"), \
+            "a failed delete must not revert the toggles of a routine that still exists"
+
+    def test_the_count_hint_only_clears_its_own_message(self):
+        """hintEl is shared; blanking it wiped the history-unavailable warning."""
+        page = self.page()
+        assert 'hintEl.textContent.indexOf(" attached.") > 0' in page

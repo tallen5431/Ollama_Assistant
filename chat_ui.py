@@ -267,7 +267,10 @@ _PAGE = """<!doctype html>
           <label for="rName">Name</label>
           <input id="rName" maxlength="40" placeholder="🚗 Trip">
           <label for="rBody">Prompt</label>
-          <textarea id="rBody" rows="8" spellcheck="false"></textarea>
+          <!-- maxlength to match the store's cap: the operative sentence in a
+               prompt is usually the last one, and cutting it server-side in
+               silence changes what the routine does on every later use. -->
+          <textarea id="rBody" rows="8" spellcheck="false" maxlength="4000"></textarea>
           <label for="rPhotos">Photos to attach</label>
           <select id="rPhotos">
             <option value="0">No photos</option>
@@ -416,6 +419,7 @@ _PAGE = """<!doctype html>
       const rPhotosEl = document.getElementById("rPhotos");
       const rWebEl   = document.getElementById("rWeb");
       const rMetaEl  = document.getElementById("rMeta");
+      const rSaveBtn  = document.getElementById("rSave");
       const rDeleteBtn = document.getElementById("rDelete");
 
       let messages = [];       // conversation sent to /api/chat for context
@@ -1438,9 +1442,14 @@ _PAGE = """<!doctype html>
       async function send() {
         const text = inputEl.value.trim();
         const images = pendingImages.slice();
-        // Reports whether the turn went. A caller that armed something for
-        // this turn — the routine guard — must not spend it on a refusal.
+        // Reports whether the turn committed — not merely that it started. A
+        // caller that armed something for this turn (the routine guard) must
+        // not spend it on a refusal, and must not spend it on a turn that was
+        // rolled back either: the message comes back to the composer, so the
+        // routine has to still be holding its toggles and its photo count for
+        // the retry the app has just invited.
         if ((!text && !images.length) || busy) return false;
+        let went = true, queued = false;
         busy = true; sendBtn.disabled = true; stopBtn.hidden = false;
         pendingImages = []; renderThumbs();
         const userView = addUser(text, images);
@@ -1620,6 +1629,7 @@ _PAGE = """<!doctype html>
             // screen and made the next send post two user turns; roll the whole
             // turn back and hand the message back so it can be retried.
             view.root.remove();
+            went = false;
             const returned = rollBackTurn();
             markError("The model returned an empty reply." +
                       (returned ? " Your message is back in the box." : ""));
@@ -1639,6 +1649,7 @@ _PAGE = """<!doctype html>
               // written, so the two devices diverged and the next send posted
               // two user roles.
               view.root.remove();
+              went = false;
               // Only claim the message came back if it did: with the composer
               // already holding something else it is not restored, and saying
               // otherwise sent people looking for a photo that had been dropped.
@@ -1660,6 +1671,7 @@ _PAGE = """<!doctype html>
               commitTurn(partial, lastSources);
             } else {
               view.root.remove();
+              went = false;
               rollBackTurn();
               markError(err.message || String(err));
             }
@@ -1674,13 +1686,17 @@ _PAGE = """<!doctype html>
             pendingAutoSend = false;
             // trySend, not send: a dictated follow-up while a routine is
             // armed still owes it its photos.
-            if (inputEl.value.trim()) { setTimeout(trySend, 0); return; }
+            //
+            // Not `return` — a return inside finally replaces the value the
+            // function was about to give back, so this reported every queued
+            // dictation as a turn that never went and the routine stayed armed
+            // with its own message already sent.
+            if (inputEl.value.trim()) queued = true;
           }
-          inputEl.focus();
+          if (queued) setTimeout(trySend, 0);
+          else inputEl.focus();
         }
-        // The turn went — however it ended. A stream the user stopped still
-        // sent the message, so a routine armed for it is spent either way.
-        return true;
+        return went;
       }
 
       function stop() { if (controller) controller.abort(); }
@@ -1927,7 +1943,12 @@ _PAGE = """<!doctype html>
           return;
         }
         const armed = pendingRoutine && pendingRoutine.routine.id;
-        for (const routine of routines) {
+        for (const saved of routines) {
+          // The armed chip is drawn from the object the guard is actually
+          // using, not from the refreshed list. Editing a routine while it is
+          // armed otherwise had the chip reading "1/3" off the new record
+          // while Send let it through on the old count of 1.
+          const routine = saved.id === armed ? pendingRoutine.routine : saved;
           const chip = document.createElement("button");
           chip.type = "button";
           chip.className = "chip" + (routine.id === armed ? " active" : "");
@@ -2028,7 +2049,10 @@ _PAGE = """<!doctype html>
           hintEl.textContent = routine.name + " needs " + routine.photos +
             (routine.photos === 1 ? " photo — " : " photos — ") +
             pendingImages.length + " attached.";
-        } else if (routine.photos) {
+        } else if (routine.photos && hintEl.textContent.indexOf(" attached.") > 0) {
+          // Only our own message. hintEl is shared, and blanking it outright
+          // wiped the latched "history is not being saved" warning the moment
+          // the second photo landed.
           hintEl.textContent = "";
         }
       }
@@ -2126,7 +2150,11 @@ _PAGE = """<!doctype html>
           : "";
       }
 
+      let savingRoutine = false;
       async function saveRoutine() {
+        // editingRoutineId is not set until after the await, so two taps on a
+        // slow link both took the create branch and made two of the routine.
+        if (savingRoutine) return;
         const name = rNameEl.value.trim();
         const body = rBodyEl.value.trim();
         if (!name || !body) {
@@ -2137,6 +2165,8 @@ _PAGE = """<!doctype html>
         const payload = { name: name, body: body,
                           photos: Number(rPhotosEl.value) || 0,
                           web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value) };
+        savingRoutine = true;
+        rSaveBtn.disabled = true;
         try {
           const resp = await fetch(
             editingRoutineId ? "api/routines/" + editingRoutineId : "api/routines",
@@ -2148,9 +2178,23 @@ _PAGE = """<!doctype html>
             routineWarnEl.textContent = data.error || "Could not save that.";
             return;
           }
+          // What came back is what will be used. The store truncates, and a
+          // routine that quietly does something other than what is written in
+          // the box is worse than one that refuses to save.
+          const saved = await resp.json().catch(() => ({}));
+          const kept = saved.routine || saved;
+          if (kept && typeof kept.body === "string" && kept.body.length < body.length) {
+            rBodyEl.value = kept.body;
+            routineWarnEl.textContent = "Saved, but the prompt was trimmed to " +
+              kept.body.length + " characters.";
+            return;
+          }
         } catch (e) {
           routineWarnEl.textContent = "Could not reach the server.";
           return;
+        } finally {
+          savingRoutine = false;
+          rSaveBtn.disabled = false;
         }
         closeRoutineEditor();
         await refreshRoutines();
@@ -2163,10 +2207,19 @@ _PAGE = """<!doctype html>
         const id = editingRoutineId;
         // Armed and then deleted from under itself: put the toggles back before
         // the chip it belongs to stops existing.
-        if (pendingRoutine && pendingRoutine.routine.id === id) clearRoutine();
         try {
-          await fetch("api/routines/" + id, { method: "DELETE" });
-        } catch (e) { return; }
+          const resp = await fetch("api/routines/" + id, { method: "DELETE" });
+          if (!resp.ok) {
+            routineWarnEl.textContent = "Could not delete that.";
+            return;
+          }
+        } catch (e) {
+          routineWarnEl.textContent = "Could not reach the server.";
+          return;
+        }
+        // Only once it is actually gone. Disarming first left a failed delete
+        // with the routine alive, its toggles reverted and the editor stuck.
+        if (pendingRoutine && pendingRoutine.routine.id === id) clearRoutine();
         closeRoutineEditor();
         await refreshRoutines();
         renderRoutineList();
@@ -2174,7 +2227,9 @@ _PAGE = """<!doctype html>
 
       async function addStarters() {
         try {
-          await fetch("api/routines/starters", { method: "POST" });
+          await fetch("api/routines/starters", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: "{}" });
         } catch (e) { return; }
         await refreshRoutines();
         renderRoutineList();
@@ -2370,7 +2425,9 @@ _PAGE = """<!doctype html>
           // Auto-send skips the Send button so speaking alone drives the chat.
           // While a reply is still streaming, hold the text in the box instead of
           // dropping it — send() would refuse it and the words would be lost.
-          if (autoSendEl.checked && !busy) { send(); return; }
+          // trySend, not send: dictation is still a send, and a routine armed
+          // for this turn is still owed its photos.
+          if (autoSendEl.checked && !busy) { trySend(); return; }
           if (autoSendEl.checked && busy) {
             // Re-checked in send()'s finally, so the utterance is not stranded.
             pendingAutoSend = true;
@@ -2487,7 +2544,7 @@ _PAGE = """<!doctype html>
       tabChatsEl.addEventListener("click", () => showPane("chats"));
       tabRoutinesEl.addEventListener("click", () => showPane("routines"));
       routineNewBtn.addEventListener("click", () => openRoutineEditor(null));
-      document.getElementById("rSave").addEventListener("click", saveRoutine);
+      rSaveBtn.addEventListener("click", saveRoutine);
       document.getElementById("rCancel").addEventListener("click", closeRoutineEditor);
       rDeleteBtn.addEventListener("click", deleteRoutine);
       rPhotosEl.addEventListener("change", routineWarnUpdate);

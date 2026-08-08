@@ -1435,7 +1435,17 @@ def metadata_note(
     leave the house.
     """
     lines = [line.lstrip("- ") for line in _metadata_lines(entries, with_location)]
-    return "; ".join(lines)[:max_chars]
+    note = "; ".join(lines)
+    if len(note) <= max_chars:
+        return note
+    # Cut at a separator rather than mid-word. "140 m above" reads as a fact the
+    # photo recorded; it is the front half of one, and the planner cannot tell.
+    clipped = note[:max_chars]
+    for mark in ("; ", ", "):
+        at = clipped.rfind(mark)
+        if at > max_chars // 2:
+            return clipped[:at]
+    return clipped
 
 
 def _readable_timestamp(raw: Any) -> str:

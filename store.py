@@ -378,6 +378,11 @@ def create_routine(
     with _connect() as conn:
         # New ones go on the end of the strip. Ordering by "recently used" would
         # move a tap target that a thumb has learned where to find.
+        #
+        # Under the write lock, so two routines saved at once cannot read the
+        # same MAX and land on the same position — which would leave their order
+        # decided by the created_at tiebreak rather than by the strip.
+        conn.execute("BEGIN IMMEDIATE")
         position = conn.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 AS next FROM routines"
         ).fetchone()["next"]

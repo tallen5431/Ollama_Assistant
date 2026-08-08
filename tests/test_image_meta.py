@@ -451,6 +451,21 @@ class TestTheSearchPlannerCanUseIt:
         assert "51.510000" in prompt and "-0.127500" in prompt
         assert "14 July 2026" in prompt
 
+    def test_a_long_note_is_cut_at_a_separator_not_mid_fact(self):
+        """"140 m above" reads like a fact the photo recorded. It is half of one."""
+        two = [{"taken": "2026:08:07 09:04:00", "lat": 51.51, "lon": -0.1275,
+                "altitude": 42, "camera": "Google Pixel 8"},
+               {"taken": "2026:08:07 17:32:00", "lat": 52.48, "lon": -1.9025,
+                "altitude": 140, "camera": "Google Pixel 8"}]
+        note = web.metadata_note(two)
+        assert len(note) <= 220
+        assert not note.endswith("above")
+        assert note.rstrip().endswith(("sea level", "Pixel 8", ")")) or ", " not in note[-25:], note
+
+    def test_a_note_that_fits_is_left_whole(self):
+        note = web.metadata_note([{"taken": "2026:08:07 09:04:00"}])
+        assert note.endswith("(morning)")
+
     def test_it_arrives_as_a_note_not_as_the_fenced_system_turn(self, rig, monkeypatch):
         """The planner gets a few hundred characters; a preamble would eat them."""
         seen, _ = self._run(rig, monkeypatch)
