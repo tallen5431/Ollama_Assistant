@@ -22,6 +22,7 @@ import chat_ui
 import ollama_client
 import records
 import store
+from conftest import page_script
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +127,68 @@ class TestExtraction:
         records.extract("<think>hmm, carry the one</think>68 miles.", WANTED, "m")
         assert "carry the one" not in seen["p"]
         assert "68 miles" in seen["p"]
+
+
+class TestValuesAreWrittenAsData:
+    """A field goes into a table cell and a CSV, neither of which renders TeX.
+
+    Asking the model not to emit it is not enough on its own: the instruction
+    it is following in the same breath is "copy figures exactly as the answer
+    gives them", and the answer had them in LaTeX. Reported from a real Uber
+    Trip record whose Elapsed time read
+    "3 hours and 8 minutes (or $\\approx 3.13$ hours)".
+    """
+
+    @pytest.mark.parametrize("written, plain", [
+        (r"3 hours and 8 minutes (or $\approx 3.13$ hours)",
+         "3 hours and 8 minutes (or ≈ 3.13 hours)"),
+        (r"$\frac{68}{3.13}$ mph", "68 / 3.13 mph"),
+        (r"\(21.7\) mph", "21.7 mph"),
+        (r"\[68 \times 2\]", "68 × 2"),
+        (r"$\text{3 h 08 min}$", "3 h 08 min"),
+        (r"$\sqrt{16}$ miles", "√(16) miles"),
+        ("68 miles", "68 miles"),
+        ("", ""),
+    ])
+    def test_tex_is_unwrapped(self, written, plain):
+        assert records._plain(written) == plain
+
+    @pytest.mark.parametrize("money", ["$54.20", "$5 to $10", "It cost $100,407",
+                                       "$5-$10 per mile"])
+    def test_money_is_left_alone(self, money):
+        """A receipt routine records prices, and a dollar pair around prose is
+        two prices — turning that into arithmetic is the worse failure."""
+        assert records._plain(money) == money
+
+    def test_it_runs_on_what_the_model_returns(self, replies):
+        # The JSON has to carry an escaped backslash, as a model's would.
+        replies["text"] = json.dumps({"distance": r"$\approx 68$ miles",
+                                      "elapsed": "3 h"})
+        assert records.extract("answer", WANTED, "m")["distance"] == "≈ 68 miles"
+
+    def test_the_model_is_asked_for_plain_text_too(self):
+        """Belt and braces: stripping is the guarantee, asking is the cheap
+        half that also keeps the value readable."""
+        assert "No LaTeX, no markdown, no formatting" in records._PROMPT
+
+    def test_records_already_kept_get_tidied_once(self):
+        kept = store.add_record("🚗 Uber Trip", {
+            "Elapsed time": r"3 hours and 8 minutes (or $\approx 3.13$ hours)",
+            "Fare": "$54.20"})
+        assert records.tidy_stored() == 1
+        fields = store.list_records()[0]["fields"]
+        assert fields["Elapsed time"] == "3 hours and 8 minutes (or ≈ 3.13 hours)"
+        assert fields["Fare"] == "$54.20", "money is still money"
+        assert records.tidy_stored() == 0, "and it is idempotent"
+        assert kept["id"] == store.list_records()[0]["id"]
+
+    def test_a_clean_log_is_left_untouched(self):
+        store.add_record("T", {"distance": "68 miles"})
+        assert records.tidy_stored() == 0
+
+    def test_no_database_is_not_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CHAT_DB", str(tmp_path / "absent.db"))
+        assert records.tidy_stored() == 0
 
 
 # --------------------------------------------------------------------------
@@ -418,20 +481,51 @@ class TestTheLayoutFitsWhereItIsShown:
         card = page.index("#recordList td { border:0;")
         assert table < card, "the narrow-screen block has to be able to override"
 
-    def test_the_drawer_takes_the_room_a_log_needs(self):
-        """Capped rather than maximal: on a wide screen the drawer is a column
-        beside the conversation, so a log that took 64rem pushed the thread it
-        was opened from off the screen."""
-        page = self.page()
-        assert ".drawer.wide { width:min(56rem,62vw); }" in page
-        assert "@media (max-width: 1023px) { .drawer.wide { width:min(56rem,94vw); } }" in page
-        assert 'drawerEl.classList.toggle("wide", which === "records");' in page
+    def test_the_log_gets_the_window_rather_than_a_drawer(self):
+        """A drawer is where you pick something. Records is a table you read,
+        filter, correct and export — a destination, and the only part of the
+        app that wants the whole width. At 21rem it was eight columns in 320px;
+        widened to 56rem it pushed the conversation it came from off screen.
+        """
+        text = self.page()
+        assert 'id="recordPane" class="recordsview"' in text
+        assert text.index('</aside>') < text.index('id="recordPane"'), \
+            "it has to be out of the drawer, not a pane inside it"
+        assert ".recordsview { flex:1 1 auto;" in text
 
-    def test_the_other_panes_stay_narrow(self):
-        """A conversation list is a column of titles and does not want 64rem."""
+    def test_the_composer_goes_away_while_it_is_open(self):
+        """There is nothing to type at, and on a phone it was 150px of the
+        screen the table needed."""
+        assert "body.records .chatarea, body.records footer { display:none !important; }" \
+            in self.page()
+
+    def test_there_is_a_way_back(self):
         page = self.page()
-        assert 'classList.toggle("wide", which === "records")' in page
-        assert 'classList.add("wide")' not in page
+        assert 'id="backToChat"' in page
+        js = page_script(page)
+        assert "backBtn.addEventListener(\"click\", closeRecords);" in js
+        at = js.index('if (e.key !== "Escape") return;')
+        assert "if (recordsOpen()) closeRecords();" in js[at:at + 400], "and Escape does it too"
+
+    def test_the_bar_gives_the_conversation_its_name_back(self):
+        """Records borrows the title bar; leaving it on "Records" afterwards
+        would say you were somewhere you are not."""
+        js = page_script(self.page())
+        assert "let currentTitle" in js
+        assert 'if (!recordsOpen()) currentTitle = text || "";' in js
+        at = js.index("function closeRecords")
+        assert "setChatTitle(currentTitle);" in js[at:at + 300]
+
+    def test_starting_or_opening_a_conversation_leaves_the_log(self):
+        js = page_script(self.page())
+        assert js.count("if (recordsOpen()) closeRecords();") >= 3, \
+            "new chat, opening a thread, and Escape"
+
+    def test_the_drawer_is_no_longer_widened_for_it(self):
+        """Dead once the log stopped living in there."""
+        text = self.page()
+        assert "drawer.wide" not in text
+        assert 'classList.toggle("wide"' not in text
 
     def test_records_can_be_narrowed_to_one_routine(self):
         """The columns are the union across routines, so three routines with

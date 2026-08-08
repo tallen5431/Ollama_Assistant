@@ -27,7 +27,7 @@ import threading
 import wave
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -36,6 +36,7 @@ from config import logger
 _BASE_DIR = Path(__file__).parent.resolve()
 _MODELS_DIR = Path(os.getenv("VOSK_MODELS_DIR", _BASE_DIR / "models")).resolve()
 _MODEL_HOST = "https://alphacephei.com/vosk/models/"
+_CHUNK = 256 * 1024
 
 # A compact catalog of small Vosk models (~40-50 MB each) plus one large English
 # model. ``id`` is the short handle used in the UI/API; ``dir`` is the folder
@@ -184,12 +185,17 @@ def _resolve_dir(model_id: Optional[str], *, download: bool = True) -> Path:
     return _download(mid)
 
 
-def _download(model_id: str) -> Path:
+def _download(model_id: str, on_progress: Optional[Callable[[int, int], None]] = None) -> Path:
     """Download and unpack a catalog model, returning its directory.
 
     The zip is streamed to a private temp file rather than read into memory —
     the large English model is 1.8 GB — and the temp name is unique so two
     concurrent downloads of the same model can't clobber each other's file.
+
+    ``on_progress(done_bytes, total_bytes)`` is called as it goes, so the page
+    can say what is happening. The large model is a ten-minute download on a
+    domestic line, and ten minutes of a silent request looks exactly like a
+    broken one — which is the state this was in.
     """
     entry = CATALOG[model_id]
     url = _MODEL_HOST + entry["dir"] + ".zip"
@@ -201,7 +207,22 @@ def _download(model_id: str) -> Path:
     try:
         # fdopen first: if urlopen raises, the fd is still wrapped and closed.
         with os.fdopen(fd, "wb") as fh, urlopen(url, timeout=600) as resp:
-            shutil.copyfileobj(resp, fh)
+            if on_progress is None:
+                shutil.copyfileobj(resp, fh)
+            else:
+                try:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                done = 0
+                on_progress(0, total)
+                while True:
+                    chunk = resp.read(_CHUNK)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    done += len(chunk)
+                    on_progress(done, total)
         # Unpack to a staging dir and move into place only once complete: a
         # download interrupted at 1.7 of 1.8 GB would otherwise leave a folder
         # that every later check reports as "already downloaded".
@@ -246,11 +267,20 @@ def _download(model_id: str) -> Path:
     return target
 
 
-def download_model(model_id: str) -> Dict[str, object]:
+def download_model(
+    model_id: str,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> Dict[str, object]:
     """Public helper: ensure a catalog model is present (used by the API)."""
     if model_id not in CATALOG:
         raise ValueError(f"Unknown voice model: {model_id!r}")
-    path = _resolve_dir(model_id, download=True)
+    entry = _MODELS_DIR / CATALOG[model_id]["dir"]
+    if _looks_like_model(entry):
+        # Already here: report it rather than reporting nothing, or a second
+        # click looks like a download that finished suspiciously fast.
+        return {"id": model_id, "label": CATALOG[model_id]["label"],
+                "dir": entry.name, "already": True}
+    path = _download(model_id, on_progress)
     return {"id": model_id, "label": CATALOG[model_id]["label"], "dir": path.name}
 
 

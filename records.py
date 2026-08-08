@@ -38,8 +38,70 @@ _PROMPT = (
     "Every value is a string. Where the answer does not state something, use "
     "an empty string — never a guess, never \"unknown\", never a placeholder. "
     "Copy figures exactly as the answer gives them, units included. Do not "
-    "calculate anything the answer did not calculate, and do not correct it."
+    "calculate anything the answer did not calculate, and do not correct it.\n\n"
+    "Write every value as plain text. No LaTeX, no markdown, no formatting: "
+    "a value goes into a spreadsheet column, so write \"3.13 hours\" rather "
+    "than \"$\\approx 3.13$ hours\"."
 )
+
+
+# The same job chat_ui.js does for a reply on screen, done here for a value on
+# its way into the database — because a record is read back as a table cell, in
+# a CSV, and by whatever the CSV is loaded into, none of which render TeX.
+# Asking the model not to emit it is not enough on its own: the instruction it
+# is following in the same breath is "copy figures exactly as the answer gives
+# them", and the answer had them in LaTeX.
+_TEX_SYMBOLS = (
+    (r"\\approx", "≈"), (r"\\times", "×"), (r"\\cdot", "·"),
+    (r"\\div", "÷"), (r"\\pm", "±"), (r"\\mp", "∓"),
+    (r"\\leq?\b", "≤"), (r"\\geq?\b", "≥"), (r"\\neq", "≠"),
+    (r"\\rightarrow", "→"), (r"\\to\b", "→"), (r"\\infty", "∞"),
+    (r"\\degree|\\deg\b", "°"),
+)
+_TEX_SPAN = re.compile(
+    r"\$\$(.+?)\$\$|\$([^$\n]+?)\$|\\\((.+?)\\\)|\\\[(.+?)\\\]", re.S)
+
+
+def _tex_to_text(body: str) -> str:
+    """A TeX fragment as the words a person would have written."""
+    out = body
+    for _ in range(4):        # these nest
+        out = re.sub(r"\\(?:text|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]*)\}",
+                     r"\1", out)
+        out = re.sub(r"\\(?:d|t)?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}",
+                     r"(\1) / (\2)", out)
+        out = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"√(\1)", out)
+    for pattern, symbol in _TEX_SYMBOLS:
+        out = re.sub(pattern, symbol, out)
+    out = re.sub(r"\\left|\\right", "", out)
+    out = re.sub(r"\\[,;:!]", " ", out)
+    out = re.sub(r"\\\\", " ", out)
+    out = re.sub(r"\\([%$&#_{}])", r"\1", out)
+    # Brackets the fraction rule added, dropped again where neither side needs
+    # them: "(68) / (3.13)" is worse than "68 / 3.13".
+    out = re.sub(r"\(([^()\s]+)\) / \(([^()\s]+)\)", r"\1 / \2", out)
+    return " ".join(out.split())
+
+
+def _plain(value: str) -> str:
+    """Strip TeX wrapping from a field value, leaving money alone.
+
+    A dollar pair is only treated as maths when it actually contains a TeX
+    command. "$54.20" and "$5 to $10" are what a receipt routine records, and
+    turning those into arithmetic would be a far worse failure than leaving a
+    stray dollar sign in a rare one.
+    """
+    def unwrap(match: "re.Match[str]") -> str:
+        dollars = match.group(1) if match.group(1) is not None else match.group(2)
+        if dollars is not None:
+            if "\\" not in dollars:
+                return match.group(0)
+            return _tex_to_text(dollars)
+        # \( \) and \[ \] say what they are; nothing else uses them.
+        body = match.group(3) if match.group(3) is not None else match.group(4)
+        return _tex_to_text(body)
+
+    return " ".join(_TEX_SPAN.sub(unwrap, value).split())
 
 
 def _objects(text: str) -> List[Dict[str, Any]]:
@@ -142,5 +204,27 @@ def extract(answer: str, fields: List[str], model: str) -> Dict[str, str]:
             value = ""
         elif isinstance(value, (list, tuple)):
             value = ", ".join(str(v) for v in value)
-        out[name] = " ".join(str(value).split())
+        out[name] = _plain(" ".join(str(value).split()))
     return out
+
+
+def tidy_stored(limit: int = 2000) -> int:
+    """Rewrite kept values that still carry the LaTeX they were written in.
+
+    Records made before extraction learned to strip it are already in the
+    database, in the CSV export and in whatever the CSV was loaded into. Run
+    once at startup: idempotent, and it only rewrites a value that actually
+    changes, so a clean log is a no-op.
+    """
+    import store
+
+    if not store.db_path().exists():
+        return 0
+    changed = 0
+    for record in store.list_records(limit=limit):
+        fields = record.get("fields") or {}
+        fixed = {name: _plain(value) for name, value in fields.items()}
+        if fixed != fields:
+            store.update_record(record["id"], fixed)
+            changed += 1
+    return changed

@@ -445,6 +445,9 @@ _PAGE = """<!doctype html>
       .tab:hover:not(.active) { background:var(--surface3); }
       .tab.active { color:var(--text); background:var(--surface);
         border:0; font-weight:600; box-shadow:var(--shadow1); }
+      /* Never lit, because choosing it leaves the drawer rather than switching
+         what the drawer is showing. The arrow is what says so. */
+      .tab-link { letter-spacing:0.01em; }
       .drawer-new { width:100%; margin-bottom:0.6rem; font-weight:600;
         background:var(--accent); border-color:var(--accent);
         color:var(--on-accent); padding:0.55rem; border-radius:var(--r2); }
@@ -549,11 +552,13 @@ _PAGE = """<!doctype html>
       .metarow a { color:var(--accent); word-break:break-all; }
 
       /* ---- Records ------------------------------------------------------- */
-      /* A log wants width, and next to a 21rem sidebar there is a whole screen
-         doing nothing. Capped so the conversation it was opened from is still
-         on screen behind it. */
-      .drawer.wide { width:min(56rem,62vw); }
-      @media (max-width: 1023px) { .drawer.wide { width:min(56rem,94vw); } }
+      /* Its own view: the whole pane, scrolling on its own, with the composer
+         out of the way. On a phone that is 390px of table instead of 367px of
+         drawer over a conversation you cannot see anyway. */
+      .recordsview { flex:1 1 auto; min-height:0; overflow:auto;
+                     padding:1rem 1rem 1.5rem; }
+      body.records .chatarea, body.records footer { display:none !important; }
+      .recordsview .wrap { max-width:none; }
       .exportbar { display:flex; gap:0.4rem; align-items:center; margin:0.3rem 0 0.6rem; }
       .exportbar a { text-decoration:none; }
       .recordfilter { flex-wrap:wrap; margin-bottom:0.4rem; }
@@ -682,6 +687,7 @@ _PAGE = """<!doctype html>
       <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
       <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></symbol>
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.4A8.6 8.6 0 0 1 9.6 3.5a8.6 8.6 0 1 0 10.9 10.9z"/></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
       <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></symbol>
       <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l2.1 5.4L19.5 10l-5.4 2.1L12 17.5l-2.1-5.4L4.5 10l5.4-1.6z"/><path d="M18.5 16.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
@@ -699,7 +705,7 @@ _PAGE = """<!doctype html>
         <div class="drawer-tabs">
           <button id="tabChats" class="tab active" type="button">Chats</button>
           <button id="tabRoutines" class="tab" type="button">Routines</button>
-          <button id="tabRecords" class="tab" type="button">Records</button>
+          <button id="tabRecords" class="tab tab-link" type="button" title="Open the records log">Records ↗</button>
         </div>
         <button id="drawerClose" class="iconbtn" title="Close" type="button"><svg class="i" aria-hidden="true"><use href="#i-close"></use></svg></button>
       </div>
@@ -762,9 +768,6 @@ _PAGE = """<!doctype html>
           </div>
         </div>
       </div>
-      <div id="recordPane" hidden>
-        <div id="recordList"></div>
-      </div>
     </aside>
     <aside class="sheet" id="photometa" hidden>
       <div class="drawer-head">
@@ -777,6 +780,7 @@ _PAGE = """<!doctype html>
     <div class="pane">
       <header>
         <button id="menu" class="iconbtn" title="Saved conversations" type="button" hidden><svg class="i" aria-hidden="true"><use href="#i-menu"></use></svg></button>
+        <button id="backToChat" class="iconbtn" title="Back to the conversation" type="button" hidden><svg class="i" aria-hidden="true"><use href="#i-back"></use></svg></button>
         <div class="head-title"><h2 id="chatTitle">New chat</h2></div>
         <div class="spacer"></div>
         <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
@@ -789,6 +793,16 @@ _PAGE = """<!doctype html>
       <!-- The button is anchored to this, not to the pane: #chat scrolls, so a
            child of it would scroll away, and the pane's bottom edge is under
            the composer. -->
+      <!-- Records is a place you go, not something you pick: a table you read,
+           filter, correct and export, and the only part of the app that wants
+           the whole window. In a 21rem drawer it was eight columns in 320px;
+           in a 56rem one it pushed the conversation it came from off the
+           screen. So it gets the pane instead, and the composer goes away
+           while it is open — there is nothing to type at. -->
+      <section id="recordPane" class="recordsview" hidden>
+        <div id="recordList"></div>
+      </section>
+
       <div class="chatarea">
         <main id="chat">
           <div class="wrap"><div class="empty" id="empty"></div></div>
@@ -881,6 +895,7 @@ _PAGE = """<!doctype html>
       const insecureNote = document.getElementById("insecureNote");
       const chatTitleEl = document.getElementById("chatTitle");
       const themeBtn = document.getElementById("theme");
+      const backBtn = document.getElementById("backToChat");
       const drawerEl = document.getElementById("drawer");
       const backdropEl = document.getElementById("backdrop");
       const convoListEl = document.getElementById("convoList");
@@ -2220,6 +2235,11 @@ _PAGE = """<!doctype html>
         } catch (e) { /* leave picker hidden */ }
       }
 
+      function mb(bytes) {
+        const n = (bytes || 0) / (1024 * 1024);
+        return (n >= 100 ? n.toFixed(0) : n.toFixed(1)) + " MB";
+      }
+
       // Downloading a not-yet-present language happens on selection so the mic
       // is ready before you speak.
       voiceSel.addEventListener("change", async () => {
@@ -2228,16 +2248,50 @@ _PAGE = """<!doctype html>
         if (!opt || opt.dataset.download !== "1") return;
         const id = opt.value;
         voiceSel.disabled = true; micBtn.disabled = true;
-        hintEl.textContent = "Downloading " + opt.textContent.replace(" ⬇", "") + "… (one-time)";
+        const name = opt.textContent.replace(" ⬇", "");
+        hintEl.textContent = "Downloading " + name + "… (one-time)";
         try {
+          // NDJSON, like the chat: a percent line as it goes and one final
+          // object. The large English model is 1.8 GB, and a silent ten-minute
+          // request looks exactly like a broken one.
           const resp = await fetch("api/voice/download", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id }),
           });
-          const j = await resp.json();
-          if (j.error) { hintEl.textContent = j.error; }
-          else { hintEl.textContent = "Ready — " + (j.label || id) + " downloaded."; await loadVoiceModels(); voiceSel.value = id; }
-        } catch (e) { hintEl.textContent = "Download failed: " + e; }
+          if (!resp.ok || !resp.body) {
+            const j = await resp.json().catch(() => ({}));
+            throw new Error(j.error || ("HTTP " + resp.status));
+          }
+          const reader = resp.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "", done = null;
+          for (;;) {
+            const step = await reader.read();
+            if (step.done) break;
+            buf += dec.decode(step.value, { stream: true });
+            let at;
+            while ((at = buf.indexOf("\\n")) >= 0) {
+              const raw = buf.slice(0, at).trim();
+              buf = buf.slice(at + 1);
+              if (!raw) continue;
+              let msg;
+              try { msg = JSON.parse(raw); } catch (e) { continue; }
+              if (msg.error) throw new Error(msg.error);
+              if (msg.percent !== undefined) {
+                hintEl.textContent = "Downloading " + name + "… " +
+                  (msg.total ? msg.percent + "%  (" + mb(msg.downloaded) + " of " +
+                               mb(msg.total) + ")"
+                             : mb(msg.downloaded));
+              } else { done = msg; }
+            }
+          }
+          if (!done) throw new Error("the download ended without finishing");
+          hintEl.textContent = done.already
+            ? (done.label || id) + " is already downloaded."
+            : "Ready — " + (done.label || id) + " downloaded.";
+          await loadVoiceModels();
+          voiceSel.value = id;
+        } catch (e) { hintEl.textContent = "Download failed: " + (e.message || e); }
         finally { voiceSel.disabled = false; micBtn.disabled = false; }
       });
 
@@ -2613,6 +2667,7 @@ _PAGE = """<!doctype html>
 
       function newChat() {
         if (controller) controller.abort();
+        if (recordsOpen()) closeRecords();
         currentConvoId = null;
         messages = [];
         pendingImages = []; renderThumbs();
@@ -2627,7 +2682,11 @@ _PAGE = """<!doctype html>
       // the app's own name told you what you already knew; after twenty saved
       // threads, which one is on screen is the thing you cannot work out by
       // looking at it.
+      // Remembered separately, because Records borrows the bar and has to give
+      // it back to the right name.
+      let currentTitle = "";
       function setChatTitle(text) {
+        if (!recordsOpen()) currentTitle = text || "";
         chatTitleEl.textContent = text || "New chat";
         chatTitleEl.title = text || "";
       }
@@ -2995,6 +3054,7 @@ _PAGE = """<!doctype html>
         } catch (e) { return; }
 
         if (controller) controller.abort();
+        if (recordsOpen()) closeRecords();
         currentConvoId = convo.id;
         messages = [];
         chatEl.innerHTML = "";
@@ -3443,19 +3503,42 @@ _PAGE = """<!doctype html>
 
       // ---- Routines: the drawer ----
 
+      // The drawer holds the two things you pick from. Records is the third
+      // tab but not a third pane: choosing it leaves the drawer and opens the
+      // log over the whole window, which is where a table with a dozen columns
+      // and its own toolbar actually belongs.
       async function showPane(which) {
+        if (which === "records") { await openRecords(); return; }
         convoPaneEl.hidden = which !== "chats";
         routinePaneEl.hidden = which !== "routines";
-        recordPaneEl.hidden = which !== "records";
         tabChatsEl.classList.toggle("active", which === "chats");
         tabRoutinesEl.classList.toggle("active", which === "routines");
-        tabRecordsEl.classList.toggle("active", which === "records");
-        // The log needs the room; the other two panes are lists of titles.
-        drawerEl.classList.toggle("wide", which === "records");
         if (which === "routines") { closeRoutineEditor(); renderRoutineList(); }
-        else if (which === "records") { await refreshRecords(); renderRecords(); }
         else refreshConversations();
       }
+
+      async function openRecords() {
+        // The drawer has done its job. On a rail it stays, so a conversation
+        // is still one click away; on a phone it would only be in the way.
+        dismissDrawer();
+        showPane("chats");
+        document.body.classList.add("records");
+        recordPaneEl.hidden = false;
+        backBtn.hidden = false;
+        setChatTitle("Records");
+        await refreshRecords();
+        renderRecords();
+      }
+
+      function closeRecords() {
+        document.body.classList.remove("records");
+        recordPaneEl.hidden = true;
+        backBtn.hidden = true;
+        setChatTitle(currentTitle);
+        inputEl.focus();
+      }
+
+      function recordsOpen() { return document.body.classList.contains("records"); }
 
       function renderRoutineList() {
         routineListEl.innerHTML = "";
@@ -4004,9 +4087,11 @@ _PAGE = """<!doctype html>
         // there is nothing over the top, so it does nothing — which is right.
         if (e.key !== "Escape") return;
         if (!metaEl.hidden) { hidePhotoDetails(); return; }
-        if (!drawerEl.hidden && !railed()) closeDrawer();
+        if (!drawerEl.hidden && !railed()) { closeDrawer(); return; }
+        if (recordsOpen()) closeRecords();
       });
 
+      backBtn.addEventListener("click", closeRecords);
       searchEl.addEventListener("input", onSearchInput);
       searchEl.addEventListener("keydown", (e) => { if (e.key === "Escape") clearSearch(); });
       searchClearEl.addEventListener("click", () => { clearSearch(); searchEl.focus(); });

@@ -133,6 +133,17 @@ def index() -> Any:
     return render_page(get_app_title())
 
 
+# Records kept before extraction learned to strip LaTeX still hold it, and they
+# are read back as table cells and as CSV — neither of which renders TeX. Once,
+# at startup, and a no-op on a log that never had any.
+try:
+    _tidied = records.tidy_stored()
+    if _tidied:
+        logger.info("Tidied LaTeX out of %d stored record(s)", _tidied)
+except Exception:  # noqa: BLE001 - a tidy-up must never stop the app starting
+    logger.exception("Could not tidy stored records")
+
+
 @app.route("/manifest.webmanifest", methods=["GET"])
 def manifest() -> Any:
     """Make a home-screen shortcut open as an app rather than a browser tab.
@@ -1204,14 +1215,49 @@ def api_voice_download() -> Any:
     model_id = body.get("id")
     if not model_id:
         return jsonify({"error": "Missing 'id'"}), 400
-    try:
-        info = voice.download_model(str(model_id))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("Voice model download failed")
-        return jsonify({"error": f"Download failed: {exc}"}), 500
-    return jsonify(info)
+    # Checked before a byte is streamed: once the response has started there is
+    # no status code left to send, and "unknown model" is knowable now.
+    if str(model_id) not in voice.CATALOG:
+        return jsonify({"error": f"Unknown voice model: {str(model_id)!r}"}), 400
+    # Streamed, in the same NDJSON the chat uses. The large English model is
+    # 1.8 GB — ten minutes on a domestic line — and ten minutes of a silent
+    # request is indistinguishable from a broken one, which is what this
+    # looked like. The work runs on a thread so a slow line cannot stall the
+    # relay, and the client sees a percentage the whole way down.
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+    sent = [0.0]
+
+    def progress(done: int, total: int) -> None:
+        # Rate limited to whole percents: a 1.8 GB file in 256KB chunks is
+        # 7000 callbacks, and 7000 lines of JSON is its own small download.
+        share = (done / total) if total else 0.0
+        if total and share - sent[0] < 0.01 and done < total:
+            return
+        sent[0] = share
+        lines.put(_line({"downloaded": done, "total": total,
+                         "percent": round(share * 100)}))
+
+    def fetch() -> None:
+        try:
+            lines.put(_line(voice.download_model(str(model_id), progress)))
+        except ValueError as exc:
+            lines.put(_line({"error": str(exc)}))
+        except Exception as exc:  # noqa: BLE001 - report, never 500 mid-stream
+            logger.exception("Voice model download failed")
+            lines.put(_line({"error": f"Download failed: {exc}"}))
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=fetch, name="voice-download", daemon=True).start()
+
+    def relay() -> Iterator[str]:
+        while True:
+            line = lines.get()
+            if line is None:
+                return
+            yield line
+
+    return Response(stream_with_context(relay()), mimetype="application/x-ndjson")
 
 
 @app.route("/api/transcribe", methods=["POST"])

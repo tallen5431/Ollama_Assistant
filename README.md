@@ -550,6 +550,13 @@ queries go out to a search engine. The editor says so at the moment you pick it,
 A routine can keep a record of every run. Give it field names and each run
 writes a row you can look at, correct, and export.
 
+Values are stored as plain text. Models reach for LaTeX the moment an answer
+contains arithmetic, and `3 hours and 8 minutes (or $\approx 3.13$ hours)` is
+not a spreadsheet cell — so the extraction is asked for plain text and strips
+any that arrives anyway. Money is left alone: `$54.20` and `$5 to $10` are what
+a receipt routine records, and reading those as arithmetic would be the worse
+failure.
+
 The trip case: **🚗 Trip** with `distance, elapsed, average speed`. Photograph
 the odometer twice, tap the chip, send — and under the reply a line appears:
 
@@ -557,7 +564,14 @@ the odometer twice, tap the chip, send — and under the reply a line appears:
 🗒 Kept: distance 68 miles · elapsed 3 h 08 min · average speed 21.7 mph
 ```
 
-☰ → **Records** shows the table, newest first:
+☰ → **Records** opens the log over the whole window — not in the drawer. A
+drawer is where you pick something; records is a table you read, filter,
+correct and export, and it is the only part of the app that wants the width. In
+a 21rem drawer it was eight columns in 320px. The composer goes away while it
+is open, since there is nothing to type at, and the back arrow (or Escape)
+returns you to the conversation.
+
+The table, newest first:
 
 | When | Routine | distance | elapsed | average speed |
 | --- | --- | --- | --- | --- |
@@ -749,7 +763,7 @@ make it likes.
 | `DELETE /api/records/<id>` | Remove one |
 | `GET /api/records.csv` | The whole log as CSV, ISO timestamps, `?routine=` narrows it |
 | `GET /api/voice/models` | Available + downloadable Vosk speech models |
-| `POST /api/voice/download` | Download a catalog model — body `{ "id": "fr" }` |
+| `POST /api/voice/download` | Download a catalog model — body `{ "id": "fr" }`. Streams NDJSON progress (`{"downloaded","total","percent"}`) then the final object; an unknown id is a 400 before any of it |
 | `POST /api/transcribe` | Speech-to-text: POST WAV audio (`?model=<id>` optional), returns `{ "text": ... }` |
 
 ## Expose it to the internet (optional)

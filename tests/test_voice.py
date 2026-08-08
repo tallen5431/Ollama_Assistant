@@ -7,6 +7,7 @@ here fails or resolves before the lazy ``import vosk``.
 from __future__ import annotations
 
 import io
+import json
 import wave
 
 import pytest
@@ -231,3 +232,130 @@ class TestTranscribeNeverDownloads:
         monkeypatch.delenv("VOSK_MODEL_PATH", raising=False)
         with pytest.raises(ValueError, match="not downloaded"):
             voice.transcribe(_silent_wav(), "es")
+
+
+# --------------------------------------------------------------------------
+# Downloading a model
+# --------------------------------------------------------------------------
+
+class TestDownloadProgress:
+    """The large English model is 1.8 GB — ten minutes on a domestic line, and
+    ten minutes of a silent request is indistinguishable from a broken one.
+    """
+
+    def _serve(self, monkeypatch, tmp_path, payload=b"x" * (900 * 1024)):
+        """A model archive, served locally, that _download can really fetch."""
+        import http.server, socketserver, threading, zipfile, io
+
+        folder = "vosk-model-en-us-0.22"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name in ("am/final.mdl", "conf/mfcc.conf", "conf/model.conf",
+                         "graph/HCLr.fst", "graph/Gr.fst",
+                         "graph/phones/word_boundary.int", "ivector/final.ie"):
+                zf.writestr(f"{folder}/{name}", payload if "final.mdl" in name else b"x")
+        body = buf.getvalue()
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        monkeypatch.setattr(voice, "_MODEL_HOST",
+                            f"http://127.0.0.1:{srv.server_address[1]}/")
+        monkeypatch.setattr(voice, "_MODELS_DIR", tmp_path / "models")
+        return srv, len(body)
+
+    def test_it_reports_as_it_goes(self, monkeypatch, tmp_path):
+        srv, total = self._serve(monkeypatch, tmp_path)
+        seen = []
+        path = voice._download("en-us-large", lambda done, size: seen.append((done, size)))
+        srv.shutdown()
+        assert path.is_dir() and (path / "am" / "final.mdl").exists()
+        assert len(seen) >= 3, f"only {len(seen)} progress callbacks for {total} bytes"
+        assert seen[0][0] == 0 and seen[-1][0] == total
+        assert all(size == total for _, size in seen), "the total should be known upfront"
+        assert [d for d, _ in seen] == sorted(d for d, _ in seen), "and never go backwards"
+
+    def test_without_a_callback_it_still_works(self, monkeypatch, tmp_path):
+        """The plain path is what _resolve_dir uses on first transcription."""
+        srv, _ = self._serve(monkeypatch, tmp_path)
+        assert voice._download("en-us-large").is_dir()
+        srv.shutdown()
+
+    def test_a_model_already_there_says_so(self, monkeypatch, tmp_path):
+        """Otherwise a second click looks like a download that finished
+        suspiciously fast."""
+        srv, _ = self._serve(monkeypatch, tmp_path)
+        voice.download_model("en-us-large")
+        again = voice.download_model("en-us-large")
+        srv.shutdown()
+        assert again["already"] is True
+
+    def test_the_route_streams_it(self, monkeypatch, tmp_path):
+        import importlib
+        import app as app_module
+
+        srv, total = self._serve(monkeypatch, tmp_path)
+        for key in ("CHAT_AUTH", "CHAT_AUTH_USER", "CHAT_AUTH_PASSWORD"):
+            monkeypatch.delenv(key, raising=False)
+        app = importlib.reload(app_module)
+        monkeypatch.setattr(app.voice, "voice_available", lambda: True)
+        monkeypatch.setattr(app.voice, "_MODEL_HOST", voice._MODEL_HOST)
+        monkeypatch.setattr(app.voice, "_MODELS_DIR", tmp_path / "models")
+        resp = app.app.test_client().post("/api/voice/download", json={"id": "en-us-large"})
+        srv.shutdown()
+        assert resp.status_code == 200
+        assert resp.mimetype == "application/x-ndjson"
+        lines = [json.loads(x) for x in resp.get_data(as_text=True).splitlines() if x.strip()]
+        percents = [x for x in lines if "percent" in x]
+        assert len(percents) >= 2, lines
+        assert percents[-1]["percent"] == 100
+        assert lines[-1]["dir"] == "vosk-model-en-us-0.22"
+
+    def test_a_failure_arrives_as_a_line_not_a_500(self, monkeypatch, tmp_path):
+        """The stream has already started, so there is no status code left."""
+        import importlib
+        import app as app_module
+
+        for key in ("CHAT_AUTH", "CHAT_AUTH_USER", "CHAT_AUTH_PASSWORD"):
+            monkeypatch.delenv(key, raising=False)
+        app = importlib.reload(app_module)
+        monkeypatch.setattr(app.voice, "voice_available", lambda: True)
+        monkeypatch.setattr(app.voice, "_MODEL_HOST", "http://127.0.0.1:1/")
+        monkeypatch.setattr(app.voice, "_MODELS_DIR", tmp_path / "models")
+        resp = app.app.test_client().post("/api/voice/download", json={"id": "en-us-large"})
+        assert resp.status_code == 200
+        lines = [json.loads(x) for x in resp.get_data(as_text=True).splitlines() if x.strip()]
+        assert "error" in lines[-1]
+
+    def test_the_percent_lines_are_not_a_download_of_their_own(self, monkeypatch, tmp_path):
+        """1.8 GB in 256KB chunks is 7000 callbacks; one line each is silly.
+
+        A small chunk size rather than a huge payload: 225 reads of a 900KB
+        file makes the same point as 7000 reads of 1.8 GB, in a test that
+        finishes.
+        """
+        srv, _ = self._serve(monkeypatch, tmp_path)
+        monkeypatch.setattr(voice, "_CHUNK", 4096)
+        import importlib
+        import app as app_module
+
+        for key in ("CHAT_AUTH", "CHAT_AUTH_USER", "CHAT_AUTH_PASSWORD"):
+            monkeypatch.delenv(key, raising=False)
+        app = importlib.reload(app_module)
+        monkeypatch.setattr(app.voice, "voice_available", lambda: True)
+        monkeypatch.setattr(app.voice, "_MODEL_HOST", voice._MODEL_HOST)
+        monkeypatch.setattr(app.voice, "_MODELS_DIR", tmp_path / "models")
+        monkeypatch.setattr(app.voice, "_CHUNK", 4096)
+        resp = app.app.test_client().post("/api/voice/download", json={"id": "en-us-large"})
+        srv.shutdown()
+        lines = resp.get_data(as_text=True).splitlines()
+        assert len(lines) <= 105, f"{len(lines)} lines for one download"
