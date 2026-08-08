@@ -65,6 +65,10 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   the manager's reverse proxy.
 - 🔒 **Optional login** — turn on HTTP Basic Auth before exposing it publicly.
 
+> **On a phone**, the toggles and routine chips fold away while the on-screen
+> keyboard is up, so the conversation keeps the screen. They come back when you
+> dismiss it. Nothing folds on a desktop, where no keyboard covers anything.
+
 ## Quick start
 
 ```bash

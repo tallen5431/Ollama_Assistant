@@ -242,6 +242,14 @@ _PAGE = """<!doctype html>
         font-size:0.6rem; line-height:1.3; background:rgba(0,0,0,0.65);
         border-radius:0 0.35rem 0 0; }
 
+      /* While the keyboard is up, everything above the composer goes away —
+         see fitFooter(). Not display:none on the composer itself: the point is
+         to give the conversation back its screen, not to hide what you are
+         typing into. */
+      body.typing #voicebar, body.typing #togglebar,
+      body.typing #routinebar, body.typing #insecureNote { display:none; }
+      body.typing .hint { display:none; }
+
       /* Phones: reclaim vertical space and stop the header wrapping. */
       @media (max-width: 640px) {
         header { gap:0.5rem; padding:0.5rem 0.7rem; flex-wrap:nowrap; }
@@ -264,8 +272,19 @@ _PAGE = """<!doctype html>
         button.primary { padding:0.5rem 0.7rem; }
         .voicebar { gap:0.4rem 0.6rem; }
         #webnote { display:none; }   /* the tooltip covers it */
-        #routinebar { flex-wrap:nowrap; }   /* .voicebar wraps; this one scrolls */
-        .chip { padding:0.5rem 0.75rem; }   /* a wet thumb needs about 38px */
+        #routinebar, #togglebar { flex-wrap:nowrap; overflow-x:auto;
+                                   scrollbar-width:none; }
+        #togglebar::-webkit-scrollbar { display:none; }
+        #togglebar .voicebar-check { flex:0 0 auto; white-space:nowrap; }
+        #exifnote, #webnote { display:none; }   /* the tooltips carry these */
+        /* Every control here measured under 44px, which is the minimum every
+           platform guideline asks for; the checkbox rows were 14px tall. The
+           padding is on the label rather than the box, because the label is
+           what a thumb actually lands on. */
+        .chip { padding:0.6rem 0.8rem; min-height:44px; display:flex; align-items:center; }
+        .voicebar-check { min-height:44px; }
+        .composer button { min-height:44px; padding:0.5rem 0.6rem; }
+        #menu, #newChat { min-height:40px; }
       }
       .insecure { margin:0 0.2rem 0.5rem; }
       .insecure a { color:var(--accent); word-break:break-all; }
@@ -357,28 +376,28 @@ _PAGE = """<!doctype html>
         <div class="voicebar" id="voicebar" hidden>
           <span class="voicebar-label">🎙 Voice</span>
           <select id="voiceModel" title="Speech recognition language"></select>
-          <label class="voicebar-check" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
-            <input type="checkbox" id="headset" checked> 🎧 Headphones
-          </label>
-          <label class="voicebar-check" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
-            <input type="checkbox" id="autosend"> ⚡ Auto-send
-          </label>
-          <label class="voicebar-check" title="Keep the mic open and treat a pause in speech as the end of a message. With Auto-send on, this runs a whole conversation from one tap.">
-            <input type="checkbox" id="continuous"> 🔁 Continuous
-          </label>
         </div>
         <p class="hint insecure" id="insecureNote" hidden></p>
-        <div class="voicebar" id="webbar" hidden>
-          <label class="voicebar-check" title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
-            <input type="checkbox" id="web"> 🌐 Web access
+        <!-- One row, not two. Each toggle hides independently — web access has
+             a server-side kill switch — but two single-checkbox rows cost 48px
+             of a 844px phone before anything has been typed. -->
+        <div class="voicebar" id="togglebar">
+          <label class="voicebar-check" id="webbar" hidden title="Let this app read the web for you: a link in your message is fetched, and otherwise the model is asked whether a search would help. Sources are listed under the reply.">
+            <input type="checkbox" id="web"> 🌐 Web
           </label>
-          <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
-        </div>
-        <div class="voicebar" id="exifbar" hidden>
-          <label class="voicebar-check" title="Read the date, camera and GPS position a photo carries, and tell the model. The app re-encodes images, which strips this, so turning it off means the location never leaves your phone at all. Set PHOTO_META=0 on the server to make off the default.">
+          <label class="voicebar-check" id="exifbar" hidden title="Read the date, camera and GPS position a photo carries, and tell the model. The app re-encodes images, which strips this, so turning it off means the location never leaves your phone at all. Set PHOTO_META=0 on the server to make off the default.">
             <input type="checkbox" id="exif"> 📍 Photo details
           </label>
-          <span class="voicebar-label" id="exifnote">date, camera and location from the photo itself</span>
+          <label class="voicebar-check voicesetting" title="On by default. Turns off echo cancellation, which has nothing to cancel on headphones and otherwise mutes your voice while audio is playing. Untick it on laptop speakers.">
+            <input type="checkbox" id="headset" checked> 🎧 Headphones
+          </label>
+          <label class="voicebar-check voicesetting" title="Send as soon as speech is transcribed, instead of waiting for you to press Send.">
+            <input type="checkbox" id="autosend"> ⚡ Auto-send
+          </label>
+          <label class="voicebar-check voicesetting" title="Keep the mic open and treat a pause in speech as the end of a message. With Auto-send on, this runs a whole conversation from one tap.">
+            <input type="checkbox" id="continuous"> 🔁 Continuous
+          </label>
+          <span class="voicebar-label" id="webnote">links you paste are read; the model decides when to search</span>
         </div>
         <!-- Above the thumbs and the composer, so the footer reads downwards
              as: pick a routine, attach its photos, write the message. -->
@@ -1666,6 +1685,12 @@ _PAGE = """<!doctype html>
         try {
           const data = await (await fetch("api/health")).json();
           if (data.web) webBar.hidden = false;
+          // The dictation toggles sit in the same row now, so they need their
+          // own gate: without vosk they are three settings for a button that
+          // is not there.
+          for (const el of document.querySelectorAll(".voicesetting")) {
+            el.hidden = !data.voice;
+          }
           exifBar.hidden = false;
           // The deployment picks the default, not the page: on a box only you
           // can reach this is plainly useful on, and PHOTO_META=0 turns it
@@ -2901,6 +2926,34 @@ _PAGE = """<!doctype html>
       // default can apply to a fresh browser without overriding a real choice.
       function chosen(key) {
         try { return localStorage.getItem(key) !== null; } catch (e) { return false; }
+      }
+
+      // ---- Room to read while you type ----
+      // Measured on a 390x844 phone: the footer is 293px idle, and 291px with
+      // the on-screen keyboard up — which leaves 42px of conversation. You
+      // cannot see the message you are replying to while replying to it.
+      //
+      // visualViewport is what actually shrinks when the keyboard opens;
+      // window.innerHeight does not move on Android Chrome. Where it is absent
+      // (older browsers, and every desktop, where no keyboard ever covers
+      // anything) nothing here runs and the footer stays as it was.
+      const KEYBOARD_ROOM = 520;   // below this, the keyboard is up
+
+      function fitFooter() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        const tight = vv.height < KEYBOARD_ROOM;
+        // The composer and the thumbnails stay. Everything above them is a
+        // setting you chose before you started typing, and it will still be
+        // there when the keyboard goes away.
+        document.body.classList.toggle("typing", tight);
+      }
+
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", fitFooter);
+        // Scroll too: Android fires resize, iOS Safari sometimes only offsets.
+        window.visualViewport.addEventListener("scroll", fitFooter);
+        fitFooter();
       }
 
       function rememberToggle(el, key, dflt) {

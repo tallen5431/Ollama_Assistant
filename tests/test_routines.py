@@ -522,3 +522,56 @@ class TestThePage:
         """hintEl is shared; blanking it wiped the history-unavailable warning."""
         page = self.page()
         assert 'hintEl.textContent.indexOf(" attached.") > 0' in page
+
+
+class TestTheFooterLeavesRoomToRead:
+    """Measured on a 390x844 phone before this: the footer was 293px idle and
+    291px with the keyboard up, leaving 42px of conversation. You could not see
+    the message you were replying to while replying to it.
+    """
+
+    def page(self):
+        return chat_ui.render_page("t")
+
+    def test_the_options_collapse_when_the_keyboard_is_up(self):
+        page = self.page()
+        assert "window.visualViewport" in page, \
+            "innerHeight does not move when the keyboard opens on Android"
+        assert 'document.body.classList.toggle("typing", tight)' in page
+        assert "body.typing #togglebar" in page and "body.typing #routinebar" in page
+
+    def test_the_composer_itself_is_never_collapsed(self):
+        """The point is to give the conversation its screen, not to hide the box."""
+        page = self.page()
+        at = page.index("body.typing #voicebar")
+        rules = page[at:page.index("/* Phones:", at)]
+        assert ".composer" not in rules and "#thumbs" not in rules
+
+    def test_it_does_nothing_where_there_is_no_keyboard(self):
+        """Desktop has no visualViewport shrink, and older browsers have none."""
+        page = self.page()
+        at = page.index("function fitFooter")
+        assert "if (!vv) return;" in page[at:at + 300]
+
+    def test_every_toggle_shares_one_scrolling_row(self):
+        """Four wrapping rows is what turned five checkboxes into 128px."""
+        page = self.page()
+        assert 'id="togglebar"' in page
+        for control in ('id="web"', 'id="exif"', 'id="headset"',
+                        'id="autosend"', 'id="continuous"'):
+            assert page.index('id="togglebar"') < page.index(control) < page.index('id="routinebar"'), control
+        assert "#routinebar, #togglebar { flex-wrap:nowrap; overflow-x:auto;" in page
+
+    def test_the_dictation_toggles_hide_without_a_microphone(self):
+        """Otherwise they are three settings for a button that is not there."""
+        page = self.page()
+        assert 'querySelectorAll(".voicesetting")' in page
+        assert "el.hidden = !data.voice;" in page
+
+    def test_the_tap_targets_meet_the_platform_minimum(self):
+        """Every control measured under 44px; the checkbox rows were 14px tall."""
+        page = self.page()
+        for rule in (".chip { padding:0.6rem 0.8rem; min-height:44px;",
+                     ".voicebar-check { min-height:44px; }",
+                     ".composer button { min-height:44px;"):
+            assert rule in page, rule
