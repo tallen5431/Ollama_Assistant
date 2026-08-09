@@ -137,6 +137,22 @@ def get_search_url() -> str:
     return os.getenv("SEARXNG_URL", "").strip().rstrip("/")
 
 
+def searxng_autodetect() -> bool:
+    """Whether to look for the SearXNG this repository ships when none is set.
+
+    Setting one up is two commands and then a third, unrelated one — telling
+    the app where it is, in the server manager's per-card environment, which
+    gives no error when it is missed. So when SEARXNG_URL is unset the app
+    checks the one address searxng/docker-compose.yml publishes, on loopback,
+    and uses it only if a search there actually works.
+
+    Set SEARXNG_AUTODETECT=0 to stop it looking — for a box where something
+    else answers on 127.0.0.1:8888, or where DuckDuckGo is wanted despite a
+    SearXNG being up.
+    """
+    return _flag("SEARXNG_AUTODETECT")
+
+
 def get_planner_model() -> str:
     """Model used to turn a message into search queries.
 

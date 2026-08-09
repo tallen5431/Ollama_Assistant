@@ -118,13 +118,23 @@ class TestTheStepsCanBeFollowedInOrder:
         assert "is not a valid file" in README, \
             "the error that ordering produces is not written down"
 
+    def test_the_setting_is_not_needed_for_the_instance_this_repo_ships(self):
+        """The whole SearXNG walkthrough ends in a step that is easy to miss
+        and gives no error when missed. It should not be needed at all for the
+        one address this repository's own compose file publishes."""
+        start = README.index("### Running your own search")
+        window = README[start:start + 8000]
+        assert "should not have to set `SEARXNG_URL` at all" in window
+        assert "SEARXNG_AUTODETECT=0" in window, "and the way to stop it"
+        assert "127.0.0.1:8888" in window
+
     def test_where_to_put_the_setting_is_named_exactly(self):
         """"The server manager's per-program environment" was true and not
         actionable. The manager runs Start.sh with {...process.env,
         ...program.env}, and program.env is the per-program env object in its
         config.json — reachable from the UI. Nothing reads a .env file, which
         is the invisible place a setting goes to never arrive."""
-        start = README.index("That `export` only reaches this shell")
+        start = README.index("**And note that `export` only reaches this shell**")
         window = README[start:start + 1600]
         assert "Environment Variables" in window, "the UI field is not named"
         assert "config.json" in window, "nor the file behind it"
@@ -133,7 +143,7 @@ class TestTheStepsCanBeFollowedInOrder:
     def test_and_the_way_to_confirm_it_arrived(self):
         """A setting that never arrived and a setting being ignored looked
         identical; both the banner and /api/health now separate them."""
-        start = README.index("That `export` only reaches this shell")
+        start = README.index("**And note that `export` only reaches this shell**")
         window = README[start:start + 2200]
         assert "Web search   :" in window, "the banner line is not shown"
         assert "search_backend" in README, "/api/health's field is undocumented"

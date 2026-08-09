@@ -133,7 +133,8 @@ All settings are environment variables (the server manager injects them):
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
-| `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. **Recommended.** Unset falls back to scraping DuckDuckGo's no-JS endpoints, which is what breaks first. Check it arrived with `/api/health`'s `search_backend` — under the server manager this is set on the card, and a `.env` in this directory is read by nothing |
+| `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. Only needed when it is **not** at `http://127.0.0.1:8888`, which is checked for automatically — see `SEARXNG_AUTODETECT`. Set it and it becomes required: a missing instance is then an error rather than a quiet fall back to scraping DuckDuckGo. Check it arrived with `/api/health`'s `search_backend`; under the server manager it is set on the card, and a `.env` in this directory is read by nothing |
+| `SEARXNG_AUTODETECT` | `1`                        | With `SEARXNG_URL` unset, look for a working SearXNG at `http://127.0.0.1:8888` — the address `searxng/docker-compose.yml` publishes — and use it if one answers. `0` stops it looking |
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_DISTILLER_MODEL` | *(unset)*                 | Small model that cuts each fetched page down to what bears on your question. Unset means off — see "Distilling pages". Measured 12,016 → 231 characters on a two-page turn |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
@@ -653,9 +654,30 @@ export SEARXNG_URL=http://127.0.0.1:8888
 That names the backend it used and prints the results it got, so a pass means
 the whole path works.
 
-**That `export` only reaches this shell**, which is the last step people miss —
-the check passes while the app carries on scraping DuckDuckGo, and it looks
-like the app ignoring a setting rather than never receiving one.
+**You should not have to set `SEARXNG_URL` at all** when you run the instance
+above. With it unset, the app checks `http://127.0.0.1:8888` — the one address
+`searxng/docker-compose.yml` publishes — and uses it if a search there actually
+works. Not a scan: one loopback address, checked once every few minutes, and a
+refused connection costs microseconds. It looks for a *working* instance rather
+than an open port, so the three ways a fresh SearXNG does not work (HTML only,
+the limiter on, something else on that port) are all declined rather than
+adopted. `SEARXNG_AUTODETECT=0` stops it looking.
+
+The startup banner says when it found one:
+
+```
+  Web search   : http://127.0.0.1:8888 (found running; SEARXNG_URL is unset)
+```
+
+Set `SEARXNG_URL` explicitly when your instance is somewhere else, or when you
+want it to be an error if it is missing — an address you configured fails
+loudly, while one that was merely found falls back to DuckDuckGo without
+comment.
+
+**And note that `export` only reaches this shell**, which is the step people
+miss when they do set it: the check passes while the app carries on scraping
+DuckDuckGo, and it looks like the app ignoring a setting rather than never
+receiving one.
 
 Under the HTTP Server Manager, the environment is the card's own. The manager
 runs `bash Start.sh` with `{...process.env, ...program.env}`, and `program.env`

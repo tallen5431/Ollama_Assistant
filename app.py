@@ -273,7 +273,7 @@ def health() -> Any:
             # only way to tell them apart was to run a search and read the
             # panel. Named "searxng" rather than echoed as a URL when unset, so
             # the answer to "is my instance live?" is one field.
-            "search_backend": get_search_url() or "duckduckgo",
+            "search_backend": web.effective_search_url() or "duckduckgo",
             "history": store.available(),
             # The browser trims image payloads before sending, so it needs
             # the same number the server would use.
@@ -1778,6 +1778,8 @@ def main() -> None:
         print("  Web          : OFF (WEB_ENABLED=0)")
     elif get_search_url():
         print(f"  Web search   : {get_search_url()}")
+    elif web.local_searxng():
+        print(f"  Web search   : {web.local_searxng()} (found running; SEARXNG_URL is unset)")
     else:
         print("  Web search   : DuckDuckGo (no SEARXNG_URL — see the README)")
     print("=" * 60)

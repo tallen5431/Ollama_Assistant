@@ -50,6 +50,7 @@ from config import (
     get_web_max_chars,
     get_web_timeout,
     logger,
+    searxng_autodetect,
     web_enabled,
 )
 
@@ -1004,6 +1005,79 @@ def _unresponsive(data: Dict[str, Any]) -> List[str]:
     return out
 
 
+# Where searxng/docker-compose.yml binds its instance. Not a scan and not a
+# guess: it is the one address this repository's own compose file publishes,
+# and it is on loopback, so a probe costs a refused connection when nothing is
+# there.
+_LOCAL_SEARXNG = "http://127.0.0.1:8888"
+
+# Long enough that ordinary use never probes, short enough that starting
+# SearXNG is picked up without restarting the app.
+_DETECT_EVERY = 300.0
+_detected: Dict[str, Any] = {"at": -_DETECT_EVERY, "url": ""}
+_DETECT_LOCK = threading.Lock()
+
+
+def _probe_local_searxng() -> str:
+    """``_LOCAL_SEARXNG`` if a working SearXNG is answering there, else "".
+
+    A real search rather than a liveness check, because the question is not
+    "is something listening" but "will a search work" — and the three ways a
+    fresh instance does not work (serving HTML only, the bot limiter on, or
+    something else entirely on that port) all answer a liveness probe happily.
+    One trivial query every few minutes is a small price for never being
+    wrong about it.
+    """
+    try:
+        resp = _TRUSTED_SESSION.get(
+            _LOCAL_SEARXNG + "/search?format=json&q=searxng",
+            timeout=(1.0, 3.0),
+            headers={"User-Agent": _UA},
+        )
+        with resp:
+            if not resp.ok:
+                return ""
+            data = json.loads(_read_capped(resp))
+    except (requests.RequestException, ValueError, WebError):
+        return ""
+    # "results" present, even if empty, is SearXNG answering in the format this
+    # app needs. Anything else on that port is not adopted.
+    return _LOCAL_SEARXNG if isinstance(data, dict) and "results" in data else ""
+
+
+def local_searxng() -> str:
+    """The SearXNG this repository ships, if it is up. "" otherwise.
+
+    Only consulted when SEARXNG_URL is unset. Setting one up is two commands
+    and then a third, unrelated one — telling the app where it is, somewhere
+    that is not obvious and gives no error when it does not arrive. Since the
+    address is this project's own, the app can simply look.
+
+    Adopted silently, and silently not adopted: this is not something the
+    operator asked for, so it must not turn "no SearXNG" into an error. An
+    explicit SEARXNG_URL keeps its loud failures, because there someone said
+    where to look and being quietly ignored would be worse.
+    """
+    if not searxng_autodetect():
+        return ""
+    now = time.monotonic()
+    with _DETECT_LOCK:
+        fresh = now - _detected["at"] < _DETECT_EVERY
+        if fresh:
+            return str(_detected["url"])
+    found = _probe_local_searxng()
+    with _DETECT_LOCK:
+        if found and found != _detected["url"]:
+            logger.info("Using the SearXNG answering at %s (SEARXNG_URL is unset)", found)
+        _detected["at"], _detected["url"] = time.monotonic(), found
+    return found
+
+
+def effective_search_url() -> str:
+    """The search backend a search would actually use, right now."""
+    return get_search_url() or local_searxng()
+
+
 def search(query: str, limit: int = 3) -> List[Dict[str, str]]:
     """Return up to ``limit`` ``{"url", "title"}`` results for ``query``."""
     if not web_enabled():
@@ -1012,7 +1086,7 @@ def search(query: str, limit: int = 3) -> List[Dict[str, str]]:
     if not query:
         return []
 
-    base = get_search_url()
+    base = effective_search_url()
     try:
         if base:
             return _search_searxng(base, query, limit)

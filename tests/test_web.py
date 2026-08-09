@@ -13,6 +13,7 @@ import ssl
 import subprocess
 import threading
 import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -21,6 +22,8 @@ import requests
 import web
 from conftest import allow_loopback
 from config import get_web_max_docs
+
+ROOT = Path(__file__).resolve().parent.parent
 
 PAGE = """<!doctype html>
 <html><head><title>  Example   Page </title>
@@ -1175,6 +1178,138 @@ class TestSelfHostedSearchIsTheDurableAnswer:
             {"results": [{"url": "https://ok.example/", "title": "fine"}],
              "unresponsive_engines": [["duckduckgo", "CAPTCHA"]]}))
         assert [h["url"] for h in web.search("anything", 3)] == ["https://ok.example/"]
+
+
+class TestASearxngThatIsAlreadyRunningIsFound:
+    """Setting SearXNG up is two commands, and then a third unrelated one:
+    telling the app where it is, in the server manager's per-card environment
+    — which is not obvious and gives no error when it is missed. It cost an
+    evening on the NucBox with a working instance sitting on the documented
+    port the whole time.
+
+    So when SEARXNG_URL is unset the app looks at the one address this
+    repository's own compose file publishes. Silently adopted, and silently
+    not adopted: nobody asked for it, so it must never turn "no SearXNG" into
+    an error.
+    """
+
+    ANSWER = json.dumps({"query": "searxng", "results": [
+        {"url": "https://ndclist.com/x", "title": "NDC", "content": "90 mcg"}]})
+
+    @pytest.fixture(autouse=True)
+    def forget_what_was_detected(self, monkeypatch):
+        monkeypatch.setattr(web, "_detected", {"at": -1e9, "url": ""})
+        monkeypatch.delenv("SEARXNG_URL", raising=False)
+        monkeypatch.delenv("SEARXNG_AUTODETECT", raising=False)
+        monkeypatch.setattr(web, "web_enabled", lambda: True)
+
+    def serve(self, monkeypatch, body, status=200, ctype="application/json"):
+        hits = []
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(self.path)
+                payload = body.encode()
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setattr(web, "_LOCAL_SEARXNG",
+                            f"http://127.0.0.1:{server.server_port}")
+        return server, hits
+
+    def test_a_working_instance_is_adopted(self, monkeypatch):
+        server, _ = self.serve(monkeypatch, self.ANSWER)
+        try:
+            assert web.local_searxng() == web._LOCAL_SEARXNG
+            assert [h["url"] for h in web.search("albuterol", 3)] == ["https://ndclist.com/x"]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_nothing_listening_falls_back_rather_than_failing(self, monkeypatch):
+        """The common case, and the one that must not become an error."""
+        monkeypatch.setattr(web, "_LOCAL_SEARXNG", "http://127.0.0.1:1")
+        assert web.local_searxng() == ""
+        assert web.effective_search_url() == ""
+
+    @pytest.mark.parametrize("body,status,ctype", [
+        # Something else entirely on that port.
+        ("<html><body>a different app</body></html>", 200, "text/html"),
+        ('{"ok": true}', 200, "application/json"),
+        # SearXNG with `formats: json` not set — the commonest misconfiguration.
+        ("Invalid settings, please edit your preferences", 403, "text/plain"),
+        # The bot limiter on.
+        ("<h1>Too Many Requests</h1>", 429, "text/html"),
+    ])
+    def test_but_only_something_a_search_actually_works_against(
+            self, monkeypatch, body, status, ctype):
+        """A liveness check would have said yes to every one of these. The
+        probe is a real search because the question is not "is something
+        listening" but "will a search work"."""
+        server, _ = self.serve(monkeypatch, body, status, ctype)
+        try:
+            assert web.local_searxng() == ""
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_configured_url_wins_and_is_not_probed(self, monkeypatch):
+        server, hits = self.serve(monkeypatch, self.ANSWER)
+        monkeypatch.setenv("SEARXNG_URL", "http://searx.example")
+        try:
+            assert web.effective_search_url() == "http://searx.example"
+            assert hits == [], "it probed despite being told where to look"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_answer_is_remembered_rather_than_asked_every_search(self, monkeypatch):
+        server, hits = self.serve(monkeypatch, self.ANSWER)
+        try:
+            for _ in range(5):
+                assert web.local_searxng() == web._LOCAL_SEARXNG
+            assert len(hits) == 1, f"probed {len(hits)} times"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_and_re_asked_once_it_is_stale_so_a_later_start_is_noticed(self, monkeypatch):
+        """Starting SearXNG after the app must not need the app restarted."""
+        monkeypatch.setattr(web, "_LOCAL_SEARXNG", "http://127.0.0.1:1")
+        assert web.local_searxng() == ""
+        server, _ = self.serve(monkeypatch, self.ANSWER)
+        try:
+            assert web.local_searxng() == "", "the miss should still be cached"
+            monkeypatch.setattr(web, "_detected", {"at": -1e9, "url": ""})
+            assert web.local_searxng() == web._LOCAL_SEARXNG
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_and_it_can_be_turned_off(self, monkeypatch):
+        server, hits = self.serve(monkeypatch, self.ANSWER)
+        monkeypatch.setenv("SEARXNG_AUTODETECT", "0")
+        try:
+            assert web.local_searxng() == ""
+            assert hits == [], "it probed despite being told not to look"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_the_address_it_looks_at_is_the_one_the_compose_file_publishes(self):
+        """Not a scan and not a guess — if the compose file moves, this must."""
+        compose = (ROOT / "searxng" / "docker-compose.yml").read_text()
+        port = web._LOCAL_SEARXNG.rsplit(":", 1)[1]
+        assert f"127.0.0.1:{port}:8080" in compose
+        assert web._LOCAL_SEARXNG.startswith("http://127.0.0.1:"), "loopback only"
 
 
 class TestReviewRegressions:
