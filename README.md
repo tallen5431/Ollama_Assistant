@@ -1220,7 +1220,7 @@ found nothing, and only the last of those means the retrieval worked.
 | -------------------- | ------- |
 | `GET /`              | Chat UI |
 | `GET /healthz`       | Plain `ok` health probe (stays open even when auth is on) |
-| `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
+| `GET /api/health`    | JSON status (Ollama host and whether it answers, default model, auth + voice on/off, and `search_backend` — the SearXNG URL this process actually has, or `"duckduckgo"`) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
 | `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears — that stream also sends a blank line every 20 s while the model is quiet, so skip empty lines rather than parsing them (both readers in the page already do). Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
 | `POST /api/chat/cancel` | Stop the turn running for a conversation — body `{ "conversation_id" }`. Needed because generation outlives the connection |

@@ -266,6 +266,14 @@ def health() -> Any:
             "auth": AUTH_ENABLED,
             "voice": voice.voice_available(),
             "web": web_enabled(),
+            # Which search backend this process actually has. SEARXNG_URL is
+            # set wherever the environment for this app comes from, which is
+            # not the shell anyone is standing in — so an export that never
+            # reached the app looks exactly like an app ignoring it, and the
+            # only way to tell them apart was to run a search and read the
+            # panel. Named "searxng" rather than echoed as a URL when unset, so
+            # the answer to "is my instance live?" is one field.
+            "search_backend": get_search_url() or "duckduckgo",
             "history": store.available(),
             # The browser trims image payloads before sending, so it needs
             # the same number the server would use.

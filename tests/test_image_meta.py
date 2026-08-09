@@ -1005,9 +1005,16 @@ class TestTheDiagnosticToolActuallyRuns:
     script in <head> instead of the page's own — so it raised "substring not
     found" on every invocation it ever had. Nothing ran it, so nothing knew.
     tests/conftest.py's page_script carries the same fix and the same story.
+
+    On the class, not on one method: the tool runs the parser under node, so
+    every test here needs it. Guarding the first and not the second is how the
+    suite went green on this box and red on one without node — which is the
+    failure these guards exist to prevent, made once more one line away.
     """
 
-    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    pytestmark = pytest.mark.skipif(shutil.which("node") is None,
+                                    reason="node not installed")
+
     def test_it_reads_a_real_photo_end_to_end(self, tmp_path):
         photo = tmp_path / "odometer.jpg"
         photo.write_bytes(build_jpeg(rich=True))

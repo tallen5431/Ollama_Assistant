@@ -62,6 +62,19 @@ class TestHealth:
         assert data["auth"] is False
         assert "ollama_host" in data and "default_model" in data
 
+    def test_it_says_which_search_backend_this_process_has(self, client, monkeypatch):
+        """Asked from the NucBox: "where should I check that everything is
+        working?" SEARXNG_URL is set wherever this app's environment comes
+        from, which is not the shell anyone is standing in — so an export that
+        never reached it looks exactly like it being ignored, and the only way
+        to tell was to run a search and read the panel.
+        """
+        monkeypatch.delenv("SEARXNG_URL", raising=False)
+        assert client.get("/api/health").get_json()["search_backend"] == "duckduckgo"
+        monkeypatch.setenv("SEARXNG_URL", "http://127.0.0.1:8888")
+        assert client.get("/api/health").get_json()["search_backend"] \
+            == "http://127.0.0.1:8888"
+
 
 class TestAuth:
     def test_ui_requires_credentials(self, auth_client):
