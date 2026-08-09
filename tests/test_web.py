@@ -1011,6 +1011,45 @@ class TestSelfHostedSearchIsTheDurableAnswer:
         assert "500" in said
         assert "formats" not in said and "limiter" not in said
 
+    @pytest.mark.parametrize("unresponsive", [
+        [["duckduckgo", "CAPTCHA"], ["brave", "timeout"]],
+        [{"engine": "duckduckgo", "error": "CAPTCHA"},
+         {"engine": "brave", "error": "timeout"}],
+        ["duckduckgo", "brave"],
+    ])
+    def test_no_results_because_every_engine_refused_says_which(self, monkeypatch,
+                                                                unresponsive):
+        """Reported: DuckDuckGo serving this box a captcha. SearXNG runs on the
+        same address, so an engine that has flagged the box flags it there too
+        — and "no results" and "every engine you asked is refusing you" arrive
+        as the same empty list with opposite answers.
+
+        Parametrised over the shapes SearXNG has used for this field across
+        versions, because a diagnostic that raises while explaining a failure
+        is worse than one that says less.
+        """
+        self.searx(monkeypatch, body=json.dumps(
+            {"results": [], "unresponsive_engines": unresponsive}))
+        said = str(pytest.raises(web.WebError, web.search, "anything", 3).value)
+        assert "duckduckgo" in said and "brave" in said
+        assert "no results" in said
+        assert "!brave" in said, "and what to try next"
+
+    def test_but_a_query_that_really_matched_nothing_is_still_an_answer(self, monkeypatch):
+        """No engine failed; the query simply found nothing. That must not be
+        dressed up as a fault."""
+        self.searx(monkeypatch, body=json.dumps(
+            {"results": [], "unresponsive_engines": []}))
+        assert web.search("zqxjkv", 3) == []
+
+    def test_and_results_arriving_despite_a_failed_engine_are_not_interrupted(self, monkeypatch):
+        """Which is the normal case once one engine has flagged this address:
+        the others answer, and the search worked."""
+        self.searx(monkeypatch, body=json.dumps(
+            {"results": [{"url": "https://ok.example/", "title": "fine"}],
+             "unresponsive_engines": [["duckduckgo", "CAPTCHA"]]}))
+        assert [h["url"] for h in web.search("anything", 3)] == ["https://ok.example/"]
+
 
 class TestReviewRegressions:
     """Cases found by the code review — each failed before its fix."""
@@ -1866,6 +1905,16 @@ class TestTheSearchBackendFallback:
         web.WebError("Timed out before the page could be fetched"),
         web.WebError("Could not fetch https://html.duckduckgo.com/html/: refused"),
         _MidPage(requests.exceptions.ChunkedEncodingError("connection broken")),
+        # _get does not convert these — it raises WebError for a deadline or a
+        # bad redirect and lets requests' own exceptions through from the
+        # socket. They are the commonest way an endpoint fails, and a guard
+        # that caught only WebError let every one of them skip the fallback.
+        # Seen for real: tools/check_web.py reporting a ProxyError from the
+        # first endpoint with the second never tried.
+        requests.exceptions.ConnectionError("Connection refused"),
+        requests.exceptions.ProxyError("Tunnel connection failed: 403 Forbidden"),
+        requests.exceptions.SSLError("certificate verify failed"),
+        requests.exceptions.ReadTimeout("read timed out"),
     ])
     def test_an_unreachable_first_endpoint_falls_through_too(self, duck, failure):
         """"Until one yields results" has to mean every way the first can fail.

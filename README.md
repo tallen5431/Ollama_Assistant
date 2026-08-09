@@ -508,6 +508,15 @@ answer. (If instead it says *"returned a page with no results in it"* with no
 challenge, that **is** a bug here — DuckDuckGo moved its markup, and it needs
 fixing in `web.py`.)
 
+Both endpoints report separately, and both being challenged means the address
+is flagged rather than one endpoint being unlucky. Run your own search — below.
+Note that SearXNG runs on the *same address*, so DuckDuckGo will refuse it
+there too; what fixes the search is the other engines answering, which is the
+whole reason to put a metasearch engine in front. When a SearXNG search comes
+back with nothing, the app now names the engines that refused it, so "nobody
+has written about this" and "everything I asked is refusing me" stop looking
+the same.
+
 ### Running your own search — the durable fix
 
 [SearXNG](https://docs.searxng.org/) is a metasearch engine: it queries the

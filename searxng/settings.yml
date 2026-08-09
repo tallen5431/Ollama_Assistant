@@ -30,11 +30,33 @@ search:
   # for looking things up, and the filter mostly gets in the way of that.
   safe_search: 0
 
-# Which engines answer. The default set is wide and includes several that are
-# slow or rate-limit quickly; these four are fast, need no key, and between
-# them cover general lookups well. Add more once it is working — `!goog query`
-# in the SearXNG web UI at http://127.0.0.1:8888 tries a single engine, which
-# is the quick way to find out which ones your address is welcome on.
+# Making sure these four are on. Not a restriction to these four, which is what
+# this block used to claim: with `use_default_settings: true` an `engines:`
+# block is *merged* into SearXNG's default list by name, so naming an engine
+# here changes that engine's settings and leaves every other default enabled.
+#
+# Which is the right outcome anyway, and worth understanding rather than
+# working around. The reason to run SearXNG at all is usually that one engine
+# has flagged your address — and SearXNG runs on that same address, so it will
+# be flagged there too. What saves the search is the *other* engines answering.
+# A wider set is the point; a failing engine costs a timeout, not the query.
+#
+# To genuinely narrow it later, SearXNG's own mechanism is:
+#
+#   use_default_settings:
+#     engines:
+#       keep_only:
+#         - duckduckgo
+#         - brave
+#
+# — replacing the plain `use_default_settings: true` above. Change one thing at
+# a time and check with tools/check_web.py, because a settings file SearXNG
+# will not parse means it does not start at all.
+#
+# `!brave query` in the SearXNG page at http://127.0.0.1:8888 asks a single
+# engine, which is the quick way to find out which ones your address is
+# welcome on. The app now names the engines that refused it whenever a search
+# comes back empty, which is the same question answered from the other side.
 engines:
   - name: duckduckgo
     disabled: false

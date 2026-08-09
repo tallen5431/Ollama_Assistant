@@ -804,7 +804,15 @@ def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
     for base, link_class, snippet_class in _DUCK_ENDPOINTS:
         try:
             resp = _get(base + quote(query), headers={"User-Agent": _SEARCH_UA})
-        except WebError as exc:
+        except (WebError, requests.RequestException) as exc:
+            # Both, because _get raises whichever the failure was: WebError for
+            # a deadline or a bad redirect, and requests' own exceptions
+            # straight through from the socket — a refused connection, a DNS
+            # failure, a TLS error, a proxy saying no. Catching only WebError
+            # left the commonest transport failures escaping the loop, which is
+            # the whole bug this guard exists for. Caught here rather than
+            # converted in _get, because fetch() reports the same failures with
+            # the URL in the message and that wording is worth keeping.
             empty.append(f"{_host_only(base)} could not be reached ({exc})")
             continue
         with resp:
@@ -940,6 +948,44 @@ def _search_searxng(base: str, query: str, limit: int) -> List[Dict[str, str]]:
                 "title": item.get("title") or item["url"],
                 "snippet": " ".join(str(item.get("content") or "").split())[:_SNIPPET_MAX],
             })
+    if not out:
+        # Nothing came back. SearXNG says in the same reply which engines
+        # failed it, and that is the difference between "nobody has written
+        # about this" and "every engine you asked is refusing you" — which look
+        # identical as an empty list and have opposite answers. It matters
+        # here in particular: SearXNG runs on the same address the app does,
+        # so an engine that has flagged this box flags it there too.
+        failed = _unresponsive(data)
+        if failed:
+            raise WebError(
+                "SearXNG returned no results and reported " + ", ".join(failed)
+                + ". Engines that answer for one address may refuse another; "
+                "try the query in SearXNG's own page at the URL in SEARXNG_URL, "
+                "with '!brave' or '!startpage' in front of it, to see which are "
+                "working from this box."
+            )
+    return out
+
+
+def _unresponsive(data: Dict[str, Any]) -> List[str]:
+    """The engines SearXNG says did not answer, as "name (reason)" strings.
+
+    Shape-tolerant on purpose: SearXNG has reported this field as a list of
+    pairs and as a list of objects across versions, and a diagnostic that
+    raises while explaining a failure is worse than one that says less.
+    """
+    out = []
+    for entry in data.get("unresponsive_engines") or []:
+        if isinstance(entry, (list, tuple)) and entry:
+            name = str(entry[0])
+            why = str(entry[1]) if len(entry) > 1 and entry[1] else ""
+        elif isinstance(entry, dict):
+            name = str(entry.get("engine") or entry.get("name") or "")
+            why = str(entry.get("error") or entry.get("reason") or "")
+        else:
+            name, why = str(entry), ""
+        if name:
+            out.append(f"{name} ({why})" if why else name)
     return out
 
 
