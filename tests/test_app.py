@@ -270,6 +270,46 @@ class TestBindHostResolution:
         assert app_module._resolve_bind_host("HOST=PORT") == "0.0.0.0"
 
 
+class TestTheBannerSaysWhichSearchBackendIsLive:
+    """"Did my SEARXNG_URL take?" was unanswerable without running a search and
+    reading the panel — and it is a real question, because SEARXNG_URL is set
+    where the server manager passes environment, not in the shell someone was
+    standing in. An export that never reached the app looks exactly like an app
+    that ignored it.
+    """
+
+    def banner(self, monkeypatch, env):
+        import contextlib
+        import io
+        import waitress
+
+        for key in ("SEARXNG_URL", "WEB_ENABLED"):
+            monkeypatch.delenv(key, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        # main() ends by serving forever. serve is imported inside main, so it
+        # is looked up on the module at call time and this replaces it.
+        monkeypatch.setattr(waitress, "serve", lambda *a, **k: None)
+        monkeypatch.setattr(app_module, "_resolve_bind_host", lambda h: "127.0.0.1")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            app_module.main()
+        return out.getvalue()
+
+    def test_it_names_a_configured_instance(self, monkeypatch):
+        said = self.banner(monkeypatch, {"SEARXNG_URL": "http://127.0.0.1:8888"})
+        assert "http://127.0.0.1:8888" in said
+
+    def test_and_says_duckduckgo_when_there_is_none(self, monkeypatch):
+        said = self.banner(monkeypatch, {})
+        assert "DuckDuckGo" in said
+        assert "SEARXNG_URL" in said, "and what to set"
+
+    def test_and_says_off_when_the_kill_switch_is_on(self, monkeypatch):
+        said = self.banner(monkeypatch, {"WEB_ENABLED": "0"})
+        assert "OFF" in said and "WEB_ENABLED" in said
+
+
 class TestReviewRegressions:
     """Cases found by the code review — each failed before its fix."""
 

@@ -641,22 +641,37 @@ state is the `settings.yml` you are mounting in.
 Check it came up with `docker logs searxng` — a container that exits
 immediately is almost always the secret key still being the default.
 
-Then come back up to the project root, point the app at it, and restart it:
+Then come back up to the project root and check it end to end, without opening
+the app (from there, because that is where the virtualenv is):
 
 ```bash
 cd ..
 export SEARXNG_URL=http://127.0.0.1:8888
-```
-
-Check it end to end without opening the app (from the project root, where the
-virtualenv is):
-
-```bash
 .venv/bin/python tools/check_web.py
 ```
 
 That names the backend it used and prints the results it got, so a pass means
 the whole path works.
+
+**That `export` only reaches this shell**, which is the last step people miss —
+the check passes while the app carries on scraping DuckDuckGo, and it looks
+like the app ignoring a setting rather than never receiving one. `Start.sh`
+does not read a `.env`; the environment comes from whatever starts the app, so
+put `SEARXNG_URL` where that does — the server manager's per-program
+environment for this card — and restart it.
+
+The app says which backend it has on startup, so you can tell the two apart at
+a glance:
+
+```
+  Web search   : http://127.0.0.1:8888
+```
+
+against
+
+```
+  Web search   : DuckDuckGo (no SEARXNG_URL — see the README)
+```
 
 **Two settings do all the work**, and a stock SearXNG has both wrong for this:
 

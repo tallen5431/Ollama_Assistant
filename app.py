@@ -54,6 +54,7 @@ from config import (
     get_photo_keep_days,
     get_photo_meta_default,
     get_planner_model,
+    get_search_url,
     get_server_threads,
     get_share_photo_location,
     get_vision_model,
@@ -1760,6 +1761,17 @@ def main() -> None:
     print(f"  Auth         : {'ON — Basic Auth required' if AUTH_ENABLED else 'OFF (LAN only)'}")
     if _AUTH_PROBLEM:
         print(f"  ⚠️  {_AUTH_PROBLEM}")
+    # Which search backend, because "did my SEARXNG_URL take?" is otherwise
+    # unanswerable without running a search and reading the panel. SEARXNG_URL
+    # is set where the server manager passes environment, not in the shell that
+    # started the container, and an export that never reached the app looks
+    # exactly like an app that ignored it.
+    if not web_enabled():
+        print("  Web          : OFF (WEB_ENABLED=0)")
+    elif get_search_url():
+        print(f"  Web search   : {get_search_url()}")
+    else:
+        print("  Web search   : DuckDuckGo (no SEARXNG_URL — see the README)")
     print("=" * 60)
 
     try:
