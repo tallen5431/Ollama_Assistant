@@ -10,7 +10,10 @@ itself.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import tempfile
 
 import chat_ui
 from conftest import page_script
@@ -312,6 +315,41 @@ class TestTheKeyboardReachesIt:
         js = page_script(self.page())
         at = js.index('if (e.key !== "Escape") return;')
         assert "!drawerEl.hidden && !railed()" in js[at:at + 300]
+
+
+class TestThePageSurvivesBeingAPythonString:
+    """The page is a triple-quoted Python string, so Python reads the escapes
+    before the browser ever sees them. Most survive; a dozen do not, and each
+    one that does not is silent. `\\b` in a regex becomes a backspace, `\\1`
+    becomes a control character, `\\n` becomes a real newline in the middle of
+    a regex literal — which is the one that at least breaks loudly.
+
+    Three of these shipped during one week's work. Catching them by reading is
+    not working; this catches them by running.
+    """
+
+    def scripts(self):
+        return re.findall(r"<script[^>]*>(.*?)</script>", page(), re.S)
+
+    def test_no_escape_was_eaten_on_the_way_through(self):
+        """A control character in the source is never what was meant: every
+        one of them got there by Python reading an escape the JavaScript
+        wanted kept."""
+        stray = {hex(ord(c)) for c in page() if ord(c) < 32 and c not in "\n\t"}
+        assert not stray, f"escapes were consumed by Python: {sorted(stray)}"
+
+    def test_every_block_of_it_parses(self):
+        """The head theme script and the app itself, both of them."""
+        assert len(self.scripts()) >= 2
+        for i, block in enumerate(self.scripts()):
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+                f.write(block)
+            try:
+                checked = subprocess.run(["node", "--check", f.name],
+                                         capture_output=True, text=True)
+            finally:
+                os.unlink(f.name)
+            assert checked.returncode == 0, f"script {i}: {checked.stderr}"
 
 
 class TestItRespectsALessMotionSetting:

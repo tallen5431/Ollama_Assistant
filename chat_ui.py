@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import html
 
-_PAGE = """<!doctype html>
+_PAGE = r"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -1069,51 +1069,51 @@ _PAGE = """<!doctype html>
       // A placeholder character that cannot appear in model output: esc()
       // strips it, and it is built here rather than written literally.
       const MD_SENTINEL = String.fromCharCode(1);
-      const MD_SLOT = new RegExp(MD_SENTINEL + "(\\\\d+)" + MD_SENTINEL, "g");
+      const MD_SLOT = new RegExp(MD_SENTINEL + "(\\d+)" + MD_SENTINEL, "g");
 
       // ---- Maths written as TeX ----
       // Models reach for LaTeX the moment an answer contains arithmetic, and
       // this page has no maths renderer: no build step and nothing from a CDN,
       // so KaTeX is not on the table for a handful of subtractions. Unwrapping
       // it into plain text gives what a person reads anyway — "68 / 3.13 ≈ 21.7"
-      // beats a raw \\frac on a phone, and beats it by a mile unrendered.
+      // beats a raw \frac on a phone, and beats it by a mile unrendered.
       const TEX_SYMBOLS = [
-        [/\\\\approx/g, "≈"], [/\\\\times/g, "×"], [/\\\\cdot/g, "·"],
-        [/\\\\div/g, "÷"], [/\\\\pm/g, "±"], [/\\\\mp/g, "∓"],
-        [/\\\\leq?\\b/g, "≤"], [/\\\\geq?\\b/g, "≥"], [/\\\\neq/g, "≠"],
-        [/\\\\rightarrow/g, "→"], [/\\\\to\\b/g, "→"], [/\\\\infty/g, "∞"],
-        [/\\\\degree|\\\\deg\\b/g, "°"],
+        [/\\approx/g, "≈"], [/\\times/g, "×"], [/\\cdot/g, "·"],
+        [/\\div/g, "÷"], [/\\pm/g, "±"], [/\\mp/g, "∓"],
+        [/\\leq?\b/g, "≤"], [/\\geq?\b/g, "≥"], [/\\neq/g, "≠"],
+        [/\\rightarrow/g, "→"], [/\\to\b/g, "→"], [/\\infty/g, "∞"],
+        [/\\degree|\\deg\b/g, "°"],
       ];
 
       function texToText(body) {
         let out = body;
-        // \\text{…} and its relatives are pure wrapping; \\frac wants to become a
+        // \text{…} and its relatives are pure wrapping; \frac wants to become a
         // division that reads left to right. Repeated because these nest.
         for (let pass = 0; pass < 4; pass++) {
-          out = out.replace(/\\\\(?:text|mathrm|mathbf|mathit|operatorname)\\s*\\{([^{}]*)\\}/g, "$1");
-          out = out.replace(/\\\\(?:d|t)?frac\\s*\\{([^{}]*)\\}\\s*\\{([^{}]*)\\}/g, "($1) / ($2)");
-          out = out.replace(/\\\\sqrt\\s*\\{([^{}]*)\\}/g, "√($1)");
+          out = out.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]*)\}/g, "$1");
+          out = out.replace(/\\(?:d|t)?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1) / ($2)");
+          out = out.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
         }
         for (const pair of TEX_SYMBOLS) out = out.replace(pair[0], pair[1]);
-        out = out.replace(/\\\\left|\\\\right/g, "")
-                 .replace(/\\\\[,;:!]/g, " ")
-                 .replace(/\\\\\\\\/g, " ")
-                 .replace(/\\\\([%$&#_{}])/g, "$1")
+        out = out.replace(/\\left|\\right/g, "")
+                 .replace(/\\[,;:!]/g, " ")
+                 .replace(/\\\\/g, " ")
+                 .replace(/\\([%$&#_{}])/g, "$1")
                  // Brackets the fraction rule added, dropped again where neither
                  // side needs them: "(68) / (3.13)" is worse than "68 / 3.13".
-                 .replace(/\\(([^()\\s]+)\\) \\/ \\(([^()\\s]+)\\)/g, "$1 / $2");
-        return out.replace(/\\s+/g, " ").trim();
+                 .replace(/\(([^()\s]+)\) \/ \(([^()\s]+)\)/g, "$1 / $2");
+        return out.replace(/\s+/g, " ").trim();
       }
 
       // Whether a $…$ pair is maths or two prices in one sentence. Both turn up
       // constantly and they look identical to a regex, so this leans on the one
       // convention TeX actually has: the delimiters hug their contents.
       function looksLikeMaths(body) {
-        // A backslash settles it — no price contains \\frac or \\approx.
-        if (body.indexOf("\\\\") >= 0) return true;
+        // A backslash settles it — no price contains \frac or \approx.
+        if (body.indexOf("\\") >= 0) return true;
         // "It cost $100,407 and then $5 more" — the span between the two signs
         // is prose, and prose ends in a space. TeX never opens or closes on one.
-        if (/^\\s|\\s$/.test(body)) return false;
+        if (/^\s|\s$/.test(body)) return false;
         // "$5-$10" is a price range: the span ends on the operator rather than
         // on something for it to operate on.
         if (/^[-+*/=<>,^_]|[-+*/=<>,^_]$/.test(body)) return false;
@@ -1124,14 +1124,14 @@ _PAGE = """<!doctype html>
 
       function unTex(t) {
         return t.replace(
-          /\\$\\$([\\s\\S]+?)\\$\\$|\\$([^$\\n]+?)\\$|\\\\\\(([\\s\\S]+?)\\\\\\)|\\\\\\[([\\s\\S]+?)\\\\\\]/g,
+          /\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$|\\\(([\s\S]+?)\\\)|\\\[([\s\S]+?)\\\]/g,
           function (whole, a, b, c, d) {
             const dollars = a !== undefined ? a : b;
             if (dollars !== undefined) {
               if (!looksLikeMaths(dollars)) return whole;
               return texToText(dollars);
             }
-            // \\( \\) and \\[ \\] say what they are; nothing else uses them.
+            // \( \) and \[ \] say what they are; nothing else uses them.
             return texToText(c !== undefined ? c : d);
           });
       }
@@ -1141,7 +1141,7 @@ _PAGE = """<!doctype html>
       // every time, and without this the whole grid came out as one paragraph
       // of pipes and dashes joined by <br> — which is how the odometer answer
       // arrived: correct numbers, unreadable layout.
-      const TABLE_DIVIDER_RE = /^\\s*\\|?(?:\\s*:?-{1,}:?\\s*\\|)+\\s*:?-{1,}:?\\s*\\|?\\s*$/;
+      const TABLE_DIVIDER_RE = /^\s*\|?(?:\s*:?-{1,}:?\s*\|)+\s*:?-{1,}:?\s*\|?\s*$/;
 
       function tableCells(line) {
         let row = line.trim();
@@ -1153,8 +1153,8 @@ _PAGE = """<!doctype html>
 
       function alignOf(spec) {
         const left = spec.slice(0, 1) === ":", right = spec.slice(-1) === ":";
-        if (left && right) return " style=\\"text-align:center\\"";
-        if (right) return " style=\\"text-align:right\\"";
+        if (left && right) return " style=\"text-align:center\"";
+        if (right) return " style=\"text-align:right\"";
         return "";
       }
 
@@ -1164,7 +1164,7 @@ _PAGE = """<!doctype html>
         // span gets eaten: `*args` rendered as an italic "args", and two spans
         // each containing `*` mis-nested tags across both of them.
         const spans = [];
-        let out = t.replace(/`([^`\\n]+)`/g, function (_, code) {
+        let out = t.replace(/`([^`\n]+)`/g, function (_, code) {
           spans.push(code);
           return MD_SENTINEL + (spans.length - 1) + MD_SENTINEL;
         });
@@ -1174,9 +1174,9 @@ _PAGE = """<!doctype html>
         // SELECT * FROM b" turns everything between two unrelated asterisks
         // into <em> and deletes both asterisks from the page.
         out = out
-          .replace(/\\*\\*([^\\s*][^*\\n]*[^\\s*]|[^\\s*])\\*\\*/g, "<strong>$1</strong>")
-          .replace(/(^|[^*\\w])\\*([^\\s*][^*\\n]*[^\\s*]|[^\\s*])\\*/g, "$1<em>$2</em>")
-          .replace(/\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g,
+          .replace(/\*\*([^\s*][^*\n]*[^\s*]|[^\s*])\*\*/g, "<strong>$1</strong>")
+          .replace(/(^|[^*\w])\*([^\s*][^*\n]*[^\s*]|[^\s*])\*/g, "$1<em>$2</em>")
+          .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
                    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
         return out.replace(MD_SLOT, function (_, i) {
           return "<code>" + spans[Number(i)] + "</code>";
@@ -1185,14 +1185,14 @@ _PAGE = """<!doctype html>
 
       // Walk the text line by line rather than deciding a whole blank-line
       // chunk's type at once. The chunk approach needed a blank line before
-      // every construct, so the very common "## Summary\\nText" and
-      // "Here are steps:\\n- one" rendered their markers literally.
+      // every construct, so the very common "## Summary\nText" and
+      // "Here are steps:\n- one" rendered their markers literally.
       function renderMarkdown(raw) {
-        // Split on any line ending, not just \\n. A stray \\r survives a plain
+        // Split on any line ending, not just \n. A stray \r survives a plain
         // split and then defeats every block pattern below, because "." does not
         // match a carriage return and "$" without the m flag only matches
         // end-of-input — so CRLF output rendered its markers literally.
-        const lines = esc(raw).split(/\\r\\n|\\r|\\n/);
+        const lines = esc(raw).split(/\r\n|\r|\n/);
         const out = [];
         let para = [];        // paragraph lines awaiting a <br>-joined <p>
         let list = null;      // { tag: "ul"|"ol", items: [], start: n }
@@ -1228,10 +1228,10 @@ _PAGE = """<!doctype html>
           const line = lines[ln];
           // A fence is only a fence at the start of a line — an inline triple
           // backtick mid-sentence used to swallow the rest of the reply.
-          const fenceMatch = line.match(/^\\s*```(.*)$/);
+          const fenceMatch = line.match(/^\s*```(.*)$/);
           if (fence) {
             if (fenceMatch) {
-              emitCode(fence.lang, fence.body.join("\\n"));
+              emitCode(fence.lang, fence.body.join("\n"));
               fence = null;
               // Prose after the closing fence used to be dropped on the floor:
               // the capture was matched and then never read.
@@ -1248,7 +1248,7 @@ _PAGE = """<!doctype html>
             // is a whole code block, not the start of one. Treating it as an
             // opener swallowed the rest of the reply into the block and painted
             // the command itself as the language badge.
-            const solo = line.match(/^\\s*```(.*?)```\\s*$/);
+            const solo = line.match(/^\s*```(.*?)```\s*$/);
             if (solo) {
               emitCode("", solo[1]);
               continue;
@@ -1261,7 +1261,7 @@ _PAGE = """<!doctype html>
 
           // A thematic break: three or more of the same mark on a line of its
           // own. It arrived as a literal "***" paragraph between two sections.
-          if (/^ {0,3}([-*_])(?:\\s*\\1){2,}\\s*$/.test(line)) {
+          if (/^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
             flushAll();
             out.push("<hr>");
             continue;
@@ -1302,7 +1302,7 @@ _PAGE = """<!doctype html>
             }
           }
 
-          const heading = line.match(/^ {0,3}(#{1,6})\\s+(.*)$/);
+          const heading = line.match(/^ {0,3}(#{1,6})\s+(.*)$/);
           if (heading) {
             flushAll();
             const level = Math.min(6, heading[1].length + 2);
@@ -1310,7 +1310,7 @@ _PAGE = """<!doctype html>
             continue;
           }
 
-          const bullet = line.match(/^\\s*[-*+]\\s+(.*)$/);
+          const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
           if (bullet) {
             flushPara(); flushQuote();
             if (!list || list.tag !== "ul") { flushList(); list = { tag: "ul", items: [], start: 1 }; }
@@ -1318,7 +1318,7 @@ _PAGE = """<!doctype html>
             continue;
           }
 
-          const numbered = line.match(/^\\s*(\\d+)[.)]\\s+(.*)$/);
+          const numbered = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
           // As CommonMark has it, an ordered list may only interrupt a running
           // paragraph when it starts at 1 — otherwise prose that wraps onto
           // "1908. It changed everything" turns into a list.
@@ -1334,7 +1334,7 @@ _PAGE = """<!doctype html>
             continue;
           }
 
-          const quoted = line.match(/^\\s*&gt;\\s?(.*)$/);
+          const quoted = line.match(/^\s*&gt;\s?(.*)$/);
           if (quoted) {
             flushPara(); flushList();
             quote.push(quoted[1]);
@@ -1354,7 +1354,7 @@ _PAGE = """<!doctype html>
 
         // An unterminated fence still renders as code — the reply was cut off,
         // not malformed, and showing it raw would be worse.
-        if (fence) emitCode(fence.lang, fence.body.join("\\n"));
+        if (fence) emitCode(fence.lang, fence.body.join("\n"));
         flushAll();
         return out.join("");
       }
@@ -1419,15 +1419,15 @@ _PAGE = """<!doctype html>
         // again, so the panel stays a list of one-liners until you want more.
         const extras = [];
         if (entry.text) extras.push(entry.text);
-        if (entry.system && entry.system.length) extras.push(entry.system.join("\\n\\n---\\n\\n"));
-        if (entry.urls && entry.urls.length) extras.push(entry.urls.join("\\n"));
+        if (entry.system && entry.system.length) extras.push(entry.system.join("\n\n---\n\n"));
+        if (entry.urls && entry.urls.length) extras.push(entry.urls.join("\n"));
         if (extras.length) {
           const more = document.createElement("details");
           more.className = "stepmore";
           const sum = document.createElement("summary");
           sum.textContent = "show";
           const body = document.createElement("pre");
-          body.textContent = extras.join("\\n\\n");
+          body.textContent = extras.join("\n\n");
           more.appendChild(sum); more.appendChild(body);
           row.appendChild(more);
         }
@@ -1437,7 +1437,7 @@ _PAGE = """<!doctype html>
       // Split assistant text into visible content + inline <think> reasoning.
       function splitThink(raw) {
         let content = "", thinking = "", last = 0, m;
-        const re = /<think>([\\s\\S]*?)(<\\/think>|$)/g;
+        const re = /<think>([\s\S]*?)(<\/think>|$)/g;
         while ((m = re.exec(raw))) {
           content += raw.slice(last, m.index);
           thinking += m[1];
@@ -1458,14 +1458,14 @@ _PAGE = """<!doctype html>
         // follows: a reply that is nothing but scratchpad is better shown whole
         // than blanked.
         if (!thinking) {
-          const orphan = content.match(/^[^\\S\\n]*<\\/think>[^\\S\\n]*$/m);
+          const orphan = content.match(/^[^\S\n]*<\/think>[^\S\n]*$/m);
           // Not inside a fenced code block. Ask a coder model what a reasoning
           // model's output looks like and it shows you one — tag on its own
           // line, inside ``` — and treating that as a real terminator threw
           // away the half of the reply that explained it. An odd number of
           // fences before the tag means we are inside one.
           const fenced = orphan &&
-            (content.slice(0, orphan.index).match(/^[^\\S\\n]*```/gm) || []).length % 2 === 1;
+            (content.slice(0, orphan.index).match(/^[^\S\n]*```/gm) || []).length % 2 === 1;
           if (orphan && orphan.index > 0 && !fenced) {
             const after = content.slice(orphan.index + orphan[0].length);
             if (after.trim()) {
@@ -1576,7 +1576,7 @@ _PAGE = """<!doctype html>
 
       function parseExif(view) {
         if (view.byteLength < 4 || view.getUint16(0) !== 0xffd8) return null;   // not a JPEG
-        // Walk the marker segments looking for APP1 with an "Exif\\0\\0" payload.
+        // Walk the marker segments looking for APP1 with an "Exif\0\0" payload.
         let offset = 2;
         while (offset + 4 <= view.byteLength) {
           if (view.getUint8(offset) !== 0xff) return null;   // desynchronised
@@ -2359,7 +2359,7 @@ _PAGE = """<!doctype html>
             if (step.done) break;
             buf += dec.decode(step.value, { stream: true });
             let at;
-            while ((at = buf.indexOf("\\n")) >= 0) {
+            while ((at = buf.indexOf("\n")) >= 0) {
               const raw = buf.slice(0, at).trim();
               buf = buf.slice(at + 1);
               if (!raw) continue;
@@ -2606,7 +2606,7 @@ _PAGE = """<!doctype html>
             if (done) break;
             buf += dec.decode(value, { stream: true });
             let nl;
-            while ((nl = buf.indexOf("\\n")) >= 0) {
+            while ((nl = buf.indexOf("\n")) >= 0) {
               const line = buf.slice(0, nl).trim();
               buf = buf.slice(nl + 1);
               if (!line) continue;
@@ -2923,7 +2923,7 @@ _PAGE = """<!doctype html>
           del.textContent = "✕"; del.title = "Delete";
           del.addEventListener("click", async function (e) {
             e.stopPropagation();
-            if (!confirm("Delete \\"" + convo.title + "\\"?")) return;
+            if (!confirm("Delete \"" + convo.title + "\"?")) return;
             await fetch("api/conversations/" + convo.id, { method: "DELETE" });
             if (convo.id === currentConvoId) newChat();
             refreshConversations();
@@ -3084,7 +3084,7 @@ _PAGE = """<!doctype html>
       }
 
       async function forgetPhotosNow(btn, days) {
-        if (!confirm("Drop stored photos older than " + days + " days?\\n\\n" +
+        if (!confirm("Drop stored photos older than " + days + " days?\n\n" +
                      "Every message, reply and record is kept — only the " +
                      "pictures go, and only from conversations older than that.")) return;
         btn.disabled = true; btn.textContent = "Working…";
@@ -3312,7 +3312,7 @@ _PAGE = """<!doctype html>
         // matters most.
         const typed = inputEl.value.trim();
         pendingRoutine.inserted = routine.body;
-        inputEl.value = typed ? routine.body + "\\n\\n" + typed : routine.body;
+        inputEl.value = typed ? routine.body + "\n\n" + typed : routine.body;
         autosize();
         renderRoutineChips();
         routineProgress();
@@ -3340,7 +3340,7 @@ _PAGE = """<!doctype html>
         const inserted = pendingRoutine.inserted;
         if (inserted && inputEl.value.indexOf(inserted) === 0) {
           let rest = inputEl.value.slice(inserted.length);
-          if (rest.slice(0, 2) === "\\n\\n") rest = rest.slice(2);
+          if (rest.slice(0, 2) === "\n\n") rest = rest.slice(2);
           inputEl.value = rest;
           autosize();
         }
