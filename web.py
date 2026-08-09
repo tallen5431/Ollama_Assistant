@@ -1499,6 +1499,8 @@ _DISTIL_MAX_CHARS = 1400
 # A reasoning model's own block, at the front of the reply and properly closed.
 # Anchored and non-greedy on purpose — see the note where it is used.
 _LEADING_THINK_RE = re.compile(r"\A\s*<think>.*?</think>", re.S | re.I)
+# A scratchpad that was opened and never closed: the whole reply is thinking.
+_OPEN_THINK_RE = re.compile(r"\A\s*<think(ing)?>", re.I)
 
 
 def distil(question: str, doc: Dict[str, str], model: str,
@@ -1555,15 +1557,60 @@ def distil(question: str, doc: Dict[str, str], model: str,
     # distiller had copied before it, and one containing "<think>" would delete
     # everything after. That is a page choosing what the answering model sees.
     said = _LEADING_THINK_RE.sub("", reply or "", count=1).strip()
+    # A scratchpad that never closed is the whole reply — the shape a reasoning
+    # model produces when it runs out of budget mid-thought. Handing that over
+    # as the page, under a label saying it was copied from the page, is the
+    # worst outcome available: invented text presented as quotation.
+    if _OPEN_THINK_RE.match(said):
+        logger.warning("Distiller (%s) returned an unclosed scratchpad; keeping "
+                       "the page whole", model)
+        return None
     if not said:
         # Silence is not "nothing relevant" — it is a model that did not
         # answer, and guessing which would throw the page away on a bad reply.
         return None
     if said.upper().startswith(DISTIL_NOTHING):
         return _NOTHING_SAID
+    # It was asked to copy, so what comes back should be findable in what it
+    # was given. A 1-4B model — which is what this is for — answers a medical
+    # or legal page with "I'm sorry, I can't assist with that", or opens with
+    # "Here are the relevant sentences:" and stops. Both are non-empty, neither
+    # starts with NOTHING RELEVANT, and both would replace six thousand
+    # characters of page with themselves — losing the page while the panel
+    # reported it as a saving and the context labelled it a verbatim copy.
+    #
+    # Checking it came from the page is exact for that, because a real
+    # extraction *is* the page's own sentences.
+    if not _looks_copied(said, text):
+        logger.warning("Distiller (%s) answered %s with something not in the "
+                       "page; keeping it whole", model, doc.get("url"))
+        return None
     if len(said) > _DISTIL_MAX_CHARS:
         said = said[:_DISTIL_MAX_CHARS].rsplit(" ", 1)[0] + " …[truncated]"
     return said
+
+
+# How much of the reply has to be findable in the page. Not all of it: a model
+# joining two paragraphs, or dropping a stray footnote marker between them, is
+# doing the job. A refusal shares nothing with the page and scores zero.
+_COPIED_ENOUGH = 0.5
+# Below this a fragment is too short to mean anything — "Yes." appears in
+# almost any page — so it is neither counted for nor against.
+_FRAGMENT_MIN = 12
+
+
+def _looks_copied(said: str, page: str) -> bool:
+    """Is this reply made of the page's own sentences?"""
+    flat = " ".join((page or "").split()).lower()
+    pieces = [" ".join(p.split()).lower()
+              for p in re.split(r"(?<=[.!?])\s+|\n+", said or "")]
+    weighed = [p for p in pieces if len(p) >= _FRAGMENT_MIN]
+    if not weighed:
+        # All of it too short to judge piecewise; judge it whole.
+        whole = " ".join((said or "").split()).lower()
+        return bool(whole) and whole in flat
+    kept = sum(len(p) for p in weighed if p in flat)
+    return kept >= sum(len(p) for p in weighed) * _COPIED_ENOUGH
 
 
 _OCR_PREAMBLE = (

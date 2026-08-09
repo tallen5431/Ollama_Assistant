@@ -411,10 +411,14 @@ carrying a citation is worse than no number.
 
 Four things it will not do:
 
-- **Lose a page.** If the distiller can't be reached, times out, or returns
-  nothing, that page keeps its full text and the panel says how many were kept
-  in full. A summariser that can lose information is a worse bug than a long
-  context.
+- **Lose a page.** If the distiller can't be reached, times out, returns
+  nothing, or returns something that didn't come from the page, that page keeps
+  its full text and the panel says how many were kept in full. A summariser
+  that can lose information is a worse bug than a long context. The
+  came-from-the-page check matters more than it sounds: a 1–4B model handed a
+  medical or legal page answers "I'm sorry, I can't assist with that", and that
+  is non-empty, so it would otherwise replace six thousand characters of page
+  with itself — while the panel reported the loss as a saving.
 - **Mix pages up.** Each page keeps its own distillation even when some
   succeed and others fail — a citation pointing at the wrong source is worse
   than no citation.

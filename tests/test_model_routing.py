@@ -169,6 +169,20 @@ class TestLookingBeforeSearching:
         import app
         assert app._reads_as_text(said) is True
 
+    def test_a_reading_that_talks_about_missing_text_is_still_a_reading(self):
+        """A screenshot of a form error is a transcription of a page that
+        happens to be *about* missing text. Matching the phrase anywhere threw
+        it away — it is a denial only when removing it leaves nothing."""
+        import app
+        assert app._reads_as_text(
+            "Validation failed: no text entered in the Name field. "
+            "Please complete every required box before saving.") is True
+
+    def test_but_every_image_saying_it_still_counts_as_nothing(self):
+        import app
+        assert app._reads_as_text(
+            "[image 1] No text.\n[image 2] There is no text visible.") is False
+
     def test_a_no_text_sentence_is_not_text_however_long(self):
         """The length rule alone reads "there is no text in this image" — a
         perfectly ordinary sentence — as thirty characters of findings."""

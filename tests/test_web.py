@@ -1678,8 +1678,11 @@ class TestCuttingAPageDownToTheQuestion:
 
         monkeypatch.setattr(ollama_client, "chat", fake_chat)
 
-    DOC = {"url": "https://x.dev/a", "title": "Widget 5",
-           "text": "Menu. Cookies. Widget 5 shipped on Tuesday. Newsletter. Footer."}
+    # The reply has to be findable in this, because the distiller is told to
+    # copy rather than write — so the fixtures quote it.
+    PAGE = ("Menu. Cookies. Widget 5 shipped on Tuesday. It costs 40. "
+            "A table follows. Newsletter. Footer.")
+    DOC = {"url": "https://x.dev/a", "title": "Widget 5", "text": PAGE}
 
     def test_what_it_copied_is_what_comes_back(self, monkeypatch):
         self.rig(monkeypatch, "Widget 5 shipped on Tuesday.")
@@ -1712,10 +1715,53 @@ class TestCuttingAPageDownToTheQuestion:
 
     def test_a_distiller_that_echoes_the_page_is_capped(self, monkeypatch):
         """Ignoring the instruction and handing the page back undoes the whole
-        point of the exercise, so the length is not left to good behaviour."""
-        self.rig(monkeypatch, "word " * 4000)
-        got = web.distil("q", self.DOC, "small:1b")
+        point of the exercise, so the length is not left to good behaviour.
+        The echo passes the copied-from-the-page check by construction — it is
+        the page — which is exactly why the cap has to exist as well."""
+        page = "Widget 5 shipped on Tuesday. " * 300
+        self.rig(monkeypatch, page)
+        got = web.distil("q", dict(self.DOC, text=page), "small:1b")
         assert len(got) < 1500 and got.endswith("…[truncated]")
+
+    @pytest.mark.parametrize("reply, why", [
+        ("I'm sorry, I can't assist with that.", "a refusal"),
+        ("Here are the relevant sentences:", "a preamble with nothing after it"),
+        ("Sure! Let me help you with that.", "an assistant noise"),
+        ("Widget 5 was released in 2023 and costs fifty dollars.", "answered from memory"),
+    ])
+    def test_a_reply_that_did_not_come_from_the_page_keeps_the_page(
+            self, monkeypatch, reply, why):
+        """The models this is for are 1-4B, and these are what they do on a
+        medical or legal page. Every one is non-empty and none starts with
+        NOTHING RELEVANT, so all four used to replace six thousand characters
+        of page with themselves — losing the page while the panel reported it
+        as a saving and the context called it a verbatim copy.
+        """
+        self.rig(monkeypatch, reply)
+        assert web.distil("q", self.DOC, "small:1b") is None, why
+
+    def test_but_joining_the_page_s_own_sentences_is_fine(self, monkeypatch):
+        """Extraction is not transcription: dropping a footnote marker or
+        running two paragraphs together is the job being done, not failed."""
+        self.rig(monkeypatch, "Widget 5 shipped on Tuesday. It costs 40.")
+        assert web.distil("q", self.DOC, "small:1b") == \
+            "Widget 5 shipped on Tuesday. It costs 40."
+
+    def test_a_scratchpad_that_never_closed_is_not_the_page(self, monkeypatch):
+        """The shape a reasoning model returns when it runs out of budget
+        mid-thought. Handing that over labelled "copied from the page" is
+        invented text presented as quotation."""
+        self.rig(monkeypatch, "<think>Let me find the price. The page mentions")
+        assert web.distil("q", self.DOC, "small:1b") is None
+
+    def test_even_when_it_is_mostly_quoting_the_page(self, monkeypatch):
+        """A reasoning model reads by quoting, so its scratchpad is largely the
+        page's own sentences — which is exactly what the copied-from-the-page
+        check is looking for. The two guards catch different things."""
+        self.rig(monkeypatch,
+                 "<think>\nWidget 5 shipped on Tuesday.\nIt costs 40.\n"
+                 "A table follows.\nSo the price is")
+        assert web.distil("q", self.DOC, "small:1b") is None
 
     def test_an_empty_page_is_not_worth_a_model_call(self, monkeypatch):
         called = []
@@ -1802,11 +1848,12 @@ class TestCuttingAPageDownToTheQuestion:
         assert "PAGE (Widget 5)" not in shown
 
     @pytest.mark.parametrize("reply, expected", [
-        ("<think>which bits</think>Widget 5 shipped.", "Widget 5 shipped."),
-        ("Widget 5 shipped.\n</think>\nIt costs 40.",
-         "Widget 5 shipped.\n</think>\nIt costs 40."),
-        ("Widget 5 shipped.\n<think>\nA table follows.",
-         "Widget 5 shipped.\n<think>\nA table follows."),
+        ("<think>which bits</think>Widget 5 shipped on Tuesday.",
+         "Widget 5 shipped on Tuesday."),
+        ("Widget 5 shipped on Tuesday.\n</think>\nIt costs 40.",
+         "Widget 5 shipped on Tuesday.\n</think>\nIt costs 40."),
+        ("Widget 5 shipped on Tuesday.\n<think>\nA table follows.",
+         "Widget 5 shipped on Tuesday.\n<think>\nA table follows."),
     ])
     def test_a_tag_in_the_page_does_not_delete_what_was_copied(
             self, monkeypatch, reply, expected):

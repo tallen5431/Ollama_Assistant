@@ -1092,11 +1092,13 @@ def _gather_web(
             reader, is_reader_ocr = _image_reader(model)
             if reader:
                 yield _line({"status": "Reading the image…" if is_reader_ocr else "Looking at the image…"})
+                read_failed = False
                 try:
                     image_note = web.read_images(images, reader, ocr=is_reader_ocr,
                                                  answering_model=model)
                 except web.ReadFailed as exc:
                     # Planning without the image beats not answering.
+                    read_failed = True
                     logger.warning("Image read via %s failed: %s", reader, exc)
                     yield _line({"status": "Could not read the image; searching without it."})
                     yield _step("Read the image for search", f"{reader} failed: {exc}")
@@ -1127,9 +1129,16 @@ def _gather_web(
                             yield _step("Looked at the image instead",
                                         f"{describer} failed: {exc}")
                         else:
+                            # Say which of the two happened. This block also
+                            # runs after the read *failed*, where "no text to
+                            # transcribe" contradicts the line above it — the
+                            # panel said glm-ocr had fallen over and then that
+                            # there was nothing in the image to transcribe.
+                            why = (f"{reader} could not be asked" if read_failed
+                                   else "no text to transcribe")
                             yield _step(
                                 "Looked at the image instead",
-                                f"no text to transcribe, so {describer} described it",
+                                f"{why}, so {describer} described it",
                                 text=image_note or "(nothing came back)")
             else:
                 yield _step("Read the image for search",
@@ -1262,9 +1271,26 @@ def _distil_documents(question: str, documents: List[Dict[str, str]],
         "Distilled",
         f"{distiller}: {sum(before)} → {sum(after)} characters"
         + (f"; {kept} page(s) kept in full because it could not be asked" if kept else ""),
+        # Bounded, like every other step that carries bulk text ("Sent to the
+        # model" slices 2000, the image reads 600). This one showed each page's
+        # text whole — and on the path where the distiller could not be asked,
+        # "whole" is the untouched page. Three of those is ~18 KB streamed to
+        # the browser and written into chat.db on every web turn, on exactly
+        # the turns where distilling achieved nothing.
         text="\n\n".join(
-            f"{d.get('url', '')}\n{b} → {a} chars\n{d.get('text') or ''}"
+            f"{d.get('url', '')}\n{b} → {a} chars\n{_clipped(d.get('text') or '')}"
             for d, b, a in zip(pages, before, after)))
+
+
+# Enough of a distillation to judge it by, which is the panel's whole job. A
+# page kept in full is far longer than this and does not need showing twice.
+_PANEL_TEXT_MAX = 1500
+
+
+def _clipped(text: str) -> str:
+    if len(text) <= _PANEL_TEXT_MAX:
+        return text
+    return text[:_PANEL_TEXT_MAX].rsplit(" ", 1)[0] + " …[shown in part]"
 
 
 def _read_images_for(model: str, images: List[str], reader: str,
@@ -1297,9 +1323,17 @@ def _read_images_for(model: str, images: List[str], reader: str,
             describer = _describing_model(model)
             if describer:
                 yield _line({"status": f"No text in it — looking at it with {describer}…"})
-                transcript = web.read_images(images, describer, ocr=False,
-                                             answering_model=model)
-                describing = True
+                # Its own guard. Inside the outer one, a describer that OOMs —
+                # routine when a 30b holds the GPU — landed in the handler
+                # below, which blames `reader` and returns image_failed_context:
+                # the wrong model named, and a transcription that worked thrown
+                # away. Failing here just means keeping what OCR gave.
+                try:
+                    transcript = web.read_images(images, describer, ocr=False,
+                                                 answering_model=model)
+                    describing = True
+                except web.ReadFailed as exc:
+                    logger.warning("Image description via %s failed: %s", describer, exc)
         yield _step("Read the image",
                     f"{reader} ({'description' if describing else 'OCR'})",
                     text=transcript or "(nothing came back)")
@@ -1358,11 +1392,19 @@ def _reads_as_text(note: Optional[str]) -> bool:
 
 
 def _one_reading_is_text(said: str) -> bool:
-    low = said.lower()
-    if any(phrase in low for phrase in _NO_TEXT_SAID):
-        return False
+    # Take the denial out and judge what is left. Matching "no text" anywhere
+    # discarded a screenshot of a form error reading "Validation failed: no
+    # text entered in the Name field. Please complete every required box" —
+    # a perfectly good transcription of a page that happens to be *about*
+    # missing text — and replaced that error string with prose describing a
+    # screenshot. It is a denial only when removing it leaves nothing behind.
+    left = " ".join(part for part in _SENTENCE_SPLIT.split(said)
+                    if not any(p in part.lower() for p in _NO_TEXT_SAID))
     # Punctuation and stray marks off a collar tag are not a search query.
-    return sum(ch.isalnum() for ch in said) >= 12
+    return sum(ch.isalnum() for ch in left) >= 12
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
 def _image_reader(answering_model: str) -> Any:

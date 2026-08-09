@@ -8,6 +8,7 @@ and source lines the UI renders.
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -648,6 +649,73 @@ class TestLookingAtThePhotoBeforeSearchingForIt:
         asked = " ".join(m["content"] for m in planner["messages"])
         assert "Jack Russell terrier" in asked
 
+    def test_a_describer_failing_does_not_blame_the_model_that_worked(self, rig, monkeypatch):
+        """The second read used to sit inside the first one's try, so a
+        describer OOM — routine when a 30b holds the GPU — was reported as the
+        OCR model failing, and the transcription that had worked was thrown
+        away with it."""
+        monkeypatch.setattr(app_module, "_model_has_vision", lambda m: False)
+        monkeypatch.setattr(app_module, "_image_reader", lambda m: ("glm-ocr:latest", True))
+        monkeypatch.setattr(app_module, "_describing_model", lambda m: "qwen2.5vl:3b")
+
+        def read(images, model, ocr=False, answering_model=""):
+            if ocr:
+                return "No text visible."
+            raise web.ReadFailed("out of memory")
+
+        monkeypatch.setattr(web, "read_images", read)
+        out = [json.loads(l) for l in rig["client"].post("/api/chat", json={
+            "model": "llama3.1:8b", "web": True,
+            "messages": [{"role": "user", "content": "what is this",
+                          "images": [self.PNG]}]}).get_data(as_text=True).splitlines() if l.strip()]
+        steps = [o["debug"] for o in out if "debug" in o]
+        read_step = [x for x in steps if x.get("step") == "Read the image"]
+        assert read_step, steps
+        assert "glm-ocr:latest failed" not in read_step[0]["detail"], \
+            "the model that worked was blamed for the one that did not"
+
+    def test_a_failed_transcription_is_not_reported_as_an_empty_image(self, rig, monkeypatch):
+        """The second look also runs after the read failed, where "no text to
+        transcribe" contradicts the line directly above it saying the reader
+        fell over."""
+        monkeypatch.setattr(app_module, "_image_reader", lambda m: ("glm-ocr:latest", True))
+        monkeypatch.setattr(app_module, "_describing_model", lambda m: "qwen3-vl:30b")
+
+        def read(images, model, ocr=False, answering_model=""):
+            if ocr:
+                raise web.ReadFailed("out of memory")
+            return "A tan and white terrier."
+
+        monkeypatch.setattr(web, "read_images", read)
+        out = [json.loads(l) for l in rig["client"].post("/api/chat", json={
+            "model": "qwen3-vl:30b", "web": True,
+            "messages": [{"role": "user", "content": "what is this",
+                          "images": [self.PNG]}]}).get_data(as_text=True).splitlines() if l.strip()]
+        steps = [o["debug"] for o in out if "debug" in o]
+        looked = [x for x in steps if x.get("step") == "Looked at the image instead"]
+        assert looked, steps
+        assert "could not be asked" in looked[0]["detail"]
+        assert "no text to transcribe" not in looked[0]["detail"]
+
+    def test_a_reading_that_mentions_missing_text_is_still_a_reading(self, rig, monkeypatch):
+        """A screenshot of a form error saying "no text entered in the Name
+        field" is a transcription of a page that happens to talk about missing
+        text — and matching the phrase anywhere threw it away, then replaced
+        the error string with prose about a screenshot."""
+        calls = []
+        monkeypatch.setattr(app_module, "_image_reader", lambda m: ("glm-ocr:latest", True))
+        monkeypatch.setattr(app_module, "_describing_model", lambda m: "qwen3-vl:30b")
+        monkeypatch.setattr(web, "read_images",
+                            lambda images, model, ocr=False, answering_model="":
+                            calls.append((model, ocr)) or
+                            ("Validation failed: no text entered in the Name field. "
+                             "Please complete every required box before saving."))
+        rig["client"].post("/api/chat", json={
+            "model": "qwen3-vl:30b", "web": True,
+            "messages": [{"role": "user", "content": "why will it not save?",
+                          "images": [self.PNG]}]}).get_data()
+        assert calls == [("glm-ocr:latest", True)], calls
+
     def test_one_blank_photo_does_not_discard_the_others(self, rig, monkeypatch):
         """Several images come back joined as "[image 1] ... [image 2] ...". A
         screenshot of a stack trace beside a photo of the hardware must not
@@ -856,6 +924,67 @@ class TestDistillingPagesBeforeTheyReachTheModel:
             {"role": "user", "content": f"summarise {rig['site_url']}"}]}).get_data()
         assert not asked, "the page the user chose was cut down anyway"
         assert "Widget 5 shipped on Tuesday" in self.system_turn(rig)
+
+    def test_a_snippet_is_skipped_in_a_turn_that_does_distil(self, rig, monkeypatch):
+        """The other snippet test has nothing to distil, so a filter that let
+        snippets through would still pass it. This one has one of each."""
+        monkeypatch.setenv("WEB_DISTILLER_MODEL", "small:1b")
+        asked = []
+        monkeypatch.setattr(web, "distil",
+                            lambda q, doc, model, **kw: asked.append(doc["url"]) or "cut down")
+        good, dead = rig["site_url"], "https://dead.example/x"
+        monkeypatch.setattr(web, "search", lambda q, limit=3: [
+            {"url": good, "title": "Widget 5"},
+            {"url": dead, "title": "Dead", "snippet": "A lead about widgets."}])
+        real_fetch = web.fetch
+        monkeypatch.setattr(web, "fetch", lambda url: (
+            real_fetch(url) if url == good
+            else (_ for _ in ()).throw(web.WebError("gone"))))
+        out = self.ask(rig)
+        assert asked == [good], f"a snippet was distilled: {asked}"
+        system = self.system_turn(rig)
+        assert "cut down" in system, "the real page was not distilled"
+        assert "A lead about widgets." in system, "the snippet was lost"
+        step = [x for x in self.steps(out) if x.get("step") == "Distilled"][0]
+        assert "kept in full" not in step["detail"], step["detail"]
+
+    def test_the_numbers_in_the_panel_are_the_real_ones(self, rig, monkeypatch):
+        """Asserting only that it contains an arrow passes against a step that
+        reports the same number twice, or reports the wrong pages."""
+        monkeypatch.setenv("WEB_DISTILLER_MODEL", "small:1b")
+        monkeypatch.setattr(web, "distil", lambda q, doc, model, **kw: "ten chars")
+        step = [x for x in self.steps(self.ask(rig)) if x.get("step") == "Distilled"][0]
+        got = re.search(r"(\d+) → (\d+) characters", step["detail"])
+        assert got, step["detail"]
+        before, after = int(got.group(1)), int(got.group(2))
+        assert after == len("ten chars"), step["detail"]
+        assert before > after, step["detail"]
+
+    def test_the_panel_does_not_carry_a_whole_page_per_turn(self, rig, monkeypatch):
+        """It is streamed to the browser and written into chat.db. On the path
+        where the distiller could not be asked, "the text" is the untouched
+        page — so the step shipped the whole corpus on exactly the turns where
+        distilling achieved nothing."""
+        monkeypatch.setenv("WEB_DISTILLER_MODEL", "small:1b")
+        monkeypatch.setattr(web, "distil", lambda q, doc, model, **kw: None)
+        monkeypatch.setattr(web, "fetch", lambda url: {
+            "url": url, "requested": url, "links": [], "title": "Big",
+            "text": "Widget 5 shipped on Tuesday. " * 300})
+        step = [x for x in self.steps(self.ask(rig)) if x.get("step") == "Distilled"][0]
+        assert len(step.get("text", "")) < 3000, len(step.get("text", ""))
+        assert "…[shown in part]" in step["text"]
+
+    def test_the_distiller_is_told_which_model_is_answering(self, rig, monkeypatch):
+        """So a helper that is not the answering model lets go of the GPU the
+        moment it replies, instead of holding it for Ollama's five minutes."""
+        monkeypatch.setenv("WEB_DISTILLER_MODEL", "small:1b")
+        seen = {}
+        monkeypatch.setattr(web, "distil", lambda q, doc, model, **kw:
+                            seen.update(kw) or "cut")
+        rig["client"].post("/api/chat", json={
+            "model": "qwen3-coder:30b", "web": True,
+            "messages": [{"role": "user", "content": "what is widget 5?"}]}).get_data()
+        assert seen.get("answering_model") == "qwen3-coder:30b"
 
     def test_it_is_given_the_question_it_is_cutting_the_page_down_to(self, rig, monkeypatch):
         monkeypatch.setenv("WEB_DISTILLER_MODEL", "small:1b")
