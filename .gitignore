@@ -7,3 +7,10 @@ models/
 chat.db
 chat.db-wal
 chat.db-shm
+
+# The directory SearXNG's container is given. It chowns whatever it is handed
+# to its own user — which is what cap_add: CHOWN in the compose file is for —
+# so it must not be a directory git also manages. Mounting the checkout there
+# made `git pull` fail with "unable to unlink old" and `sed -i` fail with
+# "couldn't open temporary file", on a box where nothing had gone wrong.
+searxng/config/

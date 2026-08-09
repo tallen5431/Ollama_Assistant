@@ -10,6 +10,7 @@ a container spec are exactly the thing that drifts apart in silence.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,7 @@ class TestTheComposeFreeFallbackIsTheSameContainer:
         ("image", r"image:\s*(\S+)"),
         ("port mapping", r"ports:\s*\n\s*-\s*\"?([\d.]+:\d+:\d+)\"?"),
         ("base URL", r"(SEARXNG_BASE_URL=\S+)"),
-        ("mount point", r"-\s*\./:(\S+)"),
+        ("mount point", r"-\s*\./config:(\S+)"),
     ])
     def test_the_settings_that_matter_agree(self, what, pattern):
         found = re.search(pattern, COMPOSE)
@@ -81,16 +82,59 @@ class TestTheStepsCanBeFollowedInOrder:
         window = README[start:start + 700]
         assert "openssl rand" not in window, "openssl is not on every box"
         assert "secrets.token_hex" in window
-        assert "grep secret_key settings.yml" in window, \
+        assert "grep secret_key config/settings.yml" in window, \
             "the result has to be checked, not the command trusted"
 
-    def test_the_tracked_config_trap_is_written_down(self):
-        """settings.yml is tracked, so an update can put the default key back
-        and stop a working instance — with the reason only in docker logs."""
+    def test_the_ownership_symptoms_are_named_next_to_the_cause(self):
+        """The container chowns what it is mounted, so handing it the checkout
+        made git and sed fail on a box where nothing had gone wrong. Those two
+        messages are a long way from their cause, and they are what someone
+        arrives with."""
         start = README.index("cd searxng")
-        window = README[start:start + 1400]
-        assert "tracked in this repository" in window
-        assert "git pull" in window
+        window = README[start:start + 2000]
+        assert "couldn't open temporary file" in window
+        assert "unable to unlink old" in window
+        assert "chown -R" in window, "and the way out"
+
+
+class TestTheContainerIsNotGivenTheCheckout:
+    """SearXNG chowns whatever it is handed to its own user — which is what the
+    CHOWN capability in the compose file is for. Given the working tree it took
+    ownership of tracked files, and the failures land nowhere near the cause:
+
+        sed: couldn't open temporary file ./sedv5wFbs: Permission denied
+        error: unable to unlink old 'searxng/settings.yml': Permission denied
+
+    So the mounted directory has to be one git does not manage, and this is the
+    structural half of that — the arrangement, not the prose describing it.
+    """
+
+    def test_the_live_config_is_not_tracked_but_the_example_is(self):
+        listed = subprocess.run(["git", "ls-files", "searxng/"], cwd=ROOT,
+                                capture_output=True, text=True)
+        if listed.returncode != 0:
+            pytest.skip("not a git checkout")
+        tracked = set(listed.stdout.split())
+        assert "searxng/settings.yml.example" in tracked, \
+            "there has to be something to copy from"
+        assert "searxng/settings.yml" not in tracked, \
+            "the file the container takes ownership of must not be tracked"
+
+    def test_the_mount_point_is_gitignored(self):
+        ignored = (ROOT / ".gitignore").read_text()
+        assert "searxng/config/" in ignored, \
+            "the directory the container owns must not be one git manages"
+
+    @pytest.mark.parametrize("spec", [
+        "./config:/etc/searxng:rw",     # compose
+        '"$PWD/config:/etc/searxng:rw"',  # the docker run fallback
+    ])
+    def test_both_ways_of_starting_it_mount_that_directory(self, spec):
+        assert spec in COMPOSE or spec in README, spec
+
+    def test_and_neither_mounts_the_directory_above_it(self):
+        assert "- ./:/etc/searxng" not in COMPOSE
+        assert '-v "$PWD:/etc/searxng' not in README
 
     @pytest.mark.parametrize("error", [
         # No compose v2 plugin: the -d never reaches a compose that would

@@ -526,8 +526,9 @@ a working config are in [`searxng/`](searxng/):
 
 ```bash
 cd searxng
-sed -i "s|ultrasecretkey|$(python3 -c 'import secrets;print(secrets.token_hex(32))')|" settings.yml
-grep secret_key settings.yml    # must be 64 hex characters, not "ultrasecretkey"
+mkdir -p config && cp settings.yml.example config/settings.yml
+sed -i "s|ultrasecretkey|$(python3 -c 'import secrets;print(secrets.token_hex(32))')|" config/settings.yml
+grep secret_key config/settings.yml   # must be 64 hex characters, not "ultrasecretkey"
 docker compose up -d
 ```
 
@@ -537,11 +538,27 @@ everywhere, and `$(openssl …)` on a box without it expands to nothing and the
 trusting the command — SearXNG refuses to start on the default key, and the
 container then restart-loops with the reason only in `docker logs searxng`.
 
-> **`settings.yml` is tracked in this repository**, so a `git pull` that
-> touches it can put the default key back and stop a working instance. If
-> search breaks after an update, this is the first thing to check. Keeping your
-> own copy outside the repo and mounting that instead avoids it entirely —
-> the container only cares about what is at `/etc/searxng/settings.yml`.
+**`config/` is the directory the container is given, and it must not be one git
+manages.** SearXNG chowns whatever it is handed to its own user — that is what
+`cap_add: CHOWN` is for — so an earlier version of these instructions, which
+mounted the checkout itself, ended with the container owning tracked files.
+The symptoms are a long way from the cause:
+
+```
+sed: couldn't open temporary file ./sedv5wFbs: Permission denied
+error: unable to unlink old 'searxng/settings.yml': Permission denied
+```
+
+If you are coming from that version, take the directory back before anything
+else — nothing in it is lost, since `config/settings.yml` is generated from the
+example:
+
+```bash
+sudo chown -R "$USER:$USER" ~/HTTP_Server/projects/ollama_assistant/searxng
+```
+
+`config/` is gitignored, so updates never touch your key and the container
+never touches your checkout.
 
 `docker compose` is the v2 plugin, which Ubuntu's `docker.io` package does not
 include. If that line fails — `unknown shorthand flag: 'd' in -d`, or
@@ -568,15 +585,15 @@ altogether. This is the same container, spelled out, and depends on nothing but
 ```bash
 docker run -d --name searxng --restart unless-stopped \
   -p 127.0.0.1:8888:8080 \
-  -v "$PWD:/etc/searxng:rw" \
+  -v "$PWD/config:/etc/searxng:rw" \
   -e SEARXNG_BASE_URL=http://localhost:8888/ \
   --cap-drop ALL --cap-add CHOWN --cap-add SETGID --cap-add SETUID \
   --log-driver json-file --log-opt max-size=1m --log-opt max-file=1 \
   docker.io/searxng/searxng:latest
 ```
 
-Run that from inside `searxng/`, so `$PWD` is the directory holding
-`settings.yml`. If a previous attempt left a container behind — `docker run`
+Run that from inside `searxng/`, so `$PWD/config` is the directory holding the
+`settings.yml` you generated above. If a previous attempt left a container behind — `docker run`
 will say `the container name "/searxng" is already in use` — clear it first
 with `docker rm -f searxng`; nothing in it is worth keeping, since all of the
 state is the `settings.yml` you are mounting in.

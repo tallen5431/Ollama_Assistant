@@ -5,7 +5,8 @@
 # started serving a "confirm you are a human" challenge to the box's address.
 #
 #   cd searxng
-#   sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+#   mkdir -p config && cp settings.yml.example config/settings.yml
+#   sed -i "s|ultrasecretkey|$(python3 -c 'import secrets;print(secrets.token_hex(32))')|" config/settings.yml
 #   docker compose up -d
 #
 # Then set SEARXNG_URL=http://127.0.0.1:8888 for the chat app and restart it.
@@ -32,8 +33,17 @@ services:
     # use. Tailscale is how you reach the box; nothing here needs to be on it.
     ports:
       - "127.0.0.1:8888:8080"
+    # ./config, not ./ — and this is not cosmetic. The container chowns
+    # whatever it is given to its own user, which is what the CHOWN capability
+    # below is for. Handed the checkout, it took ownership of a directory git
+    # manages: `git pull` then failed with "unable to unlink old
+    # searxng/settings.yml", and `sed -i` with "couldn't open temporary file",
+    # on a box where nothing had gone wrong. config/ is gitignored, so the
+    # container owns only what it is entitled to own.
+    #
+    # Create it from the example alongside this file — see the README.
     volumes:
-      - ./:/etc/searxng:rw
+      - ./config:/etc/searxng:rw
     environment:
       - SEARXNG_BASE_URL=http://localhost:8888/
     cap_drop:
