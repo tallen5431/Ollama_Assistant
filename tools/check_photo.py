@@ -44,8 +44,18 @@ HEAD_BYTES = 256 * 1024
 
 
 def parser_source() -> str:
-    """The EXIF functions exactly as the page ships them."""
-    page = re.search(r"<script>(.*?)</script>", chat_ui.render_page("t"), re.S).group(1)
+    """The EXIF functions exactly as the page ships them.
+
+    The longest script block, not the first. The page carries a second, tiny
+    one in <head> that applies a saved theme before the stylesheet paints, and
+    reaching for `<script>` with a non-greedy match got that one — so this tool
+    raised "substring not found" on every invocation it ever had. Same rule as
+    tests/conftest.py's page_script, which exists because of the same mistake.
+    """
+    blocks = re.findall(r"<script>(.*?)</script>", chat_ui.render_page("t"), re.S)
+    if not blocks:
+        raise SystemExit("The page has no script block — chat_ui has changed shape.")
+    page = max(blocks, key=len)
     start = page.index("      const EXIF_HEAD_BYTES")
     end = page.index("      async function toAttachment", start)
     # readExif itself needs a File and a window; everything below it is pure.

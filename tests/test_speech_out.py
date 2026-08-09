@@ -13,12 +13,16 @@ leaves the device, but the voices are the operating system's.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 
 import pytest
 
 import chat_ui
 from conftest import page_script
+
+pytestmark = pytest.mark.skipif(shutil.which("node") is None,
+                                reason="node not installed")
 
 
 def page() -> str:

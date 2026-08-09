@@ -1,2 +1,12 @@
 # Test dependencies:  pip install -r requirements.txt -r requirements-dev.txt
 pytest==8.3.3
+
+# Not a pip package, and so declared here in the only place anyone looks: much
+# of this app is JavaScript inside chat_ui._PAGE, and the tests for it extract
+# the shipped functions and run them under `node`. Five test modules do it —
+# the markdown renderer, the audio resampler, the EXIF parser, the streaming
+# turn, and a syntax check over every block of the page. Without node they are
+# skipped, which is honest but means roughly 200 tests did not run; the suite
+# passing on a box without it is not the same result as the suite passing.
+#
+#   node >= 18   (any modern LTS; nothing here uses a recent feature)

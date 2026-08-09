@@ -1,7 +1,18 @@
 # Core dependencies — the app will not start without these.
 Flask==3.0.3
-requests==2.32.3
-waitress==3.0.0
+
+# 2.32.4, not 2.32.3: a URL-parsing bug in earlier versions can leak ~/.netrc
+# credentials to a third party for a maliciously crafted URL. This app fetches
+# URLs chosen by a page, a search result or a pasted message, which is exactly
+# the input that advisory is about, and requests reads the environment (and so
+# .netrc) by default.
+requests==2.32.4
+
+# 3.0.1, not 3.0.0: a client that closes before waitress calls getpeername()
+# leaves a connection that is never cleaned up, and the main thread busy-loops
+# writing to a socket that no longer exists until it runs out of them. A phone
+# dropping mid-turn is this app's normal case, not an attack.
+waitress==3.0.1
 
 # Imported directly, not only via Flask and requests. Both arrive as transitive
 # dependencies today, which is exactly why they are pinned here: app.py imports
@@ -12,3 +23,19 @@ waitress==3.0.0
 # at import time with no line in any manifest to explain why.
 Werkzeug==3.1.8
 urllib3==2.7.0
+
+# Two advisories are knowingly not taken, so the next person to run pip-audit
+# does not have to work this out again. Both are minor-version bumps, and
+# neither reaches any code this app runs:
+#
+#   flask    PYSEC-2026-2151 (fixed in 3.1.3) — a missing "Vary: Cookie" when
+#            the session object is read with `in`. This app never imports or
+#            touches flask.session; authentication, when it is on at all, is
+#            HTTP Basic and carries no cookie.
+#   requests PYSEC-2026-2275 (fixed in 2.33.0) — a predictable temp filename in
+#            requests.utils.extract_zipped_paths(). Nothing calls it; voice.py
+#            unpacks its model archives with zipfile directly.
+#
+# Take them anyway at the next deliberate dependency refresh, when there is
+# room to test a minor bump properly. Re-check with:
+#     .venv/bin/pip-audit -r requirements.txt

@@ -20,6 +20,8 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +30,8 @@ import chat_ui
 from conftest import page_script
 import store
 import web
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 # --------------------------------------------------------------------------
@@ -990,3 +994,35 @@ class TestFixQuality:
     def test_a_position_with_neither_is_left_unqualified(self):
         out = web.image_metadata([{"lat": 51.5, "lon": -0.1}])
         assert out.rstrip().endswith("-0.100000")
+
+
+class TestTheDiagnosticToolActuallyRuns:
+    """tools/check_photo.py points the *shipped* parser at a file on disk, for
+    the one question a browser cannot answer: whether a photo that plainly has
+    a position was misread, or never had one.
+
+    It reached for `<script>` with a non-greedy match and got the tiny theme
+    script in <head> instead of the page's own — so it raised "substring not
+    found" on every invocation it ever had. Nothing ran it, so nothing knew.
+    tests/conftest.py's page_script carries the same fix and the same story.
+    """
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_it_reads_a_real_photo_end_to_end(self, tmp_path):
+        photo = tmp_path / "odometer.jpg"
+        photo.write_bytes(build_jpeg(rich=True))
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "check_photo.py"), str(photo)],
+            capture_output=True, text=True, timeout=60, cwd=str(ROOT))
+        assert out.returncode == 0, out.stderr
+        assert "51.51" in out.stdout and "Google Pixel 8" in out.stdout
+        assert "location is present" in out.stdout
+
+    def test_and_says_so_plainly_when_a_photo_has_no_position(self, tmp_path):
+        photo = tmp_path / "plain.jpg"
+        photo.write_bytes(build_jpeg(gps=False))
+        out = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "check_photo.py"), str(photo)],
+            capture_output=True, text=True, timeout=60, cwd=str(ROOT))
+        assert out.returncode == 0, out.stderr
+        assert "0 with a position" in out.stdout or "no position" in out.stdout.lower()
