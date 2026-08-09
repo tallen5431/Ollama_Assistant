@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -11,6 +12,22 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# A developer's own .env must not decide what the tests see — and this has to
+# happen here, at import, rather than in a fixture.
+#
+# config.py reads the file into the real environment the first time it is
+# imported, and the modules under test read some of that once, at *their* own
+# import: app.py captures AUTH_ENABLED from it and registers a before_request
+# hook. Collection imports those modules before any fixture runs, so a .env
+# holding the documented CHAT_AUTH_* pair left the whole suite talking to an app
+# with auth switched on, answering 401 to tests that never configured it.
+# Popping the variables per-test cannot unregister a hook that is already on.
+import config  # noqa: E402  - deliberately after the path insert above
+
+for _key in config.env_file_keys():
+    os.environ.pop(_key, None)
+config._FROM_ENV_FILE = ()
 
 
 # Modules whose functions get stubbed a lot. "app" is the one that actually

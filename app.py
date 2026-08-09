@@ -1470,6 +1470,10 @@ def main() -> None:
     print(f"  Listening on : http://{host}:{port}")
     print(f"  Ollama host  : {get_ollama_base()}")
     print(f"  Default model: {get_default_model()}")
+    # Which of the two search backends this process ended up with. A shell
+    # export reaches the tools in tools/ and not the app, so the two disagreed
+    # silently: the check passed and every search in the UI got a captcha.
+    print(f"  Search       : {web.search_backend() if web_enabled() else 'OFF (WEB_ENABLED=0)'}")
     print(f"  Auth         : {'ON — Basic Auth required' if AUTH_ENABLED else 'OFF (LAN only)'}")
     print("=" * 60)
 

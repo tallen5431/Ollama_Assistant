@@ -4,13 +4,19 @@
 Everything is driven by environment variables so the HTTP Server Manager can
 override host/port/model without touching the code. Kept small and dependency
 free so the rest of the app can stay focused on routing and UI.
+
+Those variables may also be written in a ``.env`` file next to this one, which
+is what lets a setting reach both the app and the tools in ``tools/`` — see
+"Settings file" below.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Tuple
+import re
+from pathlib import Path
+from typing import Dict, List, MutableMapping, Optional, Tuple
 
 LOGGER_NAME = "ollama_chat"
 
@@ -26,6 +32,106 @@ def configure_logging(level: int = logging.INFO) -> logging.Logger:
 
 # Shared logger used across the app.
 logger = configure_logging()
+
+
+# ---------------------------------------------------------------------------
+# Settings file
+# ---------------------------------------------------------------------------
+# `export SEARXNG_URL=…` in a terminal configures exactly one thing: the next
+# program that terminal starts. tools/check_web.py is started from that terminal
+# and the app is not — the server manager starts it, from an environment of its
+# own — so the check printed a healthy SearXNG and three real results while the
+# app beside it was still scraping DuckDuckGo and being handed a captcha. Two
+# processes, two environments, and nothing on screen said they differed.
+#
+# So a setting can also be written in a file next to the code, which both of
+# them read. The real environment still wins: that is where the server manager
+# puts HOST and PORT, and where an operator overriding one setting for one run
+# expects to put it. The file only answers for what nothing else has.
+
+_ENV_FILE_NAME = ".env"
+_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def env_file_path() -> Path:
+    """Where the settings file is looked for. ``CHAT_ENV_FILE`` moves it."""
+    override = os.getenv("CHAT_ENV_FILE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent / _ENV_FILE_NAME
+
+
+def parse_env_file(text: str) -> Dict[str, str]:
+    """``KEY=value`` lines, ``#`` comments, an optional ``export``, optional quotes.
+
+    Deliberately not a shell. A value is the rest of the line with one layer of
+    matching quotes taken off, so a password containing a ``#`` or a space
+    survives intact and nothing written in the file can run.
+    """
+    out: Dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if not _KEY_RE.match(key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def load_env_file(path: Optional[Path] = None,
+                  environ: Optional[MutableMapping[str, str]] = None) -> List[str]:
+    """Fill in settings from the file, leaving anything already set alone.
+
+    Returns the names it actually set. That list is the difference between "the
+    app will see this too" and "only the shell you typed it in will", which is
+    the whole reason any of this exists.
+    """
+    path = env_file_path() if path is None else path
+    environ = os.environ if environ is None else environ
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return []          # no file is the normal case, not a problem
+    applied = []
+    for key, value in parse_env_file(text).items():
+        if key not in environ:
+            environ[key] = value
+            applied.append(key)
+    if applied:
+        logger.info("Read %d setting(s) from %s: %s",
+                    len(applied), path, ", ".join(sorted(applied)))
+    return applied
+
+
+_FROM_ENV_FILE: Tuple[str, ...] = tuple(load_env_file())
+
+
+def env_file_keys() -> Tuple[str, ...]:
+    """The names this process took from the settings file."""
+    return _FROM_ENV_FILE
+
+
+def setting_origin(name: str) -> str:
+    """Where ``name``'s value came from, in words. Empty when it is unset.
+
+    Only the file is shared with the app, so this is how a check tool can tell
+    a green light the app inherits from one it doesn't.
+    """
+    if not os.getenv(name, "").strip():
+        return ""
+    if name in _FROM_ENV_FILE:
+        return f"the {_ENV_FILE_NAME} file"
+    return "this process's environment"
 
 
 def get_ollama_base() -> str:
@@ -115,6 +221,10 @@ def get_search_url() -> str:
 
     When unset, search falls back to DuckDuckGo's HTML endpoint, which needs no
     key but is best-effort — self-hosting SearXNG is the sturdier option.
+
+    Set it in ``.env`` rather than by exporting it in a terminal: the app is
+    started by the server manager and does not inherit your shell. The startup
+    banner prints the backend it actually got.
     """
     return os.getenv("SEARXNG_URL", "").strip().rstrip("/")
 

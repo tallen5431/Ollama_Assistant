@@ -215,10 +215,20 @@ class TestTheControls:
 
     def test_it_speaks_on_completion_rather_than_while_streaming(self):
         """Chunking a half-arrived sentence reads it wrong, and re-reading the
-        corrected version reads it twice."""
+        corrected version reads it twice.
+
+        Pinned to what the assertion is actually about — the whole reply being
+        resolved before it is read out — rather than to one spelling of the
+        line that does it, which is what made this fail when the same value
+        started being computed alongside the reasoning beside it.
+        """
         js = page_script(page())
         at = js.index("if (speakEl.checked) speakReply(view);")
-        assert "const finalContent = splitThink(rawContent).content;" in js[:at]
+        before = js[:at]
+        assert "const finalContent = " in before, \
+            "the reply has to be complete before it is spoken"
+        assert "rawContent +=" in before.split("const finalContent = ")[0], \
+            "and the stream has to have finished accumulating by then"
 
     def test_the_voice_and_the_toggle_are_remembered(self):
         js = page_script(page())

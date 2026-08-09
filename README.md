@@ -88,6 +88,11 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
 launches the app with waitress. Open the URL it prints (default
 <http://localhost:8070>). On Windows, run `Start.bat`.
 
+Settings go in a `.env` file beside the code — `cp .env.example .env` and edit
+it. Put them there rather than `export`ing them in a terminal: the app is
+started by the server manager and does not inherit your shell. See
+"Configuration" below.
+
 Manual run:
 
 ```bash
@@ -113,7 +118,40 @@ and the HTTP layer. It does not require `vosk` or a running Ollama server.
 
 ## Configuration
 
-All settings are environment variables (the server manager injects them):
+All settings are environment variables (the server manager injects them), and
+they can also be written in a **`.env` file beside the code**. Copy
+`.env.example` to `.env` and edit it:
+
+```bash
+cp .env.example .env
+```
+
+Use the file rather than `export`ing in a terminal. A shell export configures
+the next program *that terminal* starts — which is the tools in `tools/`, and
+not the app: the server manager starts that, from an environment of its own.
+The file is the only place both of them read, which is what makes a pass from
+`tools/check_web.py` mean anything about the app. Format is `KEY=value`, one
+per line, `#` for comments; nothing in it is executed.
+
+**The real environment wins over the file**, so the server manager's
+`program.env` still overrides it, and so does a one-off `PORT=8071 ./Start.sh`.
+The file only answers for what nothing else has said. It is gitignored — it is
+where `CHAT_AUTH_PASSWORD` goes.
+
+The app prints what it resolved on startup, which is the fastest way to settle
+an argument about whether a setting took:
+
+```
+============================================================
+💬 Ollama Chat started
+============================================================
+  Listening on : http://0.0.0.0:8070
+  Ollama host  : http://192.168.1.50:11434
+  Default model: llama3.1:8b
+  Search       : SearXNG at http://127.0.0.1:8888
+  Auth         : OFF (LAN only)
+============================================================
+```
 
 | Variable            | Default                     | Purpose |
 | ------------------- | --------------------------- | ------- |
@@ -129,6 +167,7 @@ All settings are environment variables (the server manager injects them):
 | `PHOTO_KEEP_DAYS`   | `30`                        | How long stored photos stay in the history. Every word is kept for good; only the pixels expire. `0` keeps them for good too |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
+| `CHAT_ENV_FILE`     | `./.env`                    | Where the settings file above is read from. Only useful from the real environment, for obvious reasons |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
@@ -443,14 +482,28 @@ a working config are in [`searxng/`](searxng/):
 
 ```bash
 cd searxng
-sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+./setup.sh            # copies settings.yml.example → instance/, with a real key
 docker compose up -d
 ```
 
-Then point the app at it and restart it:
+`setup.sh` is safe to re-run — it leaves an existing `instance/settings.yml`,
+and its secret key, exactly where it is. Run it **before** the first
+`up`: the container's config directory is now `instance/`, and starting with
+that empty gets you SearXNG's own defaults, which are the two settings in the
+table below set the wrong way round.
+
+> **`docker compose` or `docker-compose`?** Compose is a `docker`
+> subcommand on newer installs and a separate binary on older ones. If
+> `docker compose up -d` answers `docker: unknown command: docker compose`,
+> use `docker-compose up -d` — hyphen, same arguments — everywhere below.
+> `docker compose version` tells you which you have.
+
+Then point the app at it and restart it. **Write it in `.env`, not `export`** —
+the app is started by the server manager, from an environment of its own, and
+never sees your shell:
 
 ```bash
-export SEARXNG_URL=http://127.0.0.1:8888
+echo 'SEARXNG_URL=http://127.0.0.1:8888' >> .env
 ```
 
 Check it end to end without opening the app:
@@ -459,8 +512,16 @@ Check it end to end without opening the app:
 .venv/bin/python tools/check_web.py
 ```
 
-That names the backend it used and prints the results it got, so a pass means
-the whole path works.
+That names the backend it used, says where the setting came from, and prints
+the results it got, so a pass means the whole path works. When the app restarts,
+its banner says which backend it actually got:
+
+```
+  Search       : SearXNG at http://127.0.0.1:8888
+```
+
+If that line says `DuckDuckGo — scraped, no SEARXNG_URL set`, the app is not
+using SearXNG whatever your terminal thinks.
 
 **Two settings do all the work**, and a stock SearXNG has both wrong for this:
 
@@ -469,8 +530,8 @@ the whole path works.
 | `SearXNG returned HTTP 403` | It serves HTML only out of the box | add `json` under `search: formats:` |
 | `SearXNG returned HTTP 429` | The bot limiter is on | set `server: limiter: false` |
 
-Both are already set in `searxng/settings.yml`, and the app names the fix in
-the error if you are using your own config. The limiter exists to stop a
+Both are already set in `searxng/settings.yml.example`, and the app names the
+fix in the error if you are using your own config. The limiter exists to stop a
 *public* instance being scraped by deciding whether a caller looks like a
 browser; this app isn't one, and an instance on loopback has nobody to keep
 out.
@@ -478,6 +539,57 @@ out.
 The compose file binds to `127.0.0.1` deliberately. An open SearXNG is
 something other people find and use, and nothing needs to reach it but the app
 on the same machine — you already get to the box over Tailscale.
+
+**Edit `searxng/instance/settings.yml`, not the `.example` next to it.** The
+live config lives in `instance/`, which git ignores, because the image takes
+ownership of its config directory on startup — and when that directory was the
+repo's own, git could no longer replace files in it:
+
+```
+error: unable to unlink old 'searxng/docker-compose.yml': Permission denied
+fatal: Could not reset index file to revision 'FETCH_HEAD'.
+```
+
+That is a `git pull` refusing to check anything out because a container owns
+the worktree. Keeping the two apart is the fix; it also keeps the instance's
+secret key out of a tracked file, where `sed -i` used to put it.
+
+If you set this up before that change, migrate once — **before you pull.** The
+old setup step wrote your secret key into `searxng/settings.yml`, which is a
+tracked file, so the checkout that renames it has a local modification sitting
+on the path it wants to move. `git pull` will not do that:
+
+```
+error: Your local changes to the following files would be overwritten by merge:
+        searxng/settings.yml
+Please commit your changes or stash them before you merge.
+```
+
+Which leaves you unable to reach `setup.sh` or these instructions by the only
+route that would show them to you. So: get the key out of git's way first, and
+leave the tracked copy looking the way git expects.
+
+```bash
+cd searxng
+docker compose down                          # docker-compose down on older Docker
+sudo chown -R "$(id -u):$(id -g)" .          # take the directory back from the container
+mkdir -p instance
+mv settings.yml instance/settings.yml        # your secret key, out of the rename's path
+git checkout -- settings.yml                 # tracked copy back as committed, tree clean
+```
+
+Then pull, and start it on the new mount:
+
+```bash
+git pull
+cd searxng && docker compose up -d
+git clean -n .                               # -n first: what the container left behind
+```
+
+**If you already pulled** — with `git reset --hard`, which discards rather than
+refuses — that file is gone and the key with it. Run `./setup.sh` for a new one.
+That costs you nothing on a private instance but the saved preferences in your
+own browser: the key signs session cookies and nothing else.
 
 `SEARXNG_URL` is allowed to point at a private address, unlike anything a model
 or a page asks for; see "What it will and won't reach" below.
@@ -965,6 +1077,34 @@ If web access matters to you, run SearXNG and point `SEARXNG_URL` at it — it i
 a JSON API that does not change under you. See "Running your own search" above;
 the compose file is in `searxng/`.
 
+### "But `check_web.py` passes and the app still gets a captcha"
+
+Then the two are not reading the same configuration, and the check is telling
+you the truth about a process the app has nothing to do with:
+
+```
+1. Search backend — http://127.0.0.1:8888
+  ✅ 3 results in 0.8s
+```
+
+…followed, in the UI, by `html.duckduckgo.com served a bot challenge`.
+
+`export SEARXNG_URL=…` in a terminal configures the next program **that
+terminal** starts. `tools/check_web.py` is one. The app is not — the server
+manager starts it, from an environment of its own — so it never saw the
+variable and went on scraping. Two processes, two environments, and the tool
+whose job was to say whether search worked said yes.
+
+Put the setting in `.env` instead, which both of them read:
+
+```bash
+echo 'SEARXNG_URL=http://127.0.0.1:8888' >> .env
+```
+
+The check now prints where the value came from and says so when it is somewhere
+the app cannot see, and the app's startup banner names the backend it actually
+got. When those two agree, they are agreeing about the same thing.
+
 ## Seeing what a turn did
 
 Under every reply, next to **Show thinking**, is **Show what it did** —
@@ -1051,4 +1191,6 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `store.py`        | SQLite conversation history, routines and records |
 | `records.py`      | Restating a routine's answer as the fields it declared |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
+| `.env.example`    | Settings template — `cp .env.example .env`; read by the app *and* the tools |
+| `searxng/`        | Compose file and config template for your own search instance. The live config is `searxng/instance/`, which git ignores — see "Running your own search" |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |
