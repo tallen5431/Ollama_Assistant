@@ -5,10 +5,10 @@
 # started serving a "confirm you are a human" challenge to the box's address.
 #
 #   cd searxng
-#   sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+#   ./setup.sh
 #   docker compose up -d
 #
-# Then set SEARXNG_URL=http://127.0.0.1:8888 for the chat app and restart it.
+# Then put SEARXNG_URL=http://127.0.0.1:8888 in the app's .env and restart it.
 
 services:
   searxng:
@@ -20,8 +20,22 @@ services:
     # use. Tailscale is how you reach the box; nothing here needs to be on it.
     ports:
       - "127.0.0.1:8888:8080"
+    # instance/, not ./ — the directory git ignores, not the one it manages.
+    #
+    # This mounted `./`, which is inside the repo, and the image takes ownership
+    # of its config directory on startup (that is what the CHOWN below is for).
+    # So searxng/ and both files in it ended up belonging to the container's
+    # uid, and unlinking a file needs write permission on the *directory* — the
+    # next `git pull` came back with "unable to unlink old
+    # 'searxng/docker-compose.yml': Permission denied" and refused to check
+    # anything out at all.
+    #
+    # An ignored directory is the whole answer: the container owns its config,
+    # git owns the worktree, and they stop being the same place. It also stops
+    # mounting this compose file into the container, which had no business
+    # reading it.
     volumes:
-      - ./:/etc/searxng:rw
+      - ./instance:/etc/searxng:rw
     environment:
       - SEARXNG_BASE_URL=http://localhost:8888/
     cap_drop:

@@ -1,10 +1,14 @@
 # Overrides only — `use_default_settings` keeps everything else at SearXNG's
 # own defaults, so this file stays short enough to check by eye.
+#
+# This is the template, not the live config. `./setup.sh` copies it to
+# instance/settings.yml — which git ignores and the container owns — and puts a
+# real secret key in the copy. Edit the copy; changes here reach a new install
+# only.
 use_default_settings: true
 
 server:
-  # Replace before the first start. SearXNG refuses to run on the default:
-  #   sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+  # setup.sh replaces this in the copy. SearXNG refuses to run on the default.
   secret_key: "ultrasecretkey"
 
   # Off, and this is the setting that matters most here.

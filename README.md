@@ -482,9 +482,12 @@ a working config are in [`searxng/`](searxng/):
 
 ```bash
 cd searxng
-sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+./setup.sh            # copies settings.yml.example → instance/, with a real key
 docker compose up -d
 ```
+
+`setup.sh` is safe to re-run — it leaves an existing `instance/settings.yml`,
+and its secret key, exactly where it is.
 
 Then point the app at it and restart it. **Write it in `.env`, not `export`** —
 the app is started by the server manager, from an environment of its own, and
@@ -518,8 +521,8 @@ using SearXNG whatever your terminal thinks.
 | `SearXNG returned HTTP 403` | It serves HTML only out of the box | add `json` under `search: formats:` |
 | `SearXNG returned HTTP 429` | The bot limiter is on | set `server: limiter: false` |
 
-Both are already set in `searxng/settings.yml`, and the app names the fix in
-the error if you are using your own config. The limiter exists to stop a
+Both are already set in `searxng/settings.yml.example`, and the app names the
+fix in the error if you are using your own config. The limiter exists to stop a
 *public* instance being scraped by deciding whether a caller looks like a
 browser; this app isn't one, and an instance on loopback has nobody to keep
 out.
@@ -527,6 +530,32 @@ out.
 The compose file binds to `127.0.0.1` deliberately. An open SearXNG is
 something other people find and use, and nothing needs to reach it but the app
 on the same machine — you already get to the box over Tailscale.
+
+**Edit `searxng/instance/settings.yml`, not the `.example` next to it.** The
+live config lives in `instance/`, which git ignores, because the image takes
+ownership of its config directory on startup — and when that directory was the
+repo's own, git could no longer replace files in it:
+
+```
+error: unable to unlink old 'searxng/docker-compose.yml': Permission denied
+fatal: Could not reset index file to revision 'FETCH_HEAD'.
+```
+
+That is a `git pull` refusing to check anything out because a container owns
+the worktree. Keeping the two apart is the fix; it also keeps the instance's
+secret key out of a tracked file, where `sed -i` used to put it.
+
+If you set this up before that change, move your config across once:
+
+```bash
+cd searxng
+docker compose down
+mkdir -p instance
+sudo chown -R "$(id -u):$(id -g)" .        # take the directory back from the container
+mv settings.yml instance/settings.yml      # keeps your existing secret key
+git checkout -- . && git clean -n .        # -n first: see what the container left behind
+docker compose up -d
+```
 
 `SEARXNG_URL` is allowed to point at a private address, unlike anything a model
 or a page asks for; see "What it will and won't reach" below.
@@ -1129,4 +1158,5 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `records.py`      | Restating a routine's answer as the fields it declared |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `.env.example`    | Settings template — `cp .env.example .env`; read by the app *and* the tools |
+| `searxng/`        | Compose file and config template for your own search instance. The live config is `searxng/instance/`, which git ignores — see "Running your own search" |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |

@@ -1,4 +1,6 @@
 .env
+# SearXNG's live config: the container owns this directory, git must not.
+searxng/instance/
 .venv/
 __pycache__/
 *.pyc
