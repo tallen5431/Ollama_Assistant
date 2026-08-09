@@ -72,6 +72,26 @@ class TestTheStepsCanBeFollowedInOrder:
             "the setup walks into searxng/ and never comes back, but the next " \
             "command it gives needs the project root"
 
+    def test_the_key_generator_does_not_assume_openssl(self):
+        """`$(openssl …)` on a box without openssl expands to nothing and the
+        sed silently writes an empty key; the container then restart-loops with
+        the reason only in docker logs. python3 is already required to run this
+        app at all, so it is the safer generator."""
+        start = README.index("cd searxng")
+        window = README[start:start + 700]
+        assert "openssl rand" not in window, "openssl is not on every box"
+        assert "secrets.token_hex" in window
+        assert "grep secret_key settings.yml" in window, \
+            "the result has to be checked, not the command trusted"
+
+    def test_the_tracked_config_trap_is_written_down(self):
+        """settings.yml is tracked, so an update can put the default key back
+        and stop a working instance — with the reason only in docker logs."""
+        start = README.index("cd searxng")
+        window = README[start:start + 1400]
+        assert "tracked in this repository" in window
+        assert "git pull" in window
+
     @pytest.mark.parametrize("error", [
         # No compose v2 plugin: the -d never reaches a compose that would
         # understand it, so Docker's root command rejects it and prints its own

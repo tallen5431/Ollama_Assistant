@@ -526,10 +526,22 @@ a working config are in [`searxng/`](searxng/):
 
 ```bash
 cd searxng
-sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
-grep -q ultrasecretkey settings.yml && echo "the key was NOT replaced — SearXNG will refuse to start"
+sed -i "s|ultrasecretkey|$(python3 -c 'import secrets;print(secrets.token_hex(32))')|" settings.yml
+grep secret_key settings.yml    # must be 64 hex characters, not "ultrasecretkey"
 docker compose up -d
 ```
+
+`python3` rather than `openssl` on purpose: `openssl` is not installed
+everywhere, and `$(openssl …)` on a box without it expands to nothing and the
+`sed` silently writes an empty key. Check the `grep` output rather than
+trusting the command — SearXNG refuses to start on the default key, and the
+container then restart-loops with the reason only in `docker logs searxng`.
+
+> **`settings.yml` is tracked in this repository**, so a `git pull` that
+> touches it can put the default key back and stop a working instance. If
+> search breaks after an update, this is the first thing to check. Keeping your
+> own copy outside the repo and mounting that instead avoids it entirely —
+> the container only cares about what is at `/etc/searxng/settings.yml`.
 
 `docker compose` is the v2 plugin, which Ubuntu's `docker.io` package does not
 include. If that line fails — `unknown shorthand flag: 'd' in -d`, or
