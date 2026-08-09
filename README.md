@@ -487,7 +487,16 @@ docker compose up -d
 ```
 
 `setup.sh` is safe to re-run — it leaves an existing `instance/settings.yml`,
-and its secret key, exactly where it is.
+and its secret key, exactly where it is. Run it **before** the first
+`up`: the container's config directory is now `instance/`, and starting with
+that empty gets you SearXNG's own defaults, which are the two settings in the
+table below set the wrong way round.
+
+> **`docker compose` or `docker-compose`?** Compose is a `docker`
+> subcommand on newer installs and a separate binary on older ones. If
+> `docker compose up -d` answers `docker: unknown command: docker compose`,
+> use `docker-compose up -d` — hyphen, same arguments — everywhere below.
+> `docker compose version` tells you which you have.
 
 Then point the app at it and restart it. **Write it in `.env`, not `export`** —
 the app is started by the server manager, from an environment of its own, and
@@ -545,17 +554,24 @@ That is a `git pull` refusing to check anything out because a container owns
 the worktree. Keeping the two apart is the fix; it also keeps the instance's
 secret key out of a tracked file, where `sed -i` used to put it.
 
-If you set this up before that change, move your config across once:
+If you set this up before that change, migrate once:
 
 ```bash
 cd searxng
-docker compose down
-mkdir -p instance
-sudo chown -R "$(id -u):$(id -g)" .        # take the directory back from the container
-mv settings.yml instance/settings.yml      # keeps your existing secret key
-git checkout -- . && git clean -n .        # -n first: see what the container left behind
+docker compose down                          # docker-compose down on older Docker
+sudo chown -R "$(id -u):$(id -g)" .          # take the directory back from the container
+./setup.sh                                   # seeds instance/settings.yml
 docker compose up -d
+git clean -n .                               # anything the container left in searxng/
 ```
+
+`setup.sh` generates a new secret key, which on a private instance costs you
+nothing but the saved preferences in your own browser — the key signs session
+cookies and nothing else. If you would rather keep the old one and you still
+have the pre-rename `settings.yml`, `mv settings.yml instance/settings.yml`
+in place of running `setup.sh`. Once you have pulled, that file is gone: it
+held a local edit to a tracked file, so the checkout that renamed it took the
+key with it.
 
 `SEARXNG_URL` is allowed to point at a private address, unlike anything a model
 or a page asks for; see "What it will and won't reach" below.
