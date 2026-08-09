@@ -138,6 +138,79 @@ class TestImageReader:
         assert app._image_reader("llama3.1:8b") == ("", False)
 
 
+class TestLookingBeforeSearching:
+    """An OCR model is the right reader for a screenshot and the wrong one for
+    a photograph, and it is preferred unconditionally — so a photo of an animal
+    was transcribed, found to hold no text, and the search was planned from the
+    user's words alone. "what creature is this" searched verbatim returns pages
+    of advertising for animal-identifier apps and nothing about the animal.
+    """
+
+    @pytest.mark.parametrize("said", [
+        None, "", "   ",
+        "There is no text visible in this image.",
+        "No readable text.",
+        "The image does not contain any text.",
+        "No discernible text in the photograph.",
+        "TM",            # a mark on a collar tag is not a search query
+        "8",
+    ])
+    def test_a_photograph_transcribes_to_nothing_worth_searching(self, said):
+        import app
+        assert app._reads_as_text(said) is False
+
+    @pytest.mark.parametrize("said", [
+        "Traceback (most recent call last): ValueError: bad input",
+        "SETTINGS  Wi-Fi  Bluetooth  Battery",
+        "ERR_CONNECTION_REFUSED",
+        "Total due $54.20 on 09/08/2026",
+    ])
+    def test_but_a_screenshot_does_not(self, said):
+        import app
+        assert app._reads_as_text(said) is True
+
+    def test_a_no_text_sentence_is_not_text_however_long(self):
+        """The length rule alone reads "there is no text in this image" — a
+        perfectly ordinary sentence — as thirty characters of findings."""
+        import app
+        assert app._reads_as_text(
+            "I am sorry, but there is no text visible anywhere in this "
+            "photograph of an animal.") is False
+
+    def test_the_answering_model_describes_it_when_it_can_see(self, monkeypatch):
+        """Best model in the house, about to read the image anyway, and already
+        loaded — so this costs one more pass rather than one more model in the
+        GPU."""
+        import app
+        monkeypatch.setattr(app, "vision_models",
+                            lambda include_ocr=True: ["qwen2.5vl:3b", "qwen3-vl:30b"])
+        assert app._describing_model("qwen3-vl:30b") == "qwen3-vl:30b"
+
+    def test_and_the_smallest_that_can_when_it_cannot(self, monkeypatch):
+        import app
+        monkeypatch.setattr(app, "vision_models",
+                            lambda include_ocr=True: ["qwen2.5vl:3b", "qwen3-vl:30b"])
+        assert app._describing_model("llama3.1:8b") == "qwen2.5vl:3b"
+
+    def test_an_ocr_model_is_never_the_describer(self, monkeypatch):
+        """It would transcribe the nothing it already transcribed."""
+        import app
+        seen = {}
+
+        def only_seeing(include_ocr=True):
+            seen["include_ocr"] = include_ocr
+            return ["qwen3-vl:30b"]
+
+        monkeypatch.setattr(app, "vision_models", only_seeing)
+        app._describing_model("llama3.1:8b")
+        assert seen["include_ocr"] is False
+
+    def test_nothing_that_can_see_means_no_second_look(self, monkeypatch):
+        import app
+        monkeypatch.setattr(app, "vision_models", lambda include_ocr=True: [])
+        assert app._describing_model("llama3.1:8b") == ""
+
+
 class TestTranscriptionPrompt:
     def test_an_ocr_model_is_asked_to_transcribe_not_describe(self, monkeypatch):
         import web

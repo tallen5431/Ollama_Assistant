@@ -134,6 +134,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
 | `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. **Recommended.** Unset falls back to scraping DuckDuckGo's no-JS endpoints, which is what breaks first |
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
+| `WEB_DISTILLER_MODEL` | *(unset)*                 | Small model that cuts each fetched page down to what bears on your question. Unset means off — see "Distilling pages". Measured 12,016 → 231 characters on a two-page turn |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
 | `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
 | `WEB_SHARE_LOCATION` | `1`                        | Whether a photo's GPS position may inform a search query. `0` keeps the date and camera and drops the position — see "Photo details" |
@@ -381,6 +382,73 @@ its scratchpad — so the reply comes back truncated mid-thought with no query i
 it. The app asks Ollama for `think: false` on the planner call and strips any
 `<think>` block that arrives anyway, so `deepseek-r1` works; it is still slower
 and no better than a small instruct model. Prefer one.
+
+### Distilling pages before they reach the model
+
+A fetched page arrives at up to 6,000 characters, of which the part that
+answers you is usually a paragraph. The rest is navigation prose, cookie
+notices, related-article rails and the parts of the article about something
+else. Three pages is most of an 8,192-token window before your conversation is
+even added — measured on a real turn: **16,918 characters of page, one useful
+paragraph.**
+
+Set `WEB_DISTILLER_MODEL` to a small model and each page is read by it first,
+copying out only the sentences bearing on your question:
+
+```
+WEB_DISTILLER_MODEL=qwen3.5:4b
+```
+
+Measured on a two-page turn: **12,016 → 231 characters**, with the figures
+intact. The saving is the smaller half of the point — the larger half is that
+you can raise `WEB_MAX_DOCS` and read six or eight pages for less than three
+cost before.
+
+It **extracts rather than summarises** — "copy the sentences that answer this,
+word for word" — because a model that paraphrases will eventually paraphrase a
+figure wrong, and these come back with a `[1]` after them. An invented number
+carrying a citation is worse than no number.
+
+Four things it will not do:
+
+- **Lose a page.** If the distiller can't be reached, times out, or returns
+  nothing, that page keeps its full text and the panel says how many were kept
+  in full. A summariser that can lose information is a worse bug than a long
+  context.
+- **Mix pages up.** Each page keeps its own distillation even when some
+  succeed and others fail — a citation pointing at the wrong source is worse
+  than no citation.
+- **Be trusted.** The distilled text came off an untrusted page and through a
+  model that read an untrusted page. It is fenced, numbered and labelled
+  exactly like raw page text; a model having touched it makes it no cleaner.
+- **Quietly drop a page about something else.** That comes back as *"read, but
+  nothing in it bears on the question"*, because a page vanishing silently
+  reads as a retrieval failure and sends you looking for a bug that isn't
+  there.
+
+Off unless you set it, and the same VRAM caveat as the planner applies: this is
+one model call per page, and a model that has to be swapped in can cost more in
+latency than the context it saves is worth. **Show what it did** gets a
+**Distilled** line with the before and after, so you can judge both the saving
+and the quality yourself.
+
+### Looking at a photo before searching for it
+
+An OCR model is the right reader for a screenshot and the wrong one for a
+photograph. It used to be preferred either way, so a photo of an animal was
+transcribed, found to contain no text, and the search was planned from your
+words alone — and "what creature is this", searched verbatim, returns pages of
+advertising for animal-identifier apps and nothing about the animal.
+
+Now, when the transcription comes back empty (or as a sentence explaining that
+it is empty), something that can see is asked what the photo *shows*, and the
+search is planned from that instead. The panel says so: **Looked at the image
+instead**.
+
+The describer is your answering model when it can see — it is the best model
+you have, it is about to read the image anyway, and Ollama already has it
+loaded, so this costs one more pass rather than one more model in VRAM. A
+screenshot that transcribes to real text is never read twice.
 
 ### When a page can't be read
 

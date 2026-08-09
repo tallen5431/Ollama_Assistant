@@ -22,6 +22,7 @@ import io
 import json
 import os
 import queue
+import re
 import socket
 import sqlite3
 import threading
@@ -43,6 +44,7 @@ from chat_ui import render_page
 from config import (
     get_app_title,
     get_default_model,
+    get_distiller_model,
     get_host_port,
     get_image_turns,
     get_keep_alive,
@@ -1063,6 +1065,12 @@ def _gather_web(
                 break
             yield from _follow_links(model, question, source, documents, budget)
             budget = 0     # one hop, from the first page only
+        # Deliberately not distilled. A page reached by searching is one this
+        # app chose, and cutting it down to the question it was chosen to
+        # answer loses nothing. A page the *user* pasted is a deliberate act,
+        # and "summarise this" is a question no extractive pass can cut to —
+        # it would come back with the sentences containing the word summarise,
+        # or with nothing. Their link, their whole page.
         return
 
     # An attached image usually carries the specifics worth searching for — the
@@ -1095,6 +1103,33 @@ def _gather_web(
                 else:
                     yield _step("Read the image for search",
                                 f"{reader} ({'OCR' if is_reader_ocr else 'description'})",
+                                text=image_note or "(nothing came back)")
+                # Look at it before searching for it.
+                #
+                # An OCR model is the right reader for a screenshot and the
+                # wrong one for a photograph, and it is preferred unconditionally
+                # — so a photo of an animal was transcribed, found to contain no
+                # text, and the search was planned from the user's words alone.
+                # "what creature is this" searched verbatim returns pages of
+                # advertising for animal-identifier apps and nothing about the
+                # animal. Ask something that can see to say what it is, and
+                # search for that instead.
+                if is_reader_ocr and not _reads_as_text(image_note):
+                    describer = _describing_model(model)
+                    if describer:
+                        yield _line({"status": "No text in it — looking at what it shows…"})
+                        try:
+                            image_note = web.read_images(images, describer, ocr=False,
+                                                         answering_model=model)
+                        except web.ReadFailed as exc:
+                            logger.warning("Image description via %s failed: %s",
+                                           describer, exc)
+                            yield _step("Looked at the image instead",
+                                        f"{describer} failed: {exc}")
+                        else:
+                            yield _step(
+                                "Looked at the image instead",
+                                f"no text to transcribe, so {describer} described it",
                                 text=image_note or "(nothing came back)")
             else:
                 yield _step("Read the image for search",
@@ -1162,9 +1197,74 @@ def _gather_web(
 
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
+    yield from _distil_documents(question, documents, model)
     yield _step("Context from the web",
                 f"{len(documents)} document(s), "
                 f"{sum(len(d.get('text') or '') for d in documents)} characters")
+
+
+def _distil_documents(question: str, documents: List[Dict[str, str]],
+                      model: str) -> Any:
+    """Replace each page's text with the part of it that answers the question.
+
+    Six thousand characters a page is most of an 8192-token window before the
+    conversation is even added, and nearly all of it is navigation prose,
+    boilerplate and the parts of the article about something else. A small model
+    reading each page and copying out the relevant sentences turns that into a
+    few hundred — which both leaves room for the conversation and means more
+    pages can be read, not fewer.
+
+    Off unless WEB_DISTILLER_MODEL is set. A page whose distillation fails keeps
+    its full text: a summariser that can lose information is a worse bug than a
+    long context, and this one is allowed to fail as often as it likes.
+    """
+    distiller = get_distiller_model()
+    # A search snippet is already a couple of hundred characters and already
+    # labelled as a lead rather than a source. There is nothing to cut out of
+    # it, and asking would spend a model call to risk it coming back as
+    # "nothing relevant" — losing the only thing that page contributed.
+    pages = [d for d in documents if not d.get("snippet_only")]
+    if not distiller or not pages:
+        return
+    yield _line({"status": f"Reading {len(pages)} page(s) down to what you asked…"})
+    before = [len(d.get("text") or "") for d in pages]
+
+    # Each call carries its own index back, because _run_all drops falsy results
+    # — it is built for fetches, where a failure means "no document" and the
+    # survivors are all that matter. Here a failure means "this page keeps its
+    # full text", and zipping the shortened list back against the pages would
+    # hand page two the distillation of page one. Wrong text under a citation is
+    # far worse than a long one.
+    #
+    # It also catches for itself: _run_all logs the item it was given, which
+    # here would be a whole page in the log for every distiller hiccup.
+    def one(pair: Any) -> Any:
+        index, doc = pair
+        try:
+            return index, web.distil(question, doc, distiller, answering_model=model)
+        except Exception:  # noqa: BLE001 - distil reports its own; this is the belt
+            logger.exception("Distilling %s failed", doc.get("url"))
+            return index, None
+
+    # Concurrently, like the fetches: one slow page must not serialise the rest.
+    done, _ = _run_all(one, list(enumerate(pages)))
+    shortened = {index: text for index, text in done if text}
+    kept = 0
+    for index, doc in enumerate(pages):
+        short = shortened.get(index)
+        if short:
+            doc["text"] = short
+            doc["distilled"] = True
+        else:
+            kept += 1
+    after = [len(d.get("text") or "") for d in pages]
+    yield _step(
+        "Distilled",
+        f"{distiller}: {sum(before)} → {sum(after)} characters"
+        + (f"; {kept} page(s) kept in full because it could not be asked" if kept else ""),
+        text="\n\n".join(
+            f"{d.get('url', '')}\n{b} → {a} chars\n{d.get('text') or ''}"
+            for d, b, a in zip(pages, before, after)))
 
 
 def _read_images_for(model: str, images: List[str], reader: str,
@@ -1188,7 +1288,12 @@ def _read_images_for(model: str, images: List[str], reader: str,
         # An OCR model that found nothing is not the end of it: a photo of a
         # plant has no text, and telling the user to go change a dropdown while
         # a vision model sits idle is a poor answer to "what is this?".
-        if transcript is None and is_ocr_reader:
+        #
+        # `is None` was too narrow. An OCR model handed a photograph rarely
+        # returns nothing — it returns a sentence saying there is nothing, which
+        # is text by every measure except the one that matters, so this fallback
+        # never fired for the case it was written for.
+        if is_ocr_reader and not _reads_as_text(transcript):
             describer = _describing_model(model)
             if describer:
                 yield _line({"status": f"No text in it — looking at it with {describer}…"})
@@ -1219,6 +1324,45 @@ def _model_has_vision(name: str) -> bool:
         return name in vision_models(include_ocr=False)
     except Exception:  # noqa: BLE001 - Ollama unreachable; assume it cannot
         return False
+
+
+# What an OCR model says when there was nothing to transcribe. It answers in
+# prose rather than with an empty string, so length alone reads that as text.
+# describe_images joins several readings as "[image 1] … [image 2] …".
+_IMAGE_SPLIT = re.compile(r"\[image \d+\]")
+
+_NO_TEXT_SAID = (
+    "no text", "no visible text", "no readable text", "no legible text",
+    "does not contain any text", "doesn't contain any text",
+    "there is no text", "no words", "not contain text", "no discernible text",
+)
+
+
+def _reads_as_text(note: Optional[str]) -> bool:
+    """Did the OCR pass actually find text worth planning a search from?
+
+    A transcription of a photograph of an animal is empty, or a sentence
+    explaining that it is empty. Either way there is nothing in it to search
+    for, and the planner is left with only the user's words — which for "what
+    creature is this" is how you end up searching that phrase and getting three
+    pages of advertising for animal-identifier apps.
+    """
+    said = " ".join((note or "").split())
+    if not said:
+        return False
+    # Several images come back joined as "[image 1] … [image 2] …", and one
+    # blank photo next to a screenshot must not discard the screenshot's text.
+    # Any image that yielded something is enough to plan a search from.
+    parts = [p for p in _IMAGE_SPLIT.split(said) if p.strip()] or [said]
+    return any(_one_reading_is_text(part) for part in parts)
+
+
+def _one_reading_is_text(said: str) -> bool:
+    low = said.lower()
+    if any(phrase in low for phrase in _NO_TEXT_SAID):
+        return False
+    # Punctuation and stray marks off a collar tag are not a search query.
+    return sum(ch.isalnum() for ch in said) >= 12
 
 
 def _image_reader(answering_model: str) -> Any:

@@ -156,6 +156,18 @@ def get_web_max_docs() -> int:
     return max(1, int(_number("WEB_MAX_DOCS", 3)))
 
 
+def get_distiller_model() -> str:
+    """Small model that cuts a fetched page down to what bears on the question.
+
+    Unset means off, and off is the default: this costs one model call per page,
+    and on a single-GPU desktop a model that has to be swapped in can cost more
+    in latency than the context it saves is worth. Set it to something small
+    (``qwen3:4b``, ``llama3.2:3b``) that fits alongside the answering model and
+    the pages arrive as a few hundred characters each instead of six thousand.
+    """
+    return os.getenv("WEB_DISTILLER_MODEL", "").strip()
+
+
 def get_web_timeout() -> float:
     """Per-request timeout when fetching a page or running a search."""
     return _number("WEB_TIMEOUT", 15.0)
