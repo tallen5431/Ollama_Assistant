@@ -54,6 +54,7 @@ from config import (
     get_photo_keep_days,
     get_photo_meta_default,
     get_planner_model,
+    get_server_threads,
     get_share_photo_location,
     get_vision_model,
     get_web_follow_links,
@@ -952,6 +953,13 @@ def _step(name: str, detail: str = "", **extra: Any) -> str:
     return _line({"debug": entry})
 
 
+# How long the relay waits for the producer before writing to find out whether
+# anyone is still listening. Long enough that an ordinary turn — where tokens
+# arrive continuously — never sends one, short enough that a phone in a pocket
+# does not hold a worker for the whole Ollama timeout.
+_HEARTBEAT_SECONDS = 20.0
+
+
 def _detached_stream(produce: Any, name: str) -> Response:
     """Run ``produce`` on a thread and relay the lines it emits to the client.
 
@@ -965,6 +973,15 @@ def _detached_stream(produce: Any, name: str) -> Response:
     as it likes. Anything it does in its own ``finally`` happens before the
     stream closes, which is what lets a turn be saved before the browser is
     told the reply has ended.
+
+    The relay must not simply block until the producer speaks. Measured: six
+    turns against an Ollama that accepts and never answers took every one of
+    waitress's four worker threads, and closing all six clients did not give a
+    single one back — /healthz stopped answering for the length of the Ollama
+    timeout, five minutes, and the server manager's card reads that as the app
+    being down rather than busy. A departed client cannot be detected under
+    waitress except by writing to it, so the relay writes something harmless
+    when the producer has been quiet, and lets the write do the detecting.
     """
     lines: "queue.Queue[Optional[str]]" = queue.Queue()
 
@@ -985,7 +1002,18 @@ def _detached_stream(produce: Any, name: str) -> Response:
 
     def relay() -> Iterator[str]:
         while True:
-            line = lines.get()
+            try:
+                line = lines.get(timeout=_HEARTBEAT_SECONDS)
+            except queue.Empty:
+                # Nothing to relay, so nothing has been written, so nothing has
+                # yet noticed that the client left. Under waitress there is no
+                # way to ask whether the socket is still there — the only thing
+                # that finds out is a write. So write: a blank line is not a
+                # record, both readers in the page skip it explicitly, and
+                # NDJSON allows it. Against a departed client it raises, Flask
+                # closes this generator, and the worker goes back to the pool.
+                yield "\n"
+                continue
             if line is None:
                 return
             yield line
@@ -1701,6 +1729,10 @@ def main() -> None:
             app,
             host=host,
             port=port,
+            # waitress's own default is 4, and a chat turn holds its worker for
+            # as long as the model takes. Margin, not a fix — the relay's
+            # heartbeat is what stops a departed client keeping one at all.
+            threads=get_server_threads(),
             max_request_body_size=app.config["MAX_CONTENT_LENGTH"] * 2,
         )
     except ImportError:

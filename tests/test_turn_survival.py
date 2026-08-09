@@ -469,6 +469,39 @@ class TestTheDetachedStreamItself:
     def test_producing_nothing_is_an_empty_stream_not_a_hang(self):
         assert self.emit_lines(lambda emit: None) == ""
 
+    def test_a_quiet_producer_still_writes_something(self, monkeypatch):
+        """Measured: six turns against an Ollama that accepts and never answers
+        took all four of waitress's worker threads, and closing all six clients
+        gave back none of them — /healthz stopped answering for the length of
+        the Ollama timeout, which the server manager's card reads as the app
+        being down. A departed client cannot be detected under waitress except
+        by writing to it, so the relay writes when the producer is quiet and
+        lets the write do the detecting.
+        """
+        import app as mod
+        monkeypatch.setattr(mod, "_HEARTBEAT_SECONDS", 0.05)
+
+        def slow(emit):
+            time.sleep(0.3)
+            emit("late\n")
+
+        out = self.emit_lines(slow)
+        assert out.endswith("late\n")
+        assert out.count("\n") > 1, "nothing was written while the producer was quiet"
+        assert out.replace("\n", "") == "late", "the filler was not blank lines"
+
+    def test_and_the_filler_is_something_the_page_already_ignores(self):
+        """A blank line, because both NDJSON readers in the page skip one
+        explicitly — adding a message shape instead would mean a client that
+        has to learn about it."""
+        script = page_script(chat_ui.render_page("t"))
+        assert script.count("if (!line) continue;") + script.count("if (!raw) continue;") >= 2
+
+    def test_a_talkative_producer_is_never_padded(self):
+        """An ordinary turn streams tokens continuously, so the heartbeat must
+        not put anything in the middle of one."""
+        assert self.emit_lines(lambda emit: [emit("a\n"), emit("b\n")]) == "a\nb\n"
+
 
 class TestTurnsDoNotTreadOnEachOther:
     def test_three_at_once_still_alternate(self, client, monkeypatch):

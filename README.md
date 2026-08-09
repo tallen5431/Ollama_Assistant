@@ -119,6 +119,7 @@ All settings are environment variables (the server manager injects them):
 | ------------------- | --------------------------- | ------- |
 | `HOST`              | `0.0.0.0`                   | Bind address |
 | `PORT`              | `8070`                      | Port to listen on |
+| `SERVER_THREADS`    | `8`                         | How many requests are handled at once. A chat turn holds a worker for as long as the model takes, so waitress's own default of 4 is low — four slow turns and `/healthz` stops answering, which the server manager's card reads as the app being down |
 | `OLLAMA_HOST`       | `http://127.0.0.1:11434`    | Where Ollama runs. Point at your **desktop's** LAN/Tailscale address (a trailing `/v1` is accepted). |
 | `OLLAMA_MODEL`      | `llama3.1:8b`               | Default model shown/selected in the UI |
 | `OLLAMA_TIMEOUT`    | `300`                       | How long to wait for a reply, in seconds — a 30b legitimately takes minutes |
@@ -1084,7 +1085,7 @@ found nothing, and only the last of those means the retrieval worked.
 | `GET /healthz`       | Plain `ok` health probe (stays open even when auth is on) |
 | `GET /api/health`    | JSON status (Ollama host, default model, auth + voice on/off) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
-| `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
+| `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears — that stream also sends a blank line every 20 s while the model is quiet, so skip empty lines rather than parsing them (both readers in the page already do). Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
 | `POST /api/chat/cancel` | Stop the turn running for a conversation — body `{ "conversation_id" }`. Needed because generation outlives the connection |
 | `GET /api/chat/status` | Is a turn still being generated for this conversation? `?conversation_id=` → `{"running": true\|false}`. Lets a page whose connection dropped tell "still coming" from "the server died", which otherwise look identical |
 | `GET /api/search`    | Find a phrase across conversations and records — `?q=`. Returns `{ "conversations": [...], "records": [...] }`; under two characters returns both empty |

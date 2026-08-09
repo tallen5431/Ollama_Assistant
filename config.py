@@ -265,3 +265,15 @@ def get_host_port(default_port: int = 8070) -> Tuple[str, int]:
     except (TypeError, ValueError):
         port = default_port
     return host, port
+
+
+def get_server_threads() -> int:
+    """How many requests the server handles at once.
+
+    waitress defaults to 4, which this app never chose and which is low for
+    what it does: a chat turn holds its worker for as long as the model takes,
+    so four slow turns are the whole pool and /healthz stops answering — the
+    server manager's card then reads the app as down when it is merely busy.
+    Eight is margin rather than a fix; the relay's heartbeat is the fix.
+    """
+    return max(1, int(_number("SERVER_THREADS", 8)))
