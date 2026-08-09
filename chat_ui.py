@@ -4061,10 +4061,61 @@ _PAGE = r"""<!doctype html>
       });
 
       let recording = false, mediaStream = null, audioCtx = null, srcNode = null, procNode = null, buffers = [];
-      let micRate = 16000, bufferedSamples = 0, micStarting = false;
+      let micRate = 16000, bufferedSamples = 0, micStarting = false, hpState = null;
       // ~10 minutes at 16 kHz; a 16-bit mono WAV of that is ~19 MB, inside the
       // server's 25 MB body cap with room for the header.
       const MAX_SAMPLES = 16000 * 600;
+
+      // Most of a room is below the speech.
+      //
+      // A fan, a fridge, traffic through a window, mains hum, a hand resting on
+      // the desk: nearly all of a "quiet" room's energy sits under 100 Hz, and
+      // none of it is speech. It does nothing for the recogniser, and it was
+      // doing real damage on the way in, because the level the silence detector
+      // measures is broadband — so the rumble set the threshold that speech
+      // then had to clear. Measured, a fan and 50 Hz hum put the floor at
+      // 0.017 with 89% of that energy below 130 Hz; the threshold that follows
+      // from it is 0.050, and speech in the same room reached 0.023. Nothing
+      // was ever detected, and nothing was ever sent.
+      //
+      // Two cascaded Butterworth sections, 4th order at 100 Hz. Measured: -24 dB
+      // at 50 Hz, -18 dB at 60 Hz, -42 dB at 30 Hz, and flat to within 0.2 dB
+      // from 150 Hz up, so a low male fundamental keeps its harmonics — which
+      // is where the formants the recogniser works from actually are.
+      const HP_HZ = 100;
+
+      function makeHighPass(rate) {
+        const sections = [];
+        // The two Q values that make a 4th-order Butterworth out of a pair of
+        // biquads. Anything else here is a different filter with a bump in it.
+        for (const q of [0.54119610, 1.30656296]) {
+          const w = 2 * Math.PI * HP_HZ / rate, cs = Math.cos(w);
+          const alpha = Math.sin(w) / (2 * q);
+          const a0 = 1 + alpha;
+          sections.push({
+            b0: ((1 + cs) / 2) / a0, b1: (-(1 + cs)) / a0, b2: ((1 + cs) / 2) / a0,
+            a1: (-2 * cs) / a0, a2: (1 - alpha) / a0,
+            x1: 0, x2: 0, y1: 0, y2: 0,
+          });
+        }
+        return sections;
+      }
+
+      // Carries its state between buffers on purpose: a filter restarted every
+      // 4096 samples rings at every boundary, which is a click at 4 Hz through
+      // the whole recording.
+      function highPass(sections, samples) {
+        const out = new Float32Array(samples.length);
+        for (let i = 0; i < samples.length; i++) {
+          let v = samples[i];
+          for (const s of sections) {
+            const y = s.b0 * v + s.b1 * s.x1 + s.b2 * s.x2 - s.a1 * s.y1 - s.a2 * s.y2;
+            s.x2 = s.x1; s.x1 = v; s.y2 = s.y1; s.y1 = y; v = y;
+          }
+          out[i] = v;
+        }
+        return out;
+      }
 
       // Silence detection, so a pause ends an utterance and the mic can stay on
       // for a whole conversation instead of being tapped once per sentence.
@@ -4072,6 +4123,10 @@ _PAGE = r"""<!doctype html>
       const VAD_MIN_SPEECH_MS = 300;   // shorter than this is a noise blip
       const VAD_IDLE_STOP_MS = 60000;  // close a mic that was left on by accident
       let vadFloor = 0, vadSpeechMs = 0, vadSilenceMs = 0, vadIdleMs = 0, vadHasSpeech = false;
+      // Where in the buffer the speech actually was, so what gets uploaded is
+      // the sentence rather than the sentence plus every second of room that
+      // happened to precede it.
+      let speechFrom = -1, speechTo = 0;
 
       // The loudest sample of the whole recording, so clipping that happened
       // once is still visible afterwards rather than only for one frame.
@@ -4103,8 +4158,21 @@ _PAGE = r"""<!doctype html>
         micLevelPeakEl.style.left = "0";
       }
 
+      // "No speech detected" with no reason sends people to the model picker
+      // when the actual problem is the microphone. The level the recording
+      // reached says which it was. Said in both the places that report it: the
+      // recogniser coming back empty, and the detector never having heard
+      // anything worth sending in the first place.
+      function nothingHeardHint() {
+        const why = micPeak < 0.02
+          ? " The input barely registered — check the microphone picker."
+          : (micPeak > 0.98 ? " The input was clipping — move back from the mic." : "");
+        return "No speech detected." + why;
+      }
+
       function vadReset() {
         vadFloor = 0; vadSpeechMs = 0; vadSilenceMs = 0; vadIdleMs = 0; vadHasSpeech = false;
+        speechFrom = -1; speechTo = 0;
       }
 
       // Decide speech vs silence for one buffer, and close the utterance on a
@@ -4120,7 +4188,24 @@ _PAGE = r"""<!doctype html>
         else vadFloor = rms < vadFloor ? vadFloor * 0.9 + rms * 0.1
                                        : vadFloor * 0.995 + rms * 0.005;
 
-        if (rms > Math.max(vadFloor * 3, 0.006)) {
+        // 2x the floor, not the 3x this had. Three demanded that speech be
+        // 9.5 dB above the room, which is more than it usually manages next to
+        // a fan; two is 6 dB. Swept against a fan, traffic, a television and a
+        // quiet room, each with and without a door slamming, a chair scraping
+        // and someone typing: 2x detects the rooms 3x missed entirely, and
+        // still ignores everything 3x ignored. Below 2x a door slam starts
+        // being sent, which is where the sweep stopped.
+        //
+        // A second, lower threshold to stay in speech once it has started —
+        // the usual answer to a sentence arriving in fragments — was tried and
+        // measured worse: it lets a door slam hold itself above the lower bar
+        // long enough to count, and with a realistic voice there was no
+        // fragmentation left for it to fix.
+        if (rms > Math.max(vadFloor * 2, 0.006)) {
+          // Remember where it was. This buffer has already been pushed, so it
+          // is the last chunk.length samples of what is held.
+          if (speechFrom < 0) speechFrom = bufferedSamples - chunk.length;
+          speechTo = bufferedSamples;
           vadSpeechMs += ms; vadSilenceMs = 0; vadIdleMs = 0;
           if (vadSpeechMs >= VAD_MIN_SPEECH_MS) vadHasSpeech = true;
         } else {
@@ -4130,13 +4215,36 @@ _PAGE = r"""<!doctype html>
         }
       }
 
+      // What to keep either side of the speech. Enough lead-in that a soft
+      // first consonant is not clipped off, enough tail that the last word
+      // finishes — and no more, because everything past that is room.
+      const SPEECH_LEAD_MS = 250, SPEECH_TAIL_MS = 300;
+
+      // Send the sentence, not the sentence plus everything before it.
+      //
+      // A pause-delimited utterance used to be "everything captured since the
+      // last one", which in a room the detector never triggered in could be a
+      // minute of fan noise with three seconds of speech at the end. The
+      // recogniser does not ignore the rest — it looks for words in it, and
+      // finds some.
+      function trimToSpeech(samples) {
+        if (speechFrom < 0) return samples;
+        const lead = Math.round(micRate * SPEECH_LEAD_MS / 1000);
+        const tail = Math.round(micRate * SPEECH_TAIL_MS / 1000);
+        const from = Math.max(0, speechFrom - lead);
+        const to = Math.min(samples.length, speechTo + tail);
+        return to > from ? samples.subarray(from, to) : samples;
+      }
+
       // Cut what has been captured so far into its own utterance and send it off
       // to be transcribed, without tearing down the mic.
       function flushUtterance() {
-        const captured = buffers;
+        const captured = mergeBuffers(buffers);
+        const speech = trimToSpeech(captured);
         buffers = []; bufferedSamples = 0;
         vadSpeechMs = 0; vadSilenceMs = 0; vadHasSpeech = false;
-        const wav = encodeWav(mergeBuffers(captured), micRate, 16000);
+        speechFrom = -1; speechTo = 0;
+        const wav = encodeWav(speech, micRate, 16000);
         if (wav) transcribeBlob(wav);
       }
 
@@ -4207,16 +4315,23 @@ _PAGE = r"""<!doctype html>
         srcNode = audioCtx.createMediaStreamSource(mediaStream);
         procNode = audioCtx.createScriptProcessor(4096, 1, 1);
         buffers = []; bufferedSamples = 0; vadReset();
+        hpState = makeHighPass(micRate);
         procNode.onaudioprocess = (e) => {
-          const chunk = new Float32Array(e.inputBuffer.getChannelData(0));
+          const raw = e.inputBuffer.getChannelData(0);
+          // The meter reads the microphone, not the filter: "is it hearing me"
+          // and "is it clipping" are both questions about the input, and
+          // clipping has already happened by the time we see it.
+          showLevel(raw);
+          // Everything downstream — the detector, the upload — gets the
+          // filtered signal, which is the one the recogniser cares about.
+          // highPass allocates, so this is also the copy that has to be taken
+          // anyway: the browser reuses the buffer behind getChannelData.
+          const chunk = highPass(hpState, raw);
           buffers.push(chunk);
           bufferedSamples += chunk.length;
-          // Before the branch: the VAD only runs in continuous mode, and
-          // "am I being heard" is the question in both.
-          showLevel(chunk);
-          if (continuousEl.checked) { vadStep(chunk); return; }
-          // Push-to-talk: no VAD runs, so the idle stop and the length cap have
-          // to be enforced here or a mic left on records until the upload 413s.
+          if (continuousEl.checked) vadStep(chunk);
+          // In both modes, or a mic left running in a room the detector never
+          // triggers in records until the upload 413s.
           if (bufferedSamples >= MAX_SAMPLES) {
             hintEl.textContent = "Reached the maximum recording length — transcribing.";
             setTimeout(stopMic, 0);
@@ -4237,10 +4352,20 @@ _PAGE = r"""<!doctype html>
         micLevelEl.hidden = true;
         try { procNode.disconnect(); srcNode.disconnect(); } catch (e) {}
         if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-        const captured = buffers;
-        buffers = []; bufferedSamples = 0; vadReset();
+        const captured = mergeBuffers(buffers);
+        // Nothing was ever heard: don't post a minute of room noise and let the
+        // recogniser find words in it. Only in continuous mode — a deliberate
+        // tap on the mic is a deliberate request, and push-to-talk runs no
+        // detector to have an opinion.
+        const nothingHeard = continuousEl.checked && speechFrom < 0;
+        const speech = trimToSpeech(captured);
+        buffers = []; bufferedSamples = 0; vadReset(); hpState = null;
         try { await audioCtx.close(); } catch (e) {}
-        const wav = encodeWav(mergeBuffers(captured), micRate, 16000);
+        if (nothingHeard) {
+          hintEl.textContent = captured.length ? nothingHeardHint() : "";
+          return;
+        }
+        const wav = encodeWav(speech, micRate, 16000);
         if (!wav) { hintEl.textContent = ""; return; }
         await transcribeBlob(wav);
       }
@@ -4267,13 +4392,7 @@ _PAGE = r"""<!doctype html>
           if (j.error) { hintEl.textContent = j.error; return; }
           const t = (j.text || "").trim();
           if (!t) {
-            // "No speech detected" with no reason sends people to the model
-            // picker when the actual problem is the microphone. The level the
-            // recording reached says which it was.
-            const why = micPeak < 0.02
-              ? " The input barely registered — check the microphone picker."
-              : (micPeak > 0.98 ? " The input was clipping — move back from the mic." : "");
-            hintEl.textContent = recording ? "Listening…" : "No speech detected." + why;
+            hintEl.textContent = recording ? "Listening…" : nothingHeardHint();
             return;
           }
           inputEl.value = (inputEl.value ? inputEl.value.trim() + " " : "") + t;

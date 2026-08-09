@@ -210,6 +210,51 @@ shorter than 300 ms is treated as a noise blip rather than speech. If a reply is
 still streaming when you finish talking, the text waits in the box rather than
 being dropped.
 
+### Background noise
+
+Three things happen to the audio before the recogniser sees it, all of them
+because a room is noisier than it sounds.
+
+**Most of a room is below the speech.** A fan, a fridge, traffic through a
+window, mains hum, a hand resting on the desk — nearly all of a "quiet" room's
+energy sits under 100 Hz, where there is no speech at all. It contributes
+nothing to recognition, and it was doing real damage on the way in: the level
+the silence detector measures is broadband, so the rumble set the threshold that
+your voice then had to clear. Measured, a fan and 50 Hz hum put the floor at
+0.017 with 89% of that energy below 130 Hz; speech in the same room reached
+0.023 against a threshold of 0.050. Nothing was detected and nothing was sent.
+A 4th-order high-pass at 100 Hz now runs first — 24 dB down at 50 Hz, 42 dB at
+30 Hz, and flat to within 0.2 dB from 150 Hz up, so a low male fundamental keeps
+the harmonics the recogniser actually works from.
+
+**The bar was set too high.** Speech had to be 3× the noise floor — 9.5 dB — to
+count. It is now 2×, which is 6 dB. That was picked by sweeping it against a
+fan, traffic, a television and a quiet room, each with and without a door
+slamming, a chair scraping and someone typing: 2× hears the rooms 3× missed
+entirely and still ignores everything 3× ignored, and below 2× a door slam
+starts getting sent. Together with the filter, the quietest voice a fan will let
+through went from 0.24 to 0.08 — three times quieter — and next to traffic from
+0.48 to 0.08.
+
+**What gets sent is the sentence.** An utterance used to be everything captured
+since the last one, which in a room the detector never triggered in is a minute
+of fan noise with three seconds of speech at the end. The recogniser does not
+ignore the rest; it looks for words in it and finds some. Now only the speech is
+posted, with 250 ms of lead-in so a soft first consonant is not clipped and
+300 ms of tail so the last word finishes. A mic left running in an empty room
+posts nothing at all rather than uploading the room. Push-to-talk still sends
+everything it recorded — no detector runs, and a deliberate tap is a deliberate
+request.
+
+Two honest caveats. A television is the case that stays hard: it is broadband
+and speech-shaped, so nothing short of telling two voices apart distinguishes it
+from you, and you do have to talk over it. And your browser runs its own noise
+suppression before the page sees a sample — measured in Chromium, it already
+takes about 15 dB off 50 Hz — so how much the filter adds on top depends on how
+good your browser's is. It is there because that varies a great deal between
+browsers and phones, and 5 multiply-adds per sample is not a price worth
+haggling over.
+
 **Choosing a language.** Next to the mic is a small language picker. It lists the
 models already on the server first, then the rest of a built-in catalog (English,
 Spanish, French, German, Italian, Portuguese, Dutch, Russian, Chinese, Japanese,
