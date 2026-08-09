@@ -527,16 +527,41 @@ a working config are in [`searxng/`](searxng/):
 ```bash
 cd searxng
 sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+grep -q ultrasecretkey settings.yml && echo "the key was NOT replaced — SearXNG will refuse to start"
 docker compose up -d
 ```
 
-Then point the app at it and restart it:
+`docker compose` is the v2 plugin, which Ubuntu's `docker.io` package does not
+include. If that line fails — `unknown shorthand flag: 'd' in -d`, or `'compose'
+is not a docker command` — you have Docker without it. Either install it
+(`sudo apt install docker-compose-v2`, or `docker-compose-plugin` from Docker's
+own repository), use the v1 binary if that is what is there
+(`docker-compose up -d`, hyphenated), or skip compose altogether — this is the
+same container, spelled out, and depends on nothing but `docker` itself:
 
 ```bash
+docker run -d --name searxng --restart unless-stopped \
+  -p 127.0.0.1:8888:8080 \
+  -v "$PWD:/etc/searxng:rw" \
+  -e SEARXNG_BASE_URL=http://localhost:8888/ \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETGID --cap-add SETUID \
+  --log-driver json-file --log-opt max-size=1m --log-opt max-file=1 \
+  docker.io/searxng/searxng:latest
+```
+
+Run that from inside `searxng/`, so `$PWD` is the directory holding
+`settings.yml`. Check it came up with `docker logs searxng` — a container that
+exits immediately is almost always the secret key still being the default.
+
+Then come back up to the project root, point the app at it, and restart it:
+
+```bash
+cd ..
 export SEARXNG_URL=http://127.0.0.1:8888
 ```
 
-Check it end to end without opening the app:
+Check it end to end without opening the app (from the project root, where the
+virtualenv is):
 
 ```bash
 .venv/bin/python tools/check_web.py

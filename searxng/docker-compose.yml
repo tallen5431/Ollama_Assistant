@@ -9,6 +9,13 @@
 #   docker compose up -d
 #
 # Then set SEARXNG_URL=http://127.0.0.1:8888 for the chat app and restart it.
+#
+# `docker compose` is the v2 plugin and Ubuntu's docker.io package ships
+# without it — "unknown shorthand flag: 'd' in -d" is what that looks like,
+# because the -d never reaches a compose that would understand it. Either
+# install it (docker-compose-v2), use the hyphenated v1 binary if that is what
+# is there, or run the container directly; the README spells out the equivalent
+# docker run, which needs nothing but docker.
 
 services:
   searxng:
