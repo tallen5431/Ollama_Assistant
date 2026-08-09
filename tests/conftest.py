@@ -132,6 +132,25 @@ def no_stub_left_behind():
         )
 
 
+def allow_loopback(monkeypatch, name_check=lambda host: "public"):
+    """Let a test fetch its own stand-in server over the real socket.
+
+    Two guards refuse a loopback address, and a test that relaxes one and not
+    the other fails somewhere unhelpful: _address_check runs on the hostname
+    before the connection, and _peer_check runs on the address the socket
+    actually reached, so that a name which resolves differently the second time
+    cannot slip past. Both are relaxed here so nobody has to remember the
+    second one exists.
+
+    ``name_check`` is the one worth varying — a test of the redirect guard
+    allows the first hop and refuses the next — while the socket check is
+    simply opened, since every stand-in server in this suite is on 127.0.0.1.
+    """
+    import web
+    monkeypatch.setattr(web, "_address_check", name_check)
+    monkeypatch.setattr(web, "_peer_check", lambda ip: "public")
+
+
 def page_script(page: str) -> str:
     """The page's own script, out of the rendered HTML.
 

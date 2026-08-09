@@ -565,6 +565,14 @@ turn this into a probe for your own network. The single exception is
 `SEARXNG_URL`, which is operator configuration rather than something a model or
 a page chose.
 
+The address is checked twice: once on the name before the request, and once on
+the socket after it connects. A nameserver can answer differently the second
+time it is asked — public when the guard checks, `127.0.0.1` when the
+connection is made — and the second check is where that stops, before any of
+the request has been sent. (A configured HTTP proxy is the exception: the
+socket then goes to the proxy, so its address says nothing, and the name check
+is doing the work on its own.)
+
 Retrieved text is fenced and labelled as reference material, with an explicit
 instruction to ignore any directions inside it. That reduces prompt injection
 but does not eliminate it — so nothing here can *act*. There are no tools with

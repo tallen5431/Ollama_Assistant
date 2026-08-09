@@ -8,6 +8,9 @@ none of those are trusted to point somewhere sensible.
 from __future__ import annotations
 
 import json
+import shutil
+import ssl
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -15,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 import web
+from conftest import allow_loopback
 from config import get_web_max_docs
 
 PAGE = """<!doctype html>
@@ -228,7 +232,7 @@ def site(monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     # The guard is exercised directly elsewhere; here we need it out of the way
     # so the fetch/extract path can be tested against a real socket.
-    monkeypatch.setattr(web, "_address_check", lambda host: "public")
+    allow_loopback(monkeypatch)
     try:
         yield f"http://127.0.0.1:{server.server_port}"
     finally:
@@ -278,7 +282,7 @@ class TestRedirectGuard:
             calls["n"] += 1
             return "public" if calls["n"] == 1 else "private"
 
-        monkeypatch.setattr(web, "_address_check", guard)
+        allow_loopback(monkeypatch, guard)
         try:
             with pytest.raises(web.WebError, match="private or local"):
                 web.fetch(f"http://127.0.0.1:{server.server_port}/redirect-to-localhost")
@@ -286,6 +290,129 @@ class TestRedirectGuard:
         finally:
             server.shutdown()
             server.server_close()
+
+
+@pytest.fixture(scope="module")
+def tls_site(tmp_path_factory):
+    """A local https server with a throwaway self-signed certificate.
+
+    Generated at test time rather than checked in: a private key in the
+    repository is a thing every scanner and every reader has to stop and think
+    about, however harmless. Skipped where openssl is not on the path, which is
+    honest about what was and was not verified on that machine.
+    """
+    if not shutil.which("openssl"):
+        pytest.skip("openssl not available to make a throwaway certificate")
+    where = tmp_path_factory.mktemp("tls")
+    cert, key = where / "c.pem", where / "k.pem"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", str(key),
+         "-out", str(cert), "-days", "2", "-nodes", "-subj", "/CN=127.0.0.1",
+         "-addext", "subjectAltName=IP:127.0.0.1"],
+        check=True, capture_output=True,
+    )
+    server = HTTPServer(("127.0.0.1", 0), _TlsHandler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(cert), str(key))
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"https://127.0.0.1:{server.server_port}/page", str(cert)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class _TlsHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"<html><title>T</title><body><p>hello over tls</p></body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class TestRebindingGuard:
+    """check_url resolves the name; requests then resolves it again when it
+    dials. A nameserver the attacker controls answers differently the second
+    time — public for the check, 127.0.0.1 for the connection — and the guard
+    has approved a fetch that never happens while a different one does.
+
+    The rebind is simulated the only way it can be here: the name check is told
+    the host is public and the socket check meets the real rule, which is
+    exactly the pair of answers a rebind produces.
+    """
+
+    def server(self):
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        server.hits = []
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_a_name_that_changes_its_answer_is_refused_at_the_socket(self, monkeypatch):
+        monkeypatch.setattr(web, "_address_check", lambda host: "public")
+        server = self.server()
+        try:
+            with pytest.raises(web.WebError, match="private or local"):
+                web.fetch(f"http://127.0.0.1:{server.server_port}/page")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_and_nothing_is_sent_before_it_is_refused(self, monkeypatch):
+        """The point of checking at the socket rather than after the response:
+        a rebind aimed at http://router.lan/reboot must not fire the request
+        and then be told off for it. The handshake completes; nothing else."""
+        seen = []
+
+        class _Counting(_Handler):
+            def do_GET(self):
+                seen.append(self.path)
+                super().do_GET()
+
+        monkeypatch.setattr(web, "_address_check", lambda host: "public")
+        server = HTTPServer(("127.0.0.1", 0), _Counting)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with pytest.raises(web.WebError):
+                web.fetch(f"http://127.0.0.1:{server.server_port}/page")
+            assert seen == [], f"the request was sent anyway: {seen}"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_https_still_works_through_the_guarded_pool(self, monkeypatch, tls_site):
+        """The guard swaps requests' connection classes, and https is the one
+        that matters — almost every real fetch is https, and none of the plain
+        HTTP tests above would notice if TLS, SNI or certificate verification
+        broke on the way through."""
+        allow_loopback(monkeypatch)
+        url, ca = tls_site
+        resp = web._SESSION.get(url, verify=ca, timeout=5)
+        assert resp.status_code == 200 and "hello over tls" in resp.text
+
+    def test_and_the_socket_guard_applies_to_https_too(self, monkeypatch, tls_site):
+        monkeypatch.setattr(web, "_address_check", lambda host: "public")
+        url, ca = tls_site
+        with pytest.raises(web.WebError, match="private or local"):
+            web._SESSION.get(url, verify=ca, timeout=5)
+
+    @pytest.mark.parametrize("ip,expected", [
+        ("8.8.8.8", "public"),
+        ("127.0.0.1", "private"),
+        ("192.168.1.10", "private"),
+        ("100.100.1.2", "private"),      # the tailnet range
+        ("169.254.169.254", "private"),  # the cloud metadata address
+        ("::1", "private"),
+        ("2606:4700:4700::1111", "public"),
+        ("not-an-address", "private"),   # unreadable is not something to dial
+    ])
+    def test_the_socket_rule_matches_the_name_rule(self, ip, expected):
+        assert web._peer_check(ip) == expected
 
 
 def planner(reply):

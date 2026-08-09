@@ -11,7 +11,9 @@ Two rules shape the code:
 * **Nothing but public addresses.** Every hop of every request is resolved and
   checked before it is made, so a pasted (or model-chosen) URL can't turn the
   app into a probe for the LAN, the tailnet, or localhost. Redirects are
-  followed by hand for the same reason.
+  followed by hand for the same reason, and the address is checked a second
+  time on the connected socket, where a name that answers differently the
+  second time it is resolved can no longer change it.
 * **Retrieved text is data, never instructions.** It is fenced and labelled
   before it reaches the model. Nothing here can trigger an action; the only
   thing a page can do is be read.
@@ -37,6 +39,8 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
+import urllib3
+from requests.adapters import HTTPAdapter
 from urllib3.util import parse_url as _parse_url  # the parser requests dials with
 
 from config import (
@@ -206,6 +210,90 @@ def _address_check(host: str) -> str:
         if not ip.is_global:
             return "private"
     return "public"
+
+
+def _peer_check(ip: str) -> str:
+    """``"public"`` or ``"private"`` for an address already resolved.
+
+    The same is_global rule as _address_check, without the lookup — there is
+    nothing left to look up — and separate from it so that a test can allow a
+    loopback stand-in at one and still meet the real rule at the other.
+    """
+    try:
+        return "public" if ipaddress.ip_address(ip).is_global else "private"
+    except ValueError:
+        return "private"
+
+
+def _guard_socket(sock: socket.socket, host: str) -> socket.socket:
+    """Refuse a connection that landed somewhere check_url would not have.
+
+    check_url resolves a name and approves it; requests then resolves the same
+    name again, independently, when it dials. A nameserver the attacker
+    controls can answer differently the second time — a public address for the
+    check, 127.0.0.1 for the connection — and the guard has approved a fetch
+    that never happens while a different one does. This is DNS rebinding, and
+    no amount of care in check_url can close it, because check_url is not what
+    chooses the address.
+
+    So the address is checked once more, where it can no longer change: the
+    socket is connected, and getpeername() is where the bytes will actually go.
+    Nothing has been sent yet — the TCP handshake completes, the request does
+    not — so a rebind reaches a closed connection rather than a LAN service.
+    """
+    try:
+        peer = sock.getpeername()[0]
+    except OSError as exc:
+        sock.close()
+        raise WebError(f"Lost the connection to {host} before it could be checked") from exc
+    if _peer_check(peer) != "public":
+        sock.close()
+        raise WebError(
+            f"Refusing to fetch {host} — it connected to {peer}, which is a "
+            "private or local address, even though the name gave a public one "
+            "when it was checked a moment earlier."
+        )
+    return sock
+
+
+class _GuardedHTTPConnection(urllib3.connection.HTTPConnection):
+    def _new_conn(self) -> socket.socket:
+        return _guard_socket(super()._new_conn(), self.host)
+
+
+class _GuardedHTTPSConnection(urllib3.connection.HTTPSConnection):
+    def _new_conn(self) -> socket.socket:
+        return _guard_socket(super()._new_conn(), self.host)
+
+
+class _GuardedHTTPConnectionPool(urllib3.HTTPConnectionPool):
+    ConnectionCls = _GuardedHTTPConnection
+
+
+class _GuardedHTTPSConnectionPool(urllib3.HTTPSConnectionPool):
+    ConnectionCls = _GuardedHTTPSConnection
+
+
+class _GuardedAdapter(HTTPAdapter):
+    """A requests adapter whose sockets are checked after they connect.
+
+    Only the direct path is swapped. When a proxy is configured requests builds
+    a separate ProxyManager, which this leaves alone on purpose: the socket
+    then goes to the proxy, so its address says nothing about where the request
+    ends up, and checking it would reject an ordinary localhost proxy. A
+    proxied fetch is guarded by check_url alone, as it was before.
+    """
+
+    def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
+        super().init_poolmanager(*args, **kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            "http": _GuardedHTTPConnectionPool,
+            "https": _GuardedHTTPSConnectionPool,
+        }
+
+
+_SESSION.mount("http://", _GuardedAdapter())
+_SESSION.mount("https://", _GuardedAdapter())
 
 
 def check_url(url: str) -> str:
