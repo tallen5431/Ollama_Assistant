@@ -417,11 +417,70 @@ which half is at fault.
 
 ### Search backend
 
-With no configuration, search uses DuckDuckGo's HTML endpoint — no key, but
-best-effort and rate-limited. For something sturdier, self-host
-[SearXNG](https://docs.searxng.org/) and set `SEARXNG_URL=http://127.0.0.1:8888`.
-That endpoint is allowed to be on localhost precisely because *you* configured
-it; see below.
+With no configuration, search uses DuckDuckGo's HTML endpoint. It needs no key
+and it works until it doesn't: there is no API here, only a page meant for a
+person, and DuckDuckGo is entitled to decide a given address is not one.
+
+**When it stops, this is what it looks like.** The panel under the reply says
+something like:
+
+> `html.duckduckgo.com served a bot challenge (DuckDuckGo — Unfortunately, bots
+> use DuckDuckGo too. Please complete the following challenge to confirm this
+> search was made by a human…)`
+
+That is not a bug to be fixed here and not something waiting reliably clears.
+Your address has been flagged, and a captcha is not a thing a program can
+answer. (If instead it says *"returned a page with no results in it"* with no
+challenge, that **is** a bug here — DuckDuckGo moved its markup, and it needs
+fixing in `web.py`.)
+
+### Running your own search — the durable fix
+
+[SearXNG](https://docs.searxng.org/) is a metasearch engine: it queries the
+engines for you and answers with JSON, so this app never scrapes anyone's HTML.
+It runs on the same box as everything else and needs no key. A compose file and
+a working config are in [`searxng/`](searxng/):
+
+```bash
+cd searxng
+sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+docker compose up -d
+```
+
+Then point the app at it and restart it:
+
+```bash
+export SEARXNG_URL=http://127.0.0.1:8888
+```
+
+Check it end to end without opening the app:
+
+```bash
+.venv/bin/python tools/check_web.py
+```
+
+That names the backend it used and prints the results it got, so a pass means
+the whole path works.
+
+**Two settings do all the work**, and a stock SearXNG has both wrong for this:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `SearXNG returned HTTP 403` | It serves HTML only out of the box | add `json` under `search: formats:` |
+| `SearXNG returned HTTP 429` | The bot limiter is on | set `server: limiter: false` |
+
+Both are already set in `searxng/settings.yml`, and the app names the fix in
+the error if you are using your own config. The limiter exists to stop a
+*public* instance being scraped by deciding whether a caller looks like a
+browser; this app isn't one, and an instance on loopback has nobody to keep
+out.
+
+The compose file binds to `127.0.0.1` deliberately. An open SearXNG is
+something other people find and use, and nothing needs to reach it but the app
+on the same machine — you already get to the box over Tailscale.
+
+`SEARXNG_URL` is allowed to point at a private address, unlike anything a model
+or a page asks for; see "What it will and won't reach" below.
 
 ### What it will and won't reach
 
@@ -871,12 +930,23 @@ Results are found by their `/l/?uddg=` redirector when the class names no
 longer match — that redirector is the product, the class names are decoration
 and get reshuffled. An endpoint returning a page with no results in it is
 reported as a fault rather than as an empty list, and the panel shows the first
-line of whatever did come back, so a captcha, an error and a moved layout can
-be told apart. A query that genuinely matches nothing still comes back as
-nothing, because those are different answers.
+line of whatever did come back. A query that genuinely matches nothing still
+comes back as nothing, because those are different answers.
 
-Scraping is fragile by nature. If web access matters to you, run SearXNG and
-point `SEARXNG_URL` at it — it is a JSON API that does not change under you.
+The panel distinguishes the two failures by name, because they have opposite
+answers:
+
+- **"served a bot challenge"** — the address has been flagged and is being
+  asked to prove it is a person. Nothing in this repo can answer a captcha.
+  This is the end of the road for scraping; run SearXNG.
+- **"returned a page with no results in it"** — the markup moved. That is a bug
+  here, in `_duck_results` and `_DUCK_ENDPOINTS`, and the gist in the panel is
+  the evidence for fixing it.
+
+Scraping is fragile by nature and this is what it looks like when it gives out.
+If web access matters to you, run SearXNG and point `SEARXNG_URL` at it — it is
+a JSON API that does not change under you. See "Running your own search" above;
+the compose file is in `searxng/`.
 
 ## Seeing what a turn did
 

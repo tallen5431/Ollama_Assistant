@@ -677,13 +677,43 @@ def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
         low = body.lower()
         if any(marker in low for marker in _NO_HITS):
             return []          # a real answer: nothing matches
+        if _looks_like_a_bot_challenge(body):
+            empty.append(f"{_host_only(base)} served a bot challenge "
+                         f"({_page_gist(body)})")
+            continue
         empty.append(f"{_host_only(base)} returned a page with no results in it "
                      f"({_page_gist(body)})")
+    # Naming the cause matters, because the two have different answers. A
+    # markup change is a bug here and gets fixed here. A bot challenge is not:
+    # the address has been flagged, no amount of scraping gets past it, and
+    # waiting does not reliably clear it either.
+    challenged = any("bot challenge" in note for note in empty)
     raise WebError(
-        "; ".join(empty) + ". DuckDuckGo may have changed its markup or be "
-        "rate-limiting this address — set SEARXNG_URL to your own SearXNG "
-        "instance for a search that does not depend on scraping."
+        "; ".join(empty) + ". "
+        + ("DuckDuckGo is asking this address to prove it is a person, which "
+           "scraping cannot answer. " if challenged
+           else "DuckDuckGo may have changed its markup or be rate-limiting "
+                "this address. ")
+        + "Set SEARXNG_URL to your own SearXNG instance for a search that does "
+          "not depend on scraping — see the README."
     )
+
+
+# The wording DuckDuckGo uses when it has decided the caller is a bot. Matched
+# on the page rather than the status code, because it is served as a perfectly
+# ordinary 200.
+_BOT_CHALLENGE = (
+    "bots use duckduckgo too",
+    "confirm this search was made by a human",
+    "complete the following challenge",
+    "unusual traffic",
+    "are you a robot",
+)
+
+
+def _looks_like_a_bot_challenge(body: str) -> bool:
+    low = (body or "").lower()
+    return any(marker in low for marker in _BOT_CHALLENGE)
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -715,19 +745,46 @@ def _host_only(url: str) -> str:
         return url
 
 
+# The two ways a fresh SearXNG turns a search away, and what to do about each.
+# Both are configuration rather than faults, and both produce a bare status
+# code that says nothing about the cause — which is a long evening if you do
+# not already know these are the answers.
+_JSON_FORMAT_ADVICE = (
+    " A new SearXNG only serves HTML: add `json` under `search: formats:` in "
+    "its settings.yml and restart it."
+)
+_LIMITER_ADVICE = (
+    " SearXNG's bot limiter is turned on and is blocking this app. Set "
+    "`server: limiter: false` in its settings.yml — it exists to keep a public "
+    "instance from being scraped, and a private one has nobody to keep out."
+)
+
+
+def _searxng_advice(status: int) -> str:
+    if status in (403, 400):
+        return _JSON_FORMAT_ADVICE
+    if status == 429:
+        return _LIMITER_ADVICE
+    return ""
+
+
 def _search_searxng(base: str, query: str, limit: int) -> List[Dict[str, str]]:
     # Operator-configured, so allowed to be on localhost — see _get().
     url = f"{base}/search?format=json&q=" + quote(query)
     resp = _get(url, trusted=True)
     with resp:
         if not resp.ok:
-            raise WebError(f"SearXNG returned HTTP {resp.status_code}")
+            raise WebError(f"SearXNG returned HTTP {resp.status_code}."
+                           + _searxng_advice(resp.status_code))
         # Read through the cap rather than resp.json(), which would happily
         # buffer an unbounded reply.
+        body = _read_capped(resp)
         try:
-            data = json.loads(_read_capped(resp))
+            data = json.loads(body)
         except ValueError as exc:
-            raise WebError("SearXNG returned something that isn't JSON") from exc
+            raise WebError(
+                "SearXNG answered with something that isn't JSON"
+                f" ({_page_gist(body, 80)})." + _JSON_FORMAT_ADVICE) from exc
     if not isinstance(data, dict):
         raise WebError("SearXNG returned an unexpected payload")
     out = []

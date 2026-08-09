@@ -1,0 +1,46 @@
+# Overrides only — `use_default_settings` keeps everything else at SearXNG's
+# own defaults, so this file stays short enough to check by eye.
+use_default_settings: true
+
+server:
+  # Replace before the first start. SearXNG refuses to run on the default:
+  #   sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+  secret_key: "ultrasecretkey"
+
+  # Off, and this is the setting that matters most here.
+  #
+  # The limiter exists to stop a *public* instance being scraped, and it works
+  # by deciding whether a request looks like a browser. This app is not a
+  # browser, so with the limiter on every search comes back HTTP 429 and the
+  # app reports it as such. A private instance on loopback has nobody to keep
+  # out.
+  limiter: false
+  public_instance: false
+
+search:
+  # `json` is the whole point: SearXNG ships serving HTML only, and without
+  # this line every search from the app fails with HTTP 403 and the message
+  # "Invalid settings, please edit your preferences". It is the single most
+  # common reason a fresh instance does not work.
+  formats:
+    - html
+    - json
+
+  # A pharmacy lookup, a part number, a medical abbreviation: this is a tool
+  # for looking things up, and the filter mostly gets in the way of that.
+  safe_search: 0
+
+# Which engines answer. The default set is wide and includes several that are
+# slow or rate-limit quickly; these four are fast, need no key, and between
+# them cover general lookups well. Add more once it is working — `!goog query`
+# in the SearXNG web UI at http://127.0.0.1:8888 tries a single engine, which
+# is the quick way to find out which ones your address is welcome on.
+engines:
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: false

@@ -761,6 +761,107 @@ class TestSearchParsing:
         assert web.search("   ") == []
 
 
+class TestSelfHostedSearchIsTheDurableAnswer:
+    """DuckDuckGo served the NucBox a captcha, which is where scraping ends.
+    SearXNG is what the app falls back on, so it has to work first time and
+    say what is wrong when it doesn't — the two ways a fresh one turns a
+    request away are both configuration, and both arrive as a bare status code.
+    """
+
+    def searx(self, monkeypatch, status=200, ctype="application/json", body=None):
+        monkeypatch.setenv("SEARXNG_URL", "http://127.0.0.1:8888")
+        monkeypatch.setattr(web, "web_enabled", lambda: True)
+        payload = body if body is not None else json.dumps({"results": []})
+
+        class R:
+            ok = 200 <= status < 300
+            status_code = status
+            encoding = "utf-8"
+            headers = {"Content-Type": ctype}
+            def iter_content(self, size):
+                yield payload.encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr(web, "_get", lambda url, **kw: R())
+
+    # The shape SearXNG actually answers with, fields and all.
+    REAL = json.dumps({
+        "query": "NDC 69097-142-60",
+        "number_of_results": 2,
+        "results": [
+            {"url": "https://ndclist.com/ndc/69097-142-60",
+             "title": "NDC 69097-142-60 Albuterol Sulfate",
+             "content": "Albuterol Sulfate Inhalation Aerosol, 90 mcg per actuation.",
+             "engine": "google", "score": 1.0, "category": "general",
+             "parsed_url": ["https", "ndclist.com", "/ndc/69097-142-60", "", "", ""]},
+            {"url": "https://dailymed.nlm.nih.gov/x", "title": "DAILYMED",
+             "content": "Rx only.", "engine": "duckduckgo", "score": 0.9},
+        ],
+        "answers": [], "corrections": [], "infoboxes": [], "suggestions": [],
+        "unresponsive_engines": [],
+    })
+
+    def test_a_real_reply_is_read(self, monkeypatch):
+        self.searx(monkeypatch, body=self.REAL)
+        hits = web.search("NDC 69097-142-60 albuterol", 3)
+        assert [h["url"] for h in hits] == ["https://ndclist.com/ndc/69097-142-60",
+                                            "https://dailymed.nlm.nih.gov/x"]
+        assert hits[0]["title"] == "NDC 69097-142-60 Albuterol Sulfate"
+        assert "90 mcg per actuation" in hits[0]["snippet"]
+
+    def test_the_limit_is_honoured(self, monkeypatch):
+        self.searx(monkeypatch, body=self.REAL)
+        assert len(web.search("anything", 1)) == 1
+
+    def test_a_result_with_no_url_is_dropped(self, monkeypatch):
+        """It cannot be fetched or cited, so it is not a result."""
+        self.searx(monkeypatch, body=json.dumps(
+            {"results": [{"title": "no url here", "content": "x"},
+                         {"url": "https://ok.example/", "title": "fine"}]}))
+        assert [h["url"] for h in web.search("anything", 3)] == ["https://ok.example/"]
+
+    def test_the_json_format_being_off_says_so(self, monkeypatch):
+        """SearXNG ships serving HTML only, so this is what *every* fresh
+        install does on the first search. "HTTP 403" on its own is a long
+        evening."""
+        self.searx(monkeypatch, status=403, ctype="text/plain",
+                   body="Invalid settings, please edit your preferences")
+        with pytest.raises(web.WebError) as caught:
+            web.search("anything", 3)
+        said = str(caught.value)
+        assert "403" in said
+        assert "search: formats:" in said and "json" in said
+        assert "settings.yml" in said
+
+    def test_the_limiter_blocking_it_says_so(self, monkeypatch):
+        self.searx(monkeypatch, status=429, ctype="text/html", body="<h1>Too Many</h1>")
+        said = str(pytest.raises(web.WebError,
+                                 web.search, "anything", 3).value)
+        assert "429" in said and "limiter" in said
+
+    def test_html_where_json_was_asked_for_says_so_too(self, monkeypatch):
+        """Some configurations answer 200 with the search page instead."""
+        self.searx(monkeypatch, ctype="text/html",
+                   body="<html><head><title>SearXNG</title></head><body>x</body></html>")
+        said = str(pytest.raises(web.WebError,
+                                 web.search, "anything", 3).value)
+        assert "isn't JSON" in said
+        assert "search: formats:" in said, "and what to do about it"
+        assert "SearXNG" in said, "with a glimpse of what came back"
+
+    def test_an_unrelated_failure_is_not_given_a_confident_wrong_cause(self, monkeypatch):
+        """A 500 is SearXNG being broken, not a setting. Attaching the json
+        advice to it would send someone editing a file that is already right.
+        """
+        self.searx(monkeypatch, status=500, body="boom")
+        said = str(pytest.raises(web.WebError, web.search, "anything", 3).value)
+        assert "500" in said
+        assert "formats" not in said and "limiter" not in said
+
+
 class TestReviewRegressions:
     """Cases found by the code review — each failed before its fix."""
 
@@ -1312,6 +1413,11 @@ class TestProseDeclines:
 # --------------------------------------------------------------------------
 
 _HTML_BLOCKED = "<html><body><div>If this error persists, let us know.</div></body></html>"
+# What the NucBox was actually served, word for word from the panel.
+_CHALLENGE = """<html><head><title>DuckDuckGo</title></head><body><h1>DuckDuckGo</h1>
+<p>Unfortunately, bots use DuckDuckGo too.</p>
+<p>Please complete the following challenge to confirm this search was made by a human.</p>
+<p>Select all the images that contain a bicycle.</p></body></html>"""
 _HTML_NO_HITS = "<html><body><div>No results found for that query.</div></body></html>"
 _HTML_GOOD = """<html><body><div class="result">
 <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fa">A page</a>
@@ -1414,6 +1520,49 @@ class TestTheSearchBackendFallback:
         polite thing and costs nothing; a search endpoint is the exception."""
         assert "OllamaChat" in web._UA
         assert web._UA != web._SEARCH_UA
+
+    def test_a_bot_challenge_is_named_as_one(self, duck):
+        """Reported from the NucBox, on a pharmacy lookup: both endpoints
+        served "Unfortunately, bots use DuckDuckGo too. Please complete the
+        following challenge to confirm this search was made by a human."
+
+        The old wording offered "changed its markup or rate-limiting", and the
+        two have opposite answers — a markup change is a bug to fix here, and a
+        bot challenge is an address that has been flagged, which no amount of
+        scraping gets past.
+        """
+        duck(_CHALLENGE, _CHALLENGE)
+        with pytest.raises(web.WebError) as caught:
+            web.search("NDC 69097-142-60 albuterol", 3)
+        said = str(caught.value)
+        assert "bot challenge" in said
+        assert "prove it is a person" in said
+        assert "changed its markup" not in said, "that is the other diagnosis"
+        assert "SEARXNG_URL" in said
+
+    @pytest.mark.parametrize("page", [
+        "Unfortunately, bots use DuckDuckGo too.",
+        "Please complete the following challenge",
+        "confirm this search was made by a human",
+        "We have detected unusual traffic from your network",
+        "Are you a robot?",
+    ])
+    def test_however_it_is_worded(self, duck, page):
+        duck(f"<html><body><p>{page}</p></body></html>",
+             f"<html><body><p>{page}</p></body></html>")
+        with pytest.raises(web.WebError) as caught:
+            web.search("anything", 3)
+        assert "bot challenge" in str(caught.value)
+
+    def test_a_markup_change_is_still_called_that(self, duck):
+        """The other half. A page with no results and no challenge in it is
+        the case where the fix belongs here."""
+        duck(_HTML_BLOCKED, _HTML_BLOCKED)
+        with pytest.raises(web.WebError) as caught:
+            web.search("anything", 3)
+        said = str(caught.value)
+        assert "changed its markup" in said
+        assert "bot challenge" not in said
 
     def test_searxng_is_still_preferred_when_it_is_configured(self, duck, monkeypatch):
         pages = duck(_HTML_GOOD)

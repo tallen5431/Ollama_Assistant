@@ -1,0 +1,39 @@
+# A private SearXNG for this app to search through.
+#
+# SearXNG queries the engines on your behalf and hands back JSON, so the app
+# never scrapes anyone's HTML — which is what stopped working when DuckDuckGo
+# started serving a "confirm you are a human" challenge to the box's address.
+#
+#   cd searxng
+#   sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
+#   docker compose up -d
+#
+# Then set SEARXNG_URL=http://127.0.0.1:8888 for the chat app and restart it.
+
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    # Bound to loopback on purpose: this instance is for the app on this
+    # machine, and an open SearXNG is something other people will find and
+    # use. Tailscale is how you reach the box; nothing here needs to be on it.
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    # It is a search proxy, not a database. Without this the json log grows
+    # until something else on the box runs out of room.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
