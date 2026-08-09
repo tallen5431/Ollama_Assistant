@@ -846,6 +846,24 @@ def api_chat_cancel() -> Any:
     return jsonify({"cancelled": flag is not None})
 
 
+@app.route("/api/chat/status")
+def api_chat_status() -> Any:
+    """Is a turn still being generated for this conversation?
+
+    Generation is detached from the connection that asked for it, so a phone
+    that goes into a pocket mid-reply leaves a turn running that it can no
+    longer see. Without this the page cannot tell that from a server that has
+    died: both look like a stream that stopped arriving, and the safe reading
+    of the second one — discard the turn — throws away the first one.
+
+    With it, a dropped connection becomes something to wait out.
+    """
+    convo_id = request.args.get("conversation_id") or ""
+    with _TURNS_LOCK:
+        running = convo_id in _TURNS
+    return jsonify({"running": running})
+
+
 def _message_field(line: str, field: str) -> str:
     """One field of the ``message`` object in an Ollama NDJSON line.
 

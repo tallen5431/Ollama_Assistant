@@ -528,6 +528,23 @@ and the whole answer is waiting in the thread. **Stop** still stops it: the
 button tells the server as well as closing the connection, and keeps whatever
 had been said by then.
 
+**And you don't have to reopen it.** Switch tabs or apps while the model is
+thinking and the connection often goes with you — the radio sleeps, the OS
+suspends the tab, Tailscale comes back on a different path. The page used to
+call that a network error: it took your question off the screen, put it back in
+the composer, and deleted the thread it had just made, which is the one action
+that actually loses the answer, since that is the thread the reply was about to
+be written into.
+
+Now the question stays where it is, the bubble says *"Lost the connection — the
+reply is still being written"*, and the page goes and collects it. It asks the
+server whether that turn is still running (`GET /api/chat/status`), waits, and
+re-reads the thread when the answer lands — with its reasoning, its steps and
+its sources, by the same path that shows a phone's turn on a desktop. Coming
+back to the tab makes it look again straight away rather than sitting out a
+backoff. If the turn really did die, it says so and leaves your question on
+screen to send again.
+
 **Search** looks inside the messages and the records, not just the titles — the
 box is at the top of the ☰ list. Typing "A23" finds the thread where that only
 ever appeared in a reply; typing "Brighton" also turns up the trip a routine
@@ -988,6 +1005,7 @@ found nothing, and only the last of those means the retrieval worked.
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
 | `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears. Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
 | `POST /api/chat/cancel` | Stop the turn running for a conversation — body `{ "conversation_id" }`. Needed because generation outlives the connection |
+| `GET /api/chat/status` | Is a turn still being generated for this conversation? `?conversation_id=` → `{"running": true\|false}`. Lets a page whose connection dropped tell "still coming" from "the server died", which otherwise look identical |
 | `GET /api/search`    | Find a phrase across conversations and records — `?q=`. Returns `{ "conversations": [...], "records": [...] }`; under two characters returns both empty |
 | `POST /api/photos/forget` | Apply the photo retention now — body `{ "days"? }`, defaulting to `PHOTO_KEEP_DAYS`. Returns what it dropped |
 | `GET /manifest.webmanifest` | Web app manifest, so a home-screen shortcut opens without browser chrome |

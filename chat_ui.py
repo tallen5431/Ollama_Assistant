@@ -2737,11 +2737,33 @@ _PAGE = r"""<!doctype html>
                 hintEl.textContent = "Stopped before the model replied — your message is back in the box.";
               }
             }
+          } else if (messages === thread && currentConvoId) {
+            // The connection went, not the turn.
+            //
+            // Reported: tabbing out while the model was thinking came back as
+            // "network error", with the question pulled off the screen and
+            // dropped into the composer — and the empty thread deleted behind
+            // it. All three were wrong, because the server does not stop when
+            // this connection does: generation is detached on purpose and the
+            // finished turn is written to the thread either way. The reply was
+            // arriving; nothing was listening, and then the evidence was
+            // tidied away.
+            //
+            // So: keep the question, keep whatever arrived, say what happened,
+            // and go and collect the answer.
+            view.bubble.textContent = splitThink(rawContent).content || "…";
+            view.status.textContent = "Lost the connection — the reply is still "
+              + "being written. Waiting for it…";
+            view.status.hidden = false;
+            setStatus("bad", "reconnecting");
+            waitForTurn(currentConvoId, view, err);
           } else {
-            // An error can arrive mid-stream, after text is already on screen.
-            // Discarding the view would throw away a partial answer; keep it and
-            // report alongside. With nothing rendered, drop the user turn too,
-            // or the next send posts two user messages in a row.
+            // No thread to collect it from — an unsaved conversation, or one
+            // the user has already navigated away from. An error can still
+            // arrive after text is on screen, and discarding the view would
+            // throw away a partial answer; keep it and report alongside. With
+            // nothing rendered, drop the user turn too, or the next send posts
+            // two user messages in a row.
             const partial = splitThink(rawContent).content;
             if (partial) {
               view.bubble.textContent = partial;
@@ -2781,8 +2803,104 @@ _PAGE = r"""<!doctype html>
         return went;
       }
 
+      // ---- Collecting a turn whose connection went ----
+      // Only ever one of these: a second would fight the first over the same
+      // thread. Kept so a new chat or another conversation can call it off.
+      let waiting = null;
+
+      function stopWaiting() {
+        if (!waiting) return;
+        clearTimeout(waiting.timer);
+        waiting = null;
+      }
+
+      // Give up after this long. The server's own turn has a timeout well
+      // inside it, so anything still missing by now is not coming.
+      const WAIT_FOR_TURN_MS = 6 * 60 * 1000;
+
+      function waitForTurn(convoId, view, err) {
+        stopWaiting();
+        waiting = { convoId: convoId, view: view, err: err, timer: 0, tries: 0,
+                    until: Date.now() + WAIT_FOR_TURN_MS };
+        lookForTurn();
+      }
+
+      async function lookForTurn() {
+        const mine = waiting;
+        // Whatever was being waited for has been left behind: a new chat, a
+        // different conversation, a Stop. Not an error, just no longer wanted.
+        // The conversation id is the whole test — newChat() and
+        // loadConversation() both change it and both call stopWaiting(), and
+        // `thread` is a local of the send() this outlived.
+        if (!mine || currentConvoId !== mine.convoId) return;
+
+        let landed = false, running = false;
+        try {
+          const resp = await fetch("api/conversations/" + mine.convoId);
+          if (resp.ok) {
+            const msgs = (await resp.json()).messages || [];
+            landed = msgs.length > 0 && msgs[msgs.length - 1].role === "assistant";
+          }
+          // Only worth asking if the answer is not already there — and it is
+          // asked second on purpose, because a turn that finishes between the
+          // two calls would otherwise read as "not running, nothing written".
+          if (!landed) {
+            const st = await fetch("api/chat/status?conversation_id="
+                                   + encodeURIComponent(mine.convoId));
+            running = st.ok && (await st.json()).running === true;
+          }
+        } catch (e) {
+          // Still no network. That is not an answer either way, so keep
+          // waiting rather than concluding the turn died.
+          running = true;
+        }
+        if (waiting !== mine) return;      // called off while those were in flight
+
+        if (landed) {
+          stopWaiting();
+          setStatus("ok", "connected");
+          // Re-read the whole thread rather than patching this one bubble: the
+          // reply comes back with its thinking, its steps and its sources, and
+          // this is the same path that shows a phone's turn on the desktop.
+          // One way of rendering a stored turn, not two.
+          await loadConversation(mine.convoId);
+          refreshConversations();
+          return;
+        }
+        if (!running || Date.now() > mine.until) {
+          stopWaiting();
+          view_status(mine.view, "Lost the connection, and the reply did not survive it"
+                      + (mine.err && mine.err.message ? " (" + mine.err.message + ")" : "")
+                      + ". Your question is still here — send it again.");
+          setStatus("bad", "error");
+          return;
+        }
+        // Back off, but start quickly and never go past a few seconds: a blip
+        // on the desk resolves in under a second, and the far end of this is
+        // someone watching an empty bubble waiting for their answer.
+        mine.tries++;
+        mine.timer = setTimeout(lookForTurn,
+                                Math.min(700 * Math.pow(1.6, mine.tries), 5000));
+      }
+
+      function view_status(view, text) {
+        view.status.textContent = text;
+        view.status.hidden = false;
+      }
+
+      // Coming back to the tab is the moment most likely to work — the phone
+      // has just been unlocked and the radio is awake. Look straight away
+      // rather than sitting out the rest of a five-second backoff.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible" || !waiting) return;
+        clearTimeout(waiting.timer);
+        waiting.tries = 0;
+        lookForTurn();
+      });
+
       function stop() {
         stopSpeaking();
+        stopWaiting();
         // The server keeps generating after this tab stops listening — that is
         // the whole point — so aborting here alone would leave a 30b model
         // running for another minute. keepalive, because Stop is also what
@@ -2800,6 +2918,7 @@ _PAGE = r"""<!doctype html>
       function newChat() {
         if (controller) controller.abort();
         stopSpeaking();
+        stopWaiting();
         if (recordsOpen()) closeRecords();
         currentConvoId = null;
         messages = [];
@@ -3328,6 +3447,7 @@ _PAGE = r"""<!doctype html>
 
         if (controller) controller.abort();
         stopSpeaking();
+        stopWaiting();
         if (recordsOpen()) closeRecords();
         currentConvoId = convo.id;
         messages = [];

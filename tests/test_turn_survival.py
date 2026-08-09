@@ -222,6 +222,50 @@ class TestCancel:
                            json={"conversation_id": "cid-3"}).get_json()["cancelled"] is False
 
 
+class TestAskingWhetherATurnIsStillRunning:
+    """A phone that goes into a pocket mid-reply leaves a turn running that it
+    can no longer see. Without a way to ask, the page cannot tell that from a
+    server that has died — both are a stream that stopped arriving — and the
+    safe reading of the second (discard the turn) throws away the first.
+    """
+
+    def running(self, client, convo_id):
+        return client.get("/api/chat/status",
+                          query_string={"conversation_id": convo_id}).get_json()["running"]
+
+    def test_it_says_yes_while_one_is_going(self, client):
+        app_module._start_turn("cid-live")
+        assert self.running(client, "cid-live") is True
+
+    def test_and_no_once_it_has_finished(self, client):
+        flag = app_module._start_turn("cid-done")
+        app_module._end_turn("cid-done", flag)
+        assert self.running(client, "cid-done") is False
+
+    def test_a_thread_that_never_had_one_is_not_running(self, client):
+        assert self.running(client, "never-heard-of-it") is False
+
+    def test_and_neither_is_no_thread_at_all(self, client):
+        """A page with history off has no id to ask about, and asking anyway
+        must not be an error."""
+        resp = client.get("/api/chat/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["running"] is False
+
+    def test_cancelling_leaves_it_running_until_the_turn_actually_ends(self, client):
+        """Stop sets the flag; the producer notices at its next line. Saying
+        "not running" the instant Stop is pressed would have the page conclude
+        the reply died, when it is about to be saved."""
+        app_module._start_turn("cid-cancelled")
+        client.post("/api/chat/cancel", json={"conversation_id": "cid-cancelled"})
+        assert self.running(client, "cid-cancelled") is True
+
+    def test_it_is_behind_the_same_guard_as_everything_else(self, monkeypatch):
+        monkeypatch.setenv("CHAT_AUTH", "tj:hunter2")
+        guarded = importlib.reload(app_module).app.test_client()
+        assert guarded.get("/api/chat/status?conversation_id=x").status_code == 401
+
+
 # --------------------------------------------------------------------------
 # The part a test client cannot show: nobody is pulling
 # --------------------------------------------------------------------------

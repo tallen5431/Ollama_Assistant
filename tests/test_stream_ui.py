@@ -100,12 +100,36 @@ class AbortController { constructor() { this.signal = {}; } abort() {} }
 class TextDecoder { decode(buf) { return buf ? Buffer.from(buf).toString("utf8") : ""; } }
 
 let SCRIPT = [], ABORT_AFTER = -1, TYPE_DURING = null;
+// The connection dying mid-stream, which is not an abort: no AbortError, just
+// a read that fails. DROP_AFTER says after how many lines.
+let DROP_AFTER = -1;
+// What the server says once the page comes back asking. `landedAfter` is how
+// many polls it takes for the finished turn to appear in the thread.
+let TURN_RUNNING = true, LANDED_AFTER = 1, polls = 0, statusAsks = 0;
+let loadedConvo = null;
+async function loadConversation(id) { loadedConvo = id; }
 async function fetch(url, opts) {
+  // "Is that turn still going?" — the question the page could not ask before,
+  // and without which a dropped connection and a dead server look the same.
+  if (typeof url === "string" && url.indexOf("api/chat/status") === 0) {
+    statusAsks++;
+    return { ok: true, json: async () => ({ running: TURN_RUNNING }) };
+  }
   // dropIfEmpty() asks the server what is in the thread and deletes it when
-  // the answer is nothing.
+  // the answer is nothing. The recovery poll asks the same question and reads
+  // the last role.
   if (typeof url === "string" && url.indexOf("api/conversations/") === 0) {
     if (opts && opts.method === "DELETE") { saved.dropped = true; return { ok: true }; }
-    return { ok: true, json: async () => (threadEmpty ? {} : { messages: [1, 2] }) };
+    if (threadEmpty) return { ok: true, json: async () => ({}) };
+    polls++;
+    const done = polls >= LANDED_AFTER;
+    // Empty until the turn lands, which is how it really is: the server
+    // writes the question and the answer together when generation ends, so at
+    // the moment a connection dies the thread has nothing in it at all. That
+    // is exactly what made dropIfEmpty() delete it out from under the reply.
+    return { ok: true, json: async () => ({ messages: done
+      ? [{ role: "user", content: "q" }, { role: "assistant", content: "the answer" }]
+      : [] }) };
   }
   if (opts && opts.body) saved.sentId = JSON.parse(opts.body).conversation_id || null;
   let i = 0;
@@ -114,6 +138,7 @@ async function fetch(url, opts) {
       // Whatever the user types while the reply is in flight.
       if (TYPE_DURING !== null) { inputEl.value = TYPE_DURING; TYPE_DURING = null; }
       if (ABORT_AFTER >= 0 && i >= ABORT_AFTER) { const e = new Error("abort"); e.name = "AbortError"; throw e; }
+      if (DROP_AFTER >= 0 && i >= DROP_AFTER) throw new TypeError("Failed to fetch");
       if (i >= SCRIPT.length) return { done: true, value: undefined };
       return { done: false, value: new TextEncoder().encode(JSON.stringify(SCRIPT[i++]) + "\n") };
     },
@@ -121,16 +146,23 @@ async function fetch(url, opts) {
   }) } };
 }
 
-async function run(script, abortAfter, typed, typeDuring) {
+async function run(script, abortAfter, typed, typeDuring, opts) {
+  opts = opts || {};
   SCRIPT = script; ABORT_AFTER = abortAfter; TYPE_DURING = typeDuring;
+  DROP_AFTER = opts.dropAfter === undefined ? -1 : opts.dropAfter;
+  TURN_RUNNING = opts.running !== false;
+  LANDED_AFTER = opts.landedAfter === undefined ? 1 : opts.landedAfter;
+  polls = 0; statusAsks = 0; loadedConvo = null;
   messages = []; errors = [];
   saved = { conversation: false, dropped: false, sentId: null };
-  currentConvoId = null; threadEmpty = true;
+  currentConvoId = null; threadEmpty = opts.threadEmpty !== false;
   chatEl.children = []; pendingImages = [];
   inputEl.value = typed;
   await send();
   for (let t = 0; t < 8; t++) await Promise.resolve();
-  return {
+  // The recovery runs on real timers, so give it real time to run.
+  if (opts.settleMs) await new Promise(r => setTimeout(r, opts.settleMs));
+  const out = {
     messageRoles: messages.map(m => m.role),
     threadMade: saved.conversation,
     threadDropped: saved.dropped,
@@ -141,12 +173,18 @@ async function run(script, abortAfter, typed, typeDuring) {
     panel: lastView ? lastView.thinkBody.textContent : "",
     panelShown: lastView ? lastView.think.hidden === false : false,
     bubble: lastView ? lastView.bubble.textContent : "",
+    turnStatus: lastView ? lastView.status.textContent : "",
+    polls, statusAsks, loadedConvo,
   };
+  // Disarm anything still waiting: a pending recovery timer would keep node
+  // alive long after the answer has been written out.
+  stopWaiting();
+  return out;
 }
 """
 
 
-def drive(script, abort_after=-1, typed="what is 2+2?", type_during=None):
+def drive(script, abort_after=-1, typed="what is 2+2?", type_during=None, **opts):
     """Run the shipped send() against one scripted stream; return what happened."""
     page = _page()
     js = "\n".join([
@@ -157,10 +195,11 @@ def drive(script, abort_after=-1, typed="what is 2+2?", type_during=None):
         _slice(page, "      // Feature-detected, like isSecureContext elsewhere",
                "      function stop()"),
         f"run({json.dumps(script)}, {abort_after}, {json.dumps(typed)}, "
-        f"{json.dumps(type_during)})"
-        ".then(r => process.stdout.write(JSON.stringify(r)));",
+        f"{json.dumps(type_during)}, {json.dumps(opts)})"
+        ".then(r => { process.stdout.write(JSON.stringify(r)); process.exit(0); });",
     ])
-    out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True)
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True,
+                         check=True, timeout=30)
     return json.loads(out.stdout)
 
 
@@ -416,9 +455,10 @@ class TestRollbackDoesNotReachIntoAnotherConversation:
             _slice(page, "      // Feature-detected, like isSecureContext elsewhere",
                    "      function stop()"),
             f"run({json.dumps(script)}, {abort_after}, \"abandoned question\", \"SWAP\")"
-            ".then(r => process.stdout.write(JSON.stringify(r)));",
+            ".then(r => { process.stdout.write(JSON.stringify(r)); process.exit(0); });",
         ])
-        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True)
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True,
+                         check=True, timeout=30)
         return json.loads(out.stdout)
 
     def test_an_abandoned_turn_does_not_repopulate_the_composer(self):
@@ -428,6 +468,125 @@ class TestRollbackDoesNotReachIntoAnotherConversation:
     def test_and_does_not_claim_it_came_back(self):
         r = self.drive_with_swap([{"message": {"content": "", "thinking": "hmm"}}], 1)
         assert "back in the box" not in r["hint"]
+
+
+class TestLosingTheConnectionIsNotLosingTheTurn:
+    """Reported: "the app returns network error if a tab out while the model is
+    thinking". Three things were wrong with that, and only one of them was the
+    message.
+
+    Generation is detached from the connection that asked for it — that is what
+    _detached_stream is for — and the finished turn is written to the thread
+    whether or not anyone is still listening. So a dropped stream is a dropped
+    *connection*, and the turn behind it is still coming. The page treated it
+    as a failure: pulled the question off the screen, put it back in the
+    composer, and deleted the empty thread it had just made. The reply then
+    arrived into a conversation that no longer existed.
+    """
+
+    SCRIPT = [{"message": {"content": "Thinking"}}, {"message": {"content": " it over"}}]
+
+    def dropped(self, **opts):
+        """A turn whose connection dies after the first line."""
+        opts.setdefault("landedAfter", 1)
+        opts.setdefault("settleMs", 400)
+        # There is a thread with the question already in it; that is the whole
+        # premise, and it is what the recovery reads.
+        opts.setdefault("threadEmpty", False)
+        return drive(self.SCRIPT, **dict(opts, dropAfter=1))
+
+    def test_the_question_stays_on_the_screen(self):
+        r = self.dropped()
+        assert r["input"] == "", "the question was dumped back in the composer"
+        assert r["onScreen"] >= 2, "the turn was taken off the screen"
+
+    def test_the_thread_is_not_deleted_out_from_under_the_reply(self):
+        """The reply is on its way into that thread, and the thread is empty
+        until it gets there — so "delete it if it is empty" deletes exactly the
+        thread that is about to be written to. That is the step that turned a
+        dropped connection into a lost answer.
+
+        landedAfter=2 so the reply has not arrived at the moment of the drop,
+        which is the whole point; with it already there, there is no empty
+        thread to delete and nothing to get wrong.
+        """
+        r = self.dropped(landedAfter=2, settleMs=1500)
+        assert not r["threadDropped"]
+
+    def test_it_says_what_happened_rather_than_network_error(self):
+        r = self.dropped(landedAfter=99)
+        assert "still being written" in r["turnStatus"], r["turnStatus"]
+        assert not r["errors"], r["errors"]
+
+    def test_and_then_goes_and_collects_it(self):
+        r = self.dropped()
+        assert r["loadedConvo"] == "convo-1", \
+            "the finished turn was never fetched back"
+
+    def test_the_answer_is_re_read_from_the_thread_not_patched_in(self):
+        """It comes back with its thinking, its steps and its sources — the
+        same path that shows a phone's turn on the desktop."""
+        r = self.dropped()
+        assert r["loadedConvo"] == "convo-1"
+
+    def test_it_keeps_looking_until_the_reply_lands(self):
+        """Backoff is 700ms, then 1.1s, then 1.8s — so three looks need a
+        little over three seconds of patience from the test too."""
+        r = self.dropped(landedAfter=3, settleMs=3400)
+        assert r["polls"] >= 3, r["polls"]
+        assert r["loadedConvo"] == "convo-1"
+
+    def test_it_asks_whether_the_turn_is_still_running(self):
+        """Without that question a dead server and a dropped connection look
+        identical, and waiting out a dead server is its own kind of broken."""
+        r = self.dropped(landedAfter=99, settleMs=600)
+        assert r["statusAsks"] >= 1
+
+    def test_a_turn_that_really_died_is_given_up_on(self):
+        r = self.dropped(landedAfter=99, running=False, settleMs=400)
+        assert "did not survive" in r["turnStatus"], r["turnStatus"]
+        assert r["polls"] >= 1
+
+    def test_and_says_the_question_is_still_there(self):
+        """It is: this path leaves it on screen rather than in the composer,
+        so "send it again" has to be the instruction."""
+        r = self.dropped(landedAfter=99, running=False, settleMs=400)
+        assert "send it again" in r["turnStatus"].lower()
+
+    def test_the_thread_is_only_asked_about_once_per_look(self):
+        """Two fetches per poll against a phone on a bad connection is twice
+        the chance of neither arriving."""
+        r = self.dropped(landedAfter=1, settleMs=400)
+        assert r["polls"] == 1, r["polls"]
+        assert r["statusAsks"] == 0, "the status was asked for despite the reply landing"
+
+    def test_an_unsaved_conversation_still_reports_the_failure(self):
+        """With history off there is no thread to collect anything from, so
+        the old behaviour is the only one available and must stay."""
+        page = _page()
+        at = page.index("} else if (messages === thread && currentConvoId) {")
+        assert "waitForTurn(currentConvoId, view, err)" in page[at:at + 1400]
+        assert "markError(err.message || String(err))" in page[at:at + 3000], \
+            "the no-thread branch lost its error"
+
+    @pytest.mark.parametrize("leaving", [
+        "function newChat()", "function stop()", "async function loadConversation",
+    ])
+    def test_leaving_calls_off_the_wait(self, leaving):
+        """A wait that outlives the conversation it belongs to would drop
+        someone else's thread on the screen."""
+        page = _page()
+        at = page.index(leaving)
+        assert "stopWaiting();" in page[at:at + 500], leaving
+
+    def test_coming_back_to_the_tab_looks_straight_away(self):
+        """The phone has just been unlocked and the radio is awake; sitting
+        out the rest of a five-second backoff is the wrong instinct."""
+        page = _page()
+        at = page.index('if (document.visibilityState !== "visible" || !waiting) return;')
+        window = page[at:at + 300]
+        assert "waiting.tries = 0" in window
+        assert "lookForTurn();" in window
 
 
 class TestTheWaitCounterIsNotSuppressedByAnEmptyStatus:
