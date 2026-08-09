@@ -9,6 +9,7 @@ free so the rest of the app can stay focused on routing and UI.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Tuple
 
@@ -50,11 +51,15 @@ def get_default_model() -> str:
 
 
 def get_request_timeout() -> float:
-    """Return the per-request read timeout (seconds) for talking to Ollama."""
-    try:
-        return float(os.getenv("OLLAMA_TIMEOUT", "300"))
-    except (TypeError, ValueError):
-        return 300.0
+    """Return the per-request read timeout (seconds) for talking to Ollama.
+
+    Floored at a second. requests refuses a timeout of 0 with a ValueError,
+    which is not a RequestException — so it escapes the handler that turns a
+    dead Ollama into a sentence and every call became a 500 with a traceback
+    instead. OLLAMA_TIMEOUT=0 is a plausible way to write "no limit", and it is
+    the one value that broke everything.
+    """
+    return max(1.0, _number("OLLAMA_TIMEOUT", 300.0))
 
 
 def get_connect_timeout() -> float:
@@ -67,10 +72,7 @@ def get_connect_timeout() -> float:
     silence before the user was told anything, and a web turn paid it on every
     call it made.
     """
-    try:
-        return max(1.0, float(os.getenv("OLLAMA_CONNECT_TIMEOUT", "5")))
-    except (TypeError, ValueError):
-        return 5.0
+    return max(1.0, _number("OLLAMA_CONNECT_TIMEOUT", 5.0))
 
 
 def get_timeouts() -> tuple:
@@ -83,11 +85,13 @@ def get_max_body_bytes() -> int:
 
     Guards the in-memory WAV upload on ``/api/transcribe``. ``CHAT_MAX_BODY_MB``
     overrides the 25 MB default (roughly 13 minutes of 16 kHz mono audio).
+
+    Through _number rather than its own float(), which was the one getter that
+    still had one — and this is the getter app.py calls at import time, so a
+    value it could not turn into an integer stopped the app booting rather than
+    being reported.
     """
-    try:
-        mb = float(os.getenv("CHAT_MAX_BODY_MB", "25"))
-    except (TypeError, ValueError):
-        mb = 25.0
+    mb = _number("CHAT_MAX_BODY_MB", 25.0)
     if mb <= 0:
         mb = 25.0
     return int(mb * 1024 * 1024)
@@ -99,10 +103,24 @@ def _flag(name: str, default: str = "1") -> bool:
 
 
 def _number(name: str, default: float) -> float:
+    """A numeric setting, or the default when it is not one.
+
+    "inf" and "nan" are numbers to float() and not to anything downstream:
+    int(inf) raises OverflowError and int(nan) raises ValueError, so
+    CHAT_MAX_BODY_MB=inf took the app down at import — before any log line, with
+    a traceback naming the arithmetic rather than the setting. Neither value
+    means anything for a size, a timeout or a number of days, so neither is
+    accepted.
+    """
     try:
-        return float(os.getenv(name, str(default)))
+        value = float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(value):
+        logger.warning("%s is %r, which is not a usable number; using %s",
+                       name, os.getenv(name), default)
+        return default
+    return value
 
 
 def web_enabled() -> bool:

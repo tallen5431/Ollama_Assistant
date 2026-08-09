@@ -38,6 +38,46 @@ def auth_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
     return bool(user and pw)
 
 
+def misconfigured(env: Optional[Mapping[str, str]] = None) -> str:
+    """What is wrong with a half-configured pair, or "" when nothing is.
+
+    Auth off is the default and a legitimate choice — behind Tailscale there is
+    nothing to authenticate to. Auth off *because a setting did not take* is a
+    different thing entirely, and it looked exactly the same: the app came up,
+    said "Auth: OFF (LAN only)", and served every request to anyone who could
+    reach it, while whoever set CHAT_AUTH_USER believed otherwise.
+
+    Reported rather than fatal. Refusing to start would lock someone out of
+    their own box over a typo, from a machine they may only reach through the
+    app they have just stopped.
+    """
+    env = env if env is not None else os.environ
+    user = (env.get("CHAT_AUTH_USER") or "").strip()
+    pw = env.get("CHAT_AUTH_PASSWORD") or ""
+    combined = env.get("CHAT_AUTH") or ""
+    if auth_enabled(env):
+        # Both forms set and disagreeing: CHAT_AUTH_USER wins the name and
+        # CHAT_AUTH is ignored entirely, which is not what setting both looks
+        # like it should do.
+        if user and ":" in combined and combined.split(":", 1)[0].strip() != user:
+            return ("CHAT_AUTH and CHAT_AUTH_USER are both set and name different "
+                    "users. CHAT_AUTH_USER wins and CHAT_AUTH is ignored.")
+        return ""
+    if user and not pw:
+        return ("CHAT_AUTH_USER is set but CHAT_AUTH_PASSWORD is empty, so "
+                "authentication is OFF and every request is being served.")
+    if pw and not user:
+        return ("CHAT_AUTH_PASSWORD is set but CHAT_AUTH_USER is empty, so "
+                "authentication is OFF and every request is being served.")
+    if combined and ":" not in combined:
+        return ("CHAT_AUTH is set but has no ':' in it — it must be "
+                "\"user:password\" — so authentication is OFF.")
+    if combined and not combined.split(":", 1)[1]:
+        return ("CHAT_AUTH names a user with an empty password, so "
+                "authentication is OFF.")
+    return ""
+
+
 def credentials_match(
     username: Optional[str],
     password: Optional[str],

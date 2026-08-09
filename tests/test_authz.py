@@ -6,6 +6,8 @@ without touching the real environment.
 
 from __future__ import annotations
 
+import pytest
+
 import authz
 
 CREDS = {"CHAT_AUTH_USER": "tj", "CHAT_AUTH_PASSWORD": "hunter2"}
@@ -67,3 +69,47 @@ class TestCredentialsMatch:
 
     def test_none_values_are_rejected_not_crashed(self):
         assert authz.credentials_match(None, None, CREDS) is False
+
+
+class TestHalfConfiguredAuthSaysSo:
+    """Auth off is the default and a fine choice — behind Tailscale there is
+    nothing to authenticate to. Auth off *because a setting did not take* is a
+    different thing that looked exactly the same from outside: the app came up,
+    said "Auth: OFF (LAN only)", and served every request to anyone who could
+    reach it, while whoever set CHAT_AUTH_USER believed otherwise.
+    """
+
+    @pytest.mark.parametrize("env, expect", [
+        ({}, ""),
+        (CREDS, ""),
+        ({"CHAT_AUTH": "tj:hunter2"}, ""),
+        ({"CHAT_AUTH_USER": "tj"}, "CHAT_AUTH_PASSWORD is empty"),
+        ({"CHAT_AUTH_USER": "tj", "CHAT_AUTH_PASSWORD": ""}, "CHAT_AUTH_PASSWORD is empty"),
+        ({"CHAT_AUTH_PASSWORD": "hunter2"}, "CHAT_AUTH_USER is empty"),
+        ({"CHAT_AUTH": "tj"}, "no ':' in it"),
+        ({"CHAT_AUTH": "tj:"}, "empty password"),
+        # Both forms, disagreeing: CHAT_AUTH_USER wins the name and CHAT_AUTH is
+        # ignored outright, which is not what setting both looks like it does.
+        ({"CHAT_AUTH_USER": "tj", "CHAT_AUTH_PASSWORD": "hunter2",
+          "CHAT_AUTH": "someone-else:other"}, "name different users"),
+    ])
+    def test_it_names_what_is_half_set(self, env, expect):
+        said = authz.misconfigured(env)
+        if expect:
+            assert expect in said, said
+            assert "OFF" in said or "ignored" in said, "it has to say what the effect is"
+        else:
+            assert said == "", said
+
+    def test_the_app_says_it_where_someone_will_read_it(self, monkeypatch, caplog):
+        """At import, so it lands next to the startup banner rather than on the
+        first request that should have been refused."""
+        import importlib
+        import app as app_module
+        monkeypatch.setenv("CHAT_AUTH_USER", "tj")
+        monkeypatch.delenv("CHAT_AUTH_PASSWORD", raising=False)
+        monkeypatch.delenv("CHAT_AUTH", raising=False)
+        with caplog.at_level("WARNING"):
+            mod = importlib.reload(app_module)
+        assert mod.AUTH_ENABLED is False
+        assert "CHAT_AUTH_PASSWORD is empty" in caplog.text

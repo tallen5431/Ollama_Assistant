@@ -120,6 +120,13 @@ def _http_error(exc: HTTPException) -> Any:
 # Optional HTTP Basic Auth (makes internet exposure safe)
 # -------------------------------------------------------------------
 AUTH_ENABLED = authz.auth_enabled()
+# Auth off is the default and a fine choice behind Tailscale. Auth off because
+# a setting did not take is a different thing that looked identical from the
+# outside, so it is said out loud — once, at import, where the startup banner
+# will be read.
+_AUTH_PROBLEM = authz.misconfigured()
+if _AUTH_PROBLEM:
+    logger.warning("%s", _AUTH_PROBLEM)
 if AUTH_ENABLED:
     _AUTH_REALM = os.environ.get("CHAT_AUTH_REALM", "Ollama Chat")
 
@@ -1751,6 +1758,8 @@ def main() -> None:
     print(f"  Ollama host  : {get_ollama_base()}")
     print(f"  Default model: {get_default_model()}")
     print(f"  Auth         : {'ON — Basic Auth required' if AUTH_ENABLED else 'OFF (LAN only)'}")
+    if _AUTH_PROBLEM:
+        print(f"  ⚠️  {_AUTH_PROBLEM}")
     print("=" * 60)
 
     try:

@@ -138,9 +138,45 @@ class TestBodySizeLimit:
         mod = load_app(monkeypatch, {"CHAT_MAX_BODY_MB": "5"})
         assert mod.app.config["MAX_CONTENT_LENGTH"] == 5 * 1024 * 1024
 
-    def test_invalid_limit_falls_back_to_the_default(self, monkeypatch):
-        mod = load_app(monkeypatch, {"CHAT_MAX_BODY_MB": "not-a-number"})
+    @pytest.mark.parametrize("value", ["not-a-number", "inf", "-inf", "nan", "0", "-1"])
+    def test_invalid_limit_falls_back_to_the_default(self, monkeypatch, value):
+        """"inf" and "nan" are numbers to float() and to nothing downstream:
+        int(inf) raises OverflowError and int(nan) raises ValueError. This one
+        is read at import, so the app did not start — no log line, and a
+        traceback naming the arithmetic rather than the setting."""
+        mod = load_app(monkeypatch, {"CHAT_MAX_BODY_MB": value})
         assert mod.app.config["MAX_CONTENT_LENGTH"] == 25 * 1024 * 1024
+
+
+class TestASettingCannotBreakTheThingItConfigures:
+    """Every numeric setting goes through config._number, and every value it
+    returns has to be one the caller can actually use."""
+
+    @pytest.mark.parametrize("value", ["inf", "-inf", "nan", "not-a-number"])
+    def test_a_non_number_is_refused_wherever_it_is_read(self, monkeypatch, value):
+        import config
+        for name, getter, default in (
+            ("OLLAMA_TIMEOUT", config.get_request_timeout, 300.0),
+            ("OLLAMA_CONNECT_TIMEOUT", config.get_connect_timeout, 5.0),
+            ("PHOTO_KEEP_DAYS", config.get_photo_keep_days, 30.0),
+            ("WEB_TIMEOUT", config.get_web_timeout, 15.0),
+        ):
+            monkeypatch.setenv(name, value)
+            assert getter() == default, name
+            monkeypatch.delenv(name)
+
+    @pytest.mark.parametrize("value", ["0", "-5"])
+    def test_a_zero_timeout_is_floored_rather_than_passed_on(self, monkeypatch, value):
+        """requests refuses a timeout of 0 with a ValueError, which is not a
+        RequestException — so it escaped the handler that turns a dead Ollama
+        into a sentence, and every call became a 500 with a traceback. Writing
+        0 to mean "no limit" is the plausible way to get there."""
+        import config
+        monkeypatch.setenv("OLLAMA_TIMEOUT", value)
+        assert config.get_request_timeout() >= 1.0
+        connect, read = config.get_timeouts()
+        # The shape requests accepts: both parts positive.
+        assert connect > 0 and read > 0
 
 
 class TestChatValidation:

@@ -143,7 +143,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
 | `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
 | `OLLAMA_NUM_CTX`    | `8192`                      | Context window requested when web context is attached |
-| `CHAT_AUTH_USER` / `CHAT_AUTH_PASSWORD` | *(unset)* | Enable HTTP Basic Auth (or use `CHAT_AUTH=user:password`) |
+| `CHAT_AUTH_USER` / `CHAT_AUTH_PASSWORD` | *(unset)* | Enable HTTP Basic Auth (or use `CHAT_AUTH=user:password`). Both halves are needed — with only one set, auth stays **off**, and the startup banner says so rather than leaving you to assume otherwise |
 | `CHAT_AUTH_REALM`   | `Ollama Chat`               | Name the browser shows in its password prompt. Only read when Basic Auth is on |
 | `VOSK_MODEL`        | `en-us`                     | Default Vosk language id (e.g. `es`, `fr`, `de`) |
 | `VOSK_MODEL_PATH`   | *(unset)*                   | Path to an unpacked Vosk model. Used as the default when set (no download). |
