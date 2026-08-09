@@ -22,6 +22,7 @@ import subprocess
 import pytest
 
 import chat_ui
+import web
 from conftest import page_script
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -373,6 +374,46 @@ class TestSplitThink:
         """The fence check must not disable the rule outright."""
         out = self.split("```\ncode\n```\nreasoning here\n</think>\nthe answer")
         assert out["content"].strip() == "the answer"
+
+
+class TestTheTwoStrippersAgree:
+    """The browser decides what you read; web.strip_thinking decides what gets
+    written down. They are two implementations of one rule, in two languages,
+    and they had drifted: the server copy had neither the fenced-code guard nor
+    the "something has to follow" guard, so a reply explaining reasoning models
+    was shown whole and stored truncated, and a reply that was all scratchpad
+    was shown whole and stored not at all. Invisible until the thread is
+    reopened tomorrow, and by then the text is gone.
+
+    Sharing the code is not available across the language boundary, so this is
+    the next best thing: run both over the same replies and require the same
+    answer. Anything added to one and not the other fails here.
+    """
+
+    CORPUS = [
+        "just an answer",
+        "<think>reasoning</think>The answer is 4.",
+        "<think>ran out of budget mid-thought",
+        "reasoning about it\n</think>\nthe answer",
+        "I was still thinking\n</think>",
+        "Use `</think>` to close it. That is the whole answer.",
+        "The closing tag is </think> and the opening one is <thing>.",
+        "Models emit this:\n\n```\nreasoning\n</think>\nanswer\n```\n\nThat is all.",
+        "```\ncode\n```\nreasoning here\n</think>\nthe answer",
+        "<think>a</think>real answer </think> tail",
+        "  </think>\nanswer with the tag indented",
+        "</think>\nnothing precedes the tag",
+    ]
+
+    def browser(self, raw):
+        js = _slice(_page(), "      // Split assistant text", "      function fmtUsage") + \
+            f"process.stdout.write(JSON.stringify(splitThink({json.dumps(raw)})));"
+        out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True)
+        return json.loads(out.stdout)["content"].strip()
+
+    @pytest.mark.parametrize("reply", CORPUS)
+    def test_what_is_shown_is_what_is_stored(self, reply):
+        assert web.strip_thinking(reply) == self.browser(reply), reply
 
 
 class TestScrollFollowing:

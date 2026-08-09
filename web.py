@@ -1030,9 +1030,13 @@ _THINK_RE = re.compile(r"<(think|thinking|reasoning)>.*?(</\1>|\Z)", re.I | re.S
 # anywhere meant a reply that merely mentioned the tag lost everything before
 # it — the same defect this had in the browser, where the truncated text was
 # what got stored.
-_ORPHAN_THINK_RE = re.compile(
-    r"\A.*?^[^\S\n]*</(?:think|thinking|reasoning)>[^\S\n]*$\n?", re.I | re.S | re.M
+_ORPHAN_CLOSE_RE = re.compile(
+    r"^[^\S\n]*</(?:think|thinking|reasoning)>[^\S\n]*$\n?", re.I | re.M
 )
+
+# A fenced code block's opening or closing line, counted to tell whether the
+# tag above sits inside one.
+_FENCE_LINE_RE = re.compile(r"^[^\S\n]*```", re.M)
 
 # A decision not to search. Matched loosely on purpose: a small model writes
 # "None needed." as often as the documented bare NONE, and reading that as a
@@ -1051,6 +1055,34 @@ _NONE_RE = re.compile(
 )
 
 
+def _strip_orphan_think(text: str) -> str:
+    """Drop everything up to a lone closing tag, when that is what it is.
+
+    Three tests, all of which the browser's splitThink already made and this
+    did not — which mattered, because this is the copy that decides what gets
+    *written down*. A reply is shown by one and stored by the other, so a
+    disagreement is invisible until you reopen the thread tomorrow.
+
+    * Not at the very start: nothing precedes it, so there is nothing to drop.
+    * Not inside a fenced code block. Ask a coder model what a reasoning
+      model's output looks like and it shows you one — the tag alone on its
+      line, inside ``` — and treating that as a real terminator threw away the
+      half of the reply that explained it. An odd number of fence lines before
+      the tag means we are inside one.
+    * Something has to follow. A reply that is nothing but scratchpad is better
+      kept whole than reduced to nothing, and reduced to nothing is what it was:
+      _keep_turn drops an empty reply, so the turn on screen was never stored.
+    """
+    match = _ORPHAN_CLOSE_RE.search(text)
+    if not match or match.start() == 0:
+        return text
+    before = text[:match.start()]
+    if len(_FENCE_LINE_RE.findall(before)) % 2 == 1:
+        return text
+    after = text[match.end():]
+    return after if after.strip() else text
+
+
 def strip_thinking(text: str) -> str:
     """Remove a scratchpad block, however the model happened to delimit it.
 
@@ -1059,9 +1091,15 @@ def strip_thinking(text: str) -> str:
     opened the block so the tag never appears in the output. The last one is
     the dangerous shape: leave it and a query the model was *reasoning about*
     gets run as one it chose.
+
+    The closed-only rule applies only when no paired block was found, as in the
+    browser: a reply that opened and closed one properly was not started inside
+    a scratchpad by the template, so a lone tag later in it is prose.
     """
-    text = _THINK_RE.sub("", text or "")
-    return _ORPHAN_THINK_RE.sub("", text).strip()
+    stripped = _THINK_RE.sub("", text or "")
+    if stripped != (text or ""):
+        return stripped.strip()
+    return _strip_orphan_think(stripped).strip()
 
 
 def _fallback_query(
