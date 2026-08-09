@@ -337,6 +337,132 @@ class _TlsHandler(BaseHTTPRequestHandler):
         pass
 
 
+class TestTheOperatorsOwnEndpointStillWorks:
+    """Reported from the NucBox, on a freshly installed SearXNG:
+
+        search failed: Refusing to fetch 127.0.0.1 — it connected to
+        127.0.0.1, which is a private or local address...
+
+    The socket guard added for DNS rebinding is mounted on the shared session,
+    so it ran for `trusted` requests too — and `trusted` exists for exactly one
+    thing: SEARXNG_URL, which normally lives on loopback. The rebinding fix
+    therefore disabled self-hosted search outright, which is the app's answer
+    to DuckDuckGo blocking a box.
+
+    Nothing caught it because every SearXNG test stubs _get, so none of them
+    ever opens a socket. This one deliberately patches nothing at all: real
+    server, real socket, both guards live.
+    """
+
+    def serve(self):
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_a_trusted_url_on_loopback_is_fetched(self):
+        server = self.serve()
+        try:
+            resp = web._get(f"http://127.0.0.1:{server.server_port}/page", trusted=True)
+            with resp:
+                assert resp.ok
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_and_searxng_itself_answers_through_it(self, monkeypatch):
+        """One level up from the socket: the whole search path against a real
+        SearXNG-shaped reply on loopback, which is what the NucBox was doing."""
+        payload = json.dumps({"results": [
+            {"url": "https://ndclist.com/x", "title": "NDC", "content": "90 mcg"}]})
+
+        class _Searx(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = payload.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Searx)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setattr(web, "web_enabled", lambda: True)
+        monkeypatch.setattr(web, "get_search_url",
+                            lambda: f"http://127.0.0.1:{server.server_port}")
+        try:
+            assert [h["url"] for h in web.search("albuterol", 3)] == ["https://ndclist.com/x"]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_but_an_untrusted_url_on_loopback_is_still_refused(self):
+        """The exemption is for the address the operator named and nothing
+        else. A model or a page asking for the same URL must still be refused —
+        by check_url first, and by the socket if a name ever resolves there."""
+        server = self.serve()
+        try:
+            with pytest.raises(web.WebError, match="private or local"):
+                web._get(f"http://127.0.0.1:{server.server_port}/page")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_and_a_redirect_away_from_a_trusted_endpoint_is_checked(self):
+        """`trusted` covers the endpoint, never where it sends us. A SearXNG
+        that redirects is no longer the operator speaking."""
+        server = self.serve()
+        try:
+            with pytest.raises(web.WebError, match="private or local"):
+                web._get(f"http://127.0.0.1:{server.server_port}/redirect-to-localhost",
+                         trusted=True)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_and_the_socket_guard_comes_back_on_after_that_redirect(self, monkeypatch):
+        """The half check_url cannot cover. If the redirect target *passes* the
+        name check and only the socket disagrees — a rebind on the hop after a
+        trusted endpoint — the exemption must already be gone, or the one
+        request in the app that skips the name check would skip both.
+        """
+        landed = []
+
+        class _Bounce(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/bounce":
+                    self.send_response(302)
+                    self.send_header(
+                        "Location",
+                        f"http://127.0.0.1:{self.server.server_port}/arrived")
+                    self.end_headers()
+                    return
+                landed.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"hi")
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Bounce)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        # The name check waves the redirect target through; only the address
+        # the socket actually reached tells the truth. _peer_check is left real.
+        monkeypatch.setattr(web, "_address_check", lambda host: "public")
+        try:
+            with pytest.raises(web.WebError, match="private or local"):
+                web._get(f"http://127.0.0.1:{server.server_port}/bounce", trusted=True)
+            assert landed == [], f"the second hop was fetched anyway: {landed}"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class TestRebindingGuard:
     """check_url resolves the name; requests then resolves it again when it
     dials. A nameserver the attacker controls answers differently the second
@@ -1092,7 +1218,13 @@ class TestReviewRegressions:
             def close(self):
                 pass
 
-        monkeypatch.setattr(web._SESSION, "get", lambda url, **k: (calls.append(url), Redirect())[1])
+        # _TRUSTED_SESSION, because that is the one the first hop of a trusted
+        # request takes: the socket guard is mounted on _SESSION and knows
+        # nothing about `trusted`, so the operator's own endpoint — which is
+        # normally on loopback — needs a session without it. The redirect below
+        # goes back to the guarded one, which is what this is checking.
+        monkeypatch.setattr(web._TRUSTED_SESSION, "get",
+                            lambda url, **k: (calls.append(url), Redirect())[1])
         with pytest.raises(web.WebError, match="private or local"):
             web._get("http://127.0.0.1:8888/search", trusted=True)
         assert len(calls) == 1, "must not follow the redirect"

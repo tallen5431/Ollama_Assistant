@@ -120,6 +120,13 @@ _VOID_TAGS = frozenset({
 # request is the dominant cost on short fetches.
 _SESSION = requests.Session()
 
+# The operator's own endpoint, which is allowed to be on loopback. Separate
+# from _SESSION because the socket guard below is mounted on that one and has
+# no way to know which request it is serving — a per-request exemption would
+# mean thread-local state on a server that handles turns concurrently, and a
+# second session is the same thing without the sharp edge.
+_TRUSTED_SESSION = requests.Session()
+
 
 class WebError(ValueError):
     """A retrieval failed in a way worth showing the user."""
@@ -521,13 +528,20 @@ def _get(
     # a redirect target is chosen by the server, so every hop after the first is
     # checked like any other URL.
     current = url if trusted else check_url(url)
+    # Only the first hop of a trusted request is exempt, and only at the socket
+    # for the same reason it is exempt at check_url: the operator named this
+    # address, nobody else did. Every hop after it was chosen by the server and
+    # has been through check_url, so it goes back on the guarded session — and
+    # a redirect from a trusted endpoint to another private address is refused
+    # by check_url before it gets that far anyway.
+    session = _TRUSTED_SESSION if trusted else _SESSION
     for _ in range(_MAX_REDIRECTS):
         # requests' read timeout resets on every recv, so a server trickling
         # header bytes renews it indefinitely. The wall clock is the only thing
         # that actually bounds a hop; check it before each one and again after.
         if budget.expired():
             raise WebError("Timed out before the page could be fetched")
-        resp = _SESSION.get(
+        resp = session.get(
             current,
             # (connect, read) rather than a scalar: a host that blackholes the
             # SYN should be given up on well before the whole page budget.
@@ -545,6 +559,7 @@ def _get(
             if not location:
                 raise WebError("Got a redirect with nowhere to go")
             current = check_url(urljoin(current, location))
+            session = _SESSION      # chosen by the server, so guarded again
             continue
         resp._deadline = budget   # _read_capped enforces the overall budget
         return resp
