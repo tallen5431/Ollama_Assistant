@@ -793,15 +793,29 @@ def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
     for. It used to come back as an empty list, which reads exactly like a
     query that matched nothing — so the turn carried on and told the user it
     could not verify anything, with no sign that retrieval had broken.
+
+    "Until one yields results" has to mean *every* way the first can fail. A
+    timeout or a refused connection raises out of _get, and that used to leave
+    the loop entirely — so the endpoint that exists to be the fallback was
+    never tried on the one failure most likely to need it. Each endpoint's
+    trouble is now recorded like any other and the next one is asked.
     """
     empty: List[str] = []
     for base, link_class, snippet_class in _DUCK_ENDPOINTS:
-        resp = _get(base + quote(query), headers={"User-Agent": _SEARCH_UA})
+        try:
+            resp = _get(base + quote(query), headers={"User-Agent": _SEARCH_UA})
+        except WebError as exc:
+            empty.append(f"{_host_only(base)} could not be reached ({exc})")
+            continue
         with resp:
             if not resp.ok:
                 empty.append(f"{_host_only(base)} returned HTTP {resp.status_code}")
                 continue
-            body = _read_capped(resp)
+            try:
+                body = _read_capped(resp)
+            except (WebError, requests.RequestException) as exc:
+                empty.append(f"{_host_only(base)} broke off mid-page ({exc})")
+                continue
         results = _duck_results(body, link_class, snippet_class, limit)
         if results:
             return results
@@ -1419,12 +1433,33 @@ _INVISIBLE_RE = re.compile(
 def _defence(text: str) -> str:
     """Neutralise anything in retrieved text that looks like our own markers.
 
-    Zero-width and exotic-space characters are folded first, so a marker cannot
+    Line endings are normalised first. ``re.M`` anchors ^ and $ at "\\n" and
+    nothing else, but a bare CR — or VT, FF, U+0085, U+2028, U+2029, the file
+    and record separators — reads as a line break to str.splitlines(), to a
+    terminal, and to the model. So a marker delimited by one of those was a
+    standalone line to everything that mattered and not a line at all to the
+    rule meant to catch it: a text/plain page could close the fence, issue a
+    top-level instruction and reopen it, entirely untouched. Verified before
+    the fix, on the same page shape the link-map forgery used.
+
+    splitlines() rather than a hand-written character class, because it is the
+    same definition the HTML extractor already uses and it will not fall behind
+    Unicode. It drops one trailing terminator, which is put back — none of the
+    callers here would notice, but a defence that quietly edits the text it is
+    defending is a thing to avoid on principle.
+
+    Zero-width and exotic-space characters are folded next, so a marker cannot
     hide behind one. They are replaced rather than deleted, since removing them
     would silently alter legitimate text (a non-breaking space is ordinary in
     prose); a plain space reads the same and cannot smuggle anything.
     """
-    text = _INVISIBLE_RE.sub(" ", text or "")
+    text = text or ""
+    lines = text.splitlines()
+    # splitlines() drops one trailing terminator and gives no way to ask
+    # whether there was one; adding a character and counting the lines again
+    # does, without a second list of terminators to keep in step with Python's.
+    trailing = "\n" if lines and len((text + ".").splitlines()) > len(lines) else ""
+    text = _INVISIBLE_RE.sub(" ", "\n".join(lines) + trailing)
     return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text)
 
 
