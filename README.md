@@ -562,6 +562,21 @@ sudo chown -R "$USER:$USER" ~/HTTP_Server/projects/ollama_assistant/searxng
 rm -rf searxng/config searxng/instance     # leftovers of the old mount
 ```
 
+If a `git pull` already failed against the unwritable directory, it will have
+left the working tree half-updated — git writes the files it can and stops at
+the first it cannot, without moving HEAD. The next pull then refuses with
+*"Your local changes to the following files would be overwritten by merge"*,
+naming files you never touched: they are the new content, written by the pull
+that could not finish. Once the directory is yours again, take the branch tip
+whole:
+
+```bash
+git reset --hard origin/<your-branch>
+```
+
+Safe here because none of those changes are yours, and untracked files — your
+`.env` among them — are not touched by it.
+
 The steps above then work as written — and their order is load-bearing too.
 `config/settings.yml` has to exist *before* the container starts: given an
 empty directory it tries to create one from its own template, which it cannot

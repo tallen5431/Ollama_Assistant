@@ -97,6 +97,17 @@ class TestTheStepsCanBeFollowedInOrder:
         assert window.index("docker rm -f searxng") < window.index("chown -R"), \
             "the chown is given before the container that would undo it is removed"
 
+    def test_the_half_applied_pull_has_a_way_out(self):
+        """The predictable next state after the permission failure: git writes
+        the files it can and stops at the first it cannot, without moving HEAD.
+        The following pull then refuses over "local changes" to files nobody
+        touched, which is the least obvious message in the whole sequence."""
+        start = README.index("If you are coming from that version")
+        window = README[start:start + 2000]
+        assert "would be overwritten by merge" in window, \
+            "the message someone arrives with is not quoted"
+        assert "git reset --hard" in window, "and there is no way out given"
+
     def test_and_the_config_exists_before_the_container_starts(self):
         """The other load-bearing order. Given an empty directory the container
         tries to create a settings.yml from its own template, cannot write to a
