@@ -38,6 +38,19 @@ if exist "%APP_DIR%requirements-voice.txt" (
     if errorlevel 1 echo [WARN] Voice support ^(vosk^) unavailable - continuing without the mic button.
 )
 
+REM Settings file (.env beside this script). config.py reads it too, but the
+REM defaults below set OLLAMA_HOST whether or not anyone asked, so a value
+REM written in .env would reach Python already overridden. The environment
+REM still wins; the file only fills in what nothing else has said.
+REM Plain KEY=value lines only here — no "export" prefix on Windows.
+set "ENV_FILE=%APP_DIR%.env"
+if defined CHAT_ENV_FILE set "ENV_FILE=%CHAT_ENV_FILE%"
+if exist "%ENV_FILE%" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%ENV_FILE%") do (
+        if not defined %%A set "%%A=%%~B"
+    )
+)
+
 REM Defaults (Server Manager will usually override these via program.env)
 if not defined HOST set "HOST=0.0.0.0"
 if not defined PORT set "PORT=8070"

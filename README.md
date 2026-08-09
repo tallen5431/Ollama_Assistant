@@ -88,6 +88,11 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
 launches the app with waitress. Open the URL it prints (default
 <http://localhost:8070>). On Windows, run `Start.bat`.
 
+Settings go in a `.env` file beside the code — `cp .env.example .env` and edit
+it. Put them there rather than `export`ing them in a terminal: the app is
+started by the server manager and does not inherit your shell. See
+"Configuration" below.
+
 Manual run:
 
 ```bash
@@ -113,7 +118,40 @@ and the HTTP layer. It does not require `vosk` or a running Ollama server.
 
 ## Configuration
 
-All settings are environment variables (the server manager injects them):
+All settings are environment variables (the server manager injects them), and
+they can also be written in a **`.env` file beside the code**. Copy
+`.env.example` to `.env` and edit it:
+
+```bash
+cp .env.example .env
+```
+
+Use the file rather than `export`ing in a terminal. A shell export configures
+the next program *that terminal* starts — which is the tools in `tools/`, and
+not the app: the server manager starts that, from an environment of its own.
+The file is the only place both of them read, which is what makes a pass from
+`tools/check_web.py` mean anything about the app. Format is `KEY=value`, one
+per line, `#` for comments; nothing in it is executed.
+
+**The real environment wins over the file**, so the server manager's
+`program.env` still overrides it, and so does a one-off `PORT=8071 ./Start.sh`.
+The file only answers for what nothing else has said. It is gitignored — it is
+where `CHAT_AUTH_PASSWORD` goes.
+
+The app prints what it resolved on startup, which is the fastest way to settle
+an argument about whether a setting took:
+
+```
+============================================================
+💬 Ollama Chat started
+============================================================
+  Listening on : http://0.0.0.0:8070
+  Ollama host  : http://192.168.1.50:11434
+  Default model: llama3.1:8b
+  Search       : SearXNG at http://127.0.0.1:8888
+  Auth         : OFF (LAN only)
+============================================================
+```
 
 | Variable            | Default                     | Purpose |
 | ------------------- | --------------------------- | ------- |
@@ -129,6 +167,7 @@ All settings are environment variables (the server manager injects them):
 | `PHOTO_KEEP_DAYS`   | `30`                        | How long stored photos stay in the history. Every word is kept for good; only the pixels expire. `0` keeps them for good too |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
 | `CHAT_DB`           | `./chat.db`                 | SQLite file holding conversation history |
+| `CHAT_ENV_FILE`     | `./.env`                    | Where the settings file above is read from. Only useful from the real environment, for obvious reasons |
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
@@ -447,10 +486,12 @@ sed -i "s|ultrasecretkey|$(openssl rand -hex 32)|" settings.yml
 docker compose up -d
 ```
 
-Then point the app at it and restart it:
+Then point the app at it and restart it. **Write it in `.env`, not `export`** —
+the app is started by the server manager, from an environment of its own, and
+never sees your shell:
 
 ```bash
-export SEARXNG_URL=http://127.0.0.1:8888
+echo 'SEARXNG_URL=http://127.0.0.1:8888' >> .env
 ```
 
 Check it end to end without opening the app:
@@ -459,8 +500,16 @@ Check it end to end without opening the app:
 .venv/bin/python tools/check_web.py
 ```
 
-That names the backend it used and prints the results it got, so a pass means
-the whole path works.
+That names the backend it used, says where the setting came from, and prints
+the results it got, so a pass means the whole path works. When the app restarts,
+its banner says which backend it actually got:
+
+```
+  Search       : SearXNG at http://127.0.0.1:8888
+```
+
+If that line says `DuckDuckGo — scraped, no SEARXNG_URL set`, the app is not
+using SearXNG whatever your terminal thinks.
 
 **Two settings do all the work**, and a stock SearXNG has both wrong for this:
 
@@ -965,6 +1014,34 @@ If web access matters to you, run SearXNG and point `SEARXNG_URL` at it — it i
 a JSON API that does not change under you. See "Running your own search" above;
 the compose file is in `searxng/`.
 
+### "But `check_web.py` passes and the app still gets a captcha"
+
+Then the two are not reading the same configuration, and the check is telling
+you the truth about a process the app has nothing to do with:
+
+```
+1. Search backend — http://127.0.0.1:8888
+  ✅ 3 results in 0.8s
+```
+
+…followed, in the UI, by `html.duckduckgo.com served a bot challenge`.
+
+`export SEARXNG_URL=…` in a terminal configures the next program **that
+terminal** starts. `tools/check_web.py` is one. The app is not — the server
+manager starts it, from an environment of its own — so it never saw the
+variable and went on scraping. Two processes, two environments, and the tool
+whose job was to say whether search worked said yes.
+
+Put the setting in `.env` instead, which both of them read:
+
+```bash
+echo 'SEARXNG_URL=http://127.0.0.1:8888' >> .env
+```
+
+The check now prints where the value came from and says so when it is somewhere
+the app cannot see, and the app's startup banner names the backend it actually
+got. When those two agree, they are agreeing about the same thing.
+
 ## Seeing what a turn did
 
 Under every reply, next to **Show thinking**, is **Show what it did** —
@@ -1051,4 +1128,5 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `store.py`        | SQLite conversation history, routines and records |
 | `records.py`      | Restating a routine's answer as the fields it declared |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
+| `.env.example`    | Settings template — `cp .env.example .env`; read by the app *and* the tools |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |

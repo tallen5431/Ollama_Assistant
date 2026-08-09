@@ -694,9 +694,33 @@ def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
            "scraping cannot answer. " if challenged
            else "DuckDuckGo may have changed its markup or be rate-limiting "
                 "this address. ")
-        + "Set SEARXNG_URL to your own SearXNG instance for a search that does "
-          "not depend on scraping — see the README."
+        + _SEARXNG_ADVICE
     )
+
+
+# Where the setting goes, not just its name. The address this was reported from
+# *had* SEARXNG_URL — exported in a terminal, where tools/check_web.py duly
+# found it and passed. The app is started by the server manager, never saw it,
+# and went on scraping; advice naming only the variable read as already done.
+_SEARXNG_ADVICE = (
+    "Set SEARXNG_URL to your own SearXNG instance for a search that does not "
+    "depend on scraping — in the .env file next to the app, or the server "
+    "manager's env, since a shell export does not reach the running app. The "
+    "startup banner names the backend it got. See the README."
+)
+
+
+def search_backend() -> str:
+    """The search backend in words, for a startup banner or a check tool.
+
+    Printed at startup because "which of the two is this process using" was not
+    answerable from anywhere until it was, and it is the first thing worth
+    knowing when a search comes back with a captcha.
+    """
+    base = get_search_url()
+    if base:
+        return f"SearXNG at {base}"
+    return "DuckDuckGo — scraped, no SEARXNG_URL set"
 
 
 # The wording DuckDuckGo uses when it has decided the caller is a bot. Matched

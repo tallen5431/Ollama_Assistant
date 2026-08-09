@@ -26,11 +26,34 @@ DEFAULT_PAGE = "https://en.wikipedia.org/wiki/Ada_Lovelace"
 OK, BAD, WARN = "  ✅", "  ❌", "  ⚠️ "
 
 
+def shared_with_the_app() -> bool:
+    """Is SEARXNG_URL set somewhere the app will see it too?
+
+    This tool runs from your shell and the app is started by the server manager,
+    from an environment of its own. Only the .env file reaches both, so a
+    variable exported in a terminal makes this check pass while every search in
+    the UI still goes to DuckDuckGo and comes back with a captcha. That happened,
+    and the check said "Both halves work" while it was happening.
+    """
+    from config import env_file_path, setting_origin
+    origin = setting_origin("SEARXNG_URL")
+    if not origin or origin == "the .env file":
+        return True
+    print(f"{WARN} SEARXNG_URL is set in {origin}, not in {env_file_path()}.")
+    print("     This tool inherits your shell; the app does not — the server manager")
+    print("     starts it. So a pass here does not mean the app searches the same way.")
+    print("     Write the line into that file and restart the app; its startup banner")
+    print("     prints the backend it actually got.")
+    return False
+
+
 def check_search() -> bool:
     """Does the configured search backend still return usable results?"""
-    from config import get_search_url
-    backend = get_search_url() or "DuckDuckGo (no SEARXNG_URL set)"
-    print(f"\n1. Search backend — {backend}")
+    from config import get_search_url, setting_origin
+    backend = get_search_url()
+    origin = setting_origin("SEARXNG_URL")
+    print(f"\n1. Search backend — {backend or 'DuckDuckGo (no SEARXNG_URL set)'}"
+          + (f"  [from {origin}]" if backend else ""))
     started = time.monotonic()
     try:
         results = web.search("ollama release notes", limit=3)
@@ -119,6 +142,7 @@ def main() -> int:
     print("Nothing here talks to Ollama, so a sleeping desktop does not matter.")
 
     searched = check_search()
+    shared = shared_with_the_app()
     doc = check_fetch(url)
     if doc:
         check_links(doc)
@@ -126,7 +150,10 @@ def main() -> int:
 
     print("\n" + "-" * 62)
     if searched and doc:
-        print("Both halves work. Try the UI checks next — see the README.")
+        print("Both halves work here. Try the UI checks next — see the README.")
+        if not shared:
+            print("But the app is configured separately from this shell — see the ⚠️ "
+                  "above.")
         return 0
     print("Something above failed; the detail is next to the ❌.")
     return 1

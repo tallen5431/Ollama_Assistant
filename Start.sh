@@ -71,6 +71,42 @@ fi
 # and any print() would otherwise show up late or not at all.
 export PYTHONUNBUFFERED=1
 
+# --- Settings file (.env beside this script) ---
+# config.py reads this file too, and would be enough on its own — except that
+# the defaults below export OLLAMA_HOST whether or not anyone asked for it, so
+# a value written in .env would reach Python already overridden by a fallback
+# nobody chose. Reading it first is what keeps the two honest.
+#
+# Same rule as config.py: the environment wins, the file only fills in what
+# nothing else has said. Read line by line rather than sourced — a settings
+# file should not be able to run commands.
+ENV_FILE="${CHAT_ENV_FILE:-$APP_DIR/.env}"
+if [[ -f "$ENV_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"          # drop leading blanks
+    if [[ -z "$line" || "$line" == \#* || "$line" != *=* ]]; then
+      continue
+    fi
+    if [[ "$line" == "export "* ]]; then
+      line="${line#export }"
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key//[[:space:]]/}"
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      continue
+    fi
+    value="${value#"${value%%[![:space:]]*}"}"       # trim both ends
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in                                  # one layer of quotes
+      \"*\"|\'*\') value="${value:1:${#value}-2}" ;;
+    esac
+    if [[ -z "${!key+x}" ]]; then
+      export "$key=$value"
+    fi
+  done < "$ENV_FILE"
+fi
+
 # --- Network (Server Manager passes HOST/PORT in env) ---
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8070}"
