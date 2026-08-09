@@ -554,24 +554,42 @@ That is a `git pull` refusing to check anything out because a container owns
 the worktree. Keeping the two apart is the fix; it also keeps the instance's
 secret key out of a tracked file, where `sed -i` used to put it.
 
-If you set this up before that change, migrate once:
+If you set this up before that change, migrate once — **before you pull.** The
+old setup step wrote your secret key into `searxng/settings.yml`, which is a
+tracked file, so the checkout that renames it has a local modification sitting
+on the path it wants to move. `git pull` will not do that:
+
+```
+error: Your local changes to the following files would be overwritten by merge:
+        searxng/settings.yml
+Please commit your changes or stash them before you merge.
+```
+
+Which leaves you unable to reach `setup.sh` or these instructions by the only
+route that would show them to you. So: get the key out of git's way first, and
+leave the tracked copy looking the way git expects.
 
 ```bash
 cd searxng
 docker compose down                          # docker-compose down on older Docker
 sudo chown -R "$(id -u):$(id -g)" .          # take the directory back from the container
-./setup.sh                                   # seeds instance/settings.yml
-docker compose up -d
-git clean -n .                               # anything the container left in searxng/
+mkdir -p instance
+mv settings.yml instance/settings.yml        # your secret key, out of the rename's path
+git checkout -- settings.yml                 # tracked copy back as committed, tree clean
 ```
 
-`setup.sh` generates a new secret key, which on a private instance costs you
-nothing but the saved preferences in your own browser — the key signs session
-cookies and nothing else. If you would rather keep the old one and you still
-have the pre-rename `settings.yml`, `mv settings.yml instance/settings.yml`
-in place of running `setup.sh`. Once you have pulled, that file is gone: it
-held a local edit to a tracked file, so the checkout that renamed it took the
-key with it.
+Then pull, and start it on the new mount:
+
+```bash
+git pull
+cd searxng && docker compose up -d
+git clean -n .                               # -n first: what the container left behind
+```
+
+**If you already pulled** — with `git reset --hard`, which discards rather than
+refuses — that file is gone and the key with it. Run `./setup.sh` for a new one.
+That costs you nothing on a private instance but the saved preferences in your
+own browser: the key signs session cookies and nothing else.
 
 `SEARXNG_URL` is allowed to point at a private address, unlike anything a model
 or a page asks for; see "What it will and won't reach" below.

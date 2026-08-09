@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -22,6 +24,8 @@ import pytest
 
 import config
 import web
+
+ROOT = Path(config.__file__).resolve().parent
 
 
 class TestReadingTheFile:
@@ -271,3 +275,76 @@ def test_the_real_file_is_not_committed():
     """It holds CHAT_AUTH_PASSWORD."""
     text = (Path(config.__file__).resolve().parent / ".gitignore").read_text("utf-8")
     assert any(line.strip() == ".env" for line in text.splitlines())
+
+
+class TestTheSuiteIsInsulatedFromADevelopersOwnFile:
+    """Clearing it per-test is too late, and the failure is remote-controlled by
+    a file that is not in the repo.
+
+    config.py reads .env into the real environment on first import, and the
+    modules under test capture some of it at *their* import — app.py reads
+    AUTH_ENABLED once and registers a before_request hook from it. Collection
+    imports those modules before any fixture runs, so a .env holding the
+    CHAT_AUTH_* pair the README documents put the whole suite in front of an app
+    with auth on, answering 401 to tests that never asked for it. Popping the
+    variables in a fixture cannot unregister the hook.
+    """
+
+    def as_pytest_would(self, tmp_path, dotenv):
+        """conftest, then app — the order collection imports them in.
+
+        Asserted on that sequence rather than by running a nested suite: a
+        nested run self-heals, because no_auth_left_behind reloads app at the
+        first teardown, so whether it fails depends on which file you point it
+        at and in what order. The invariant does not. This is the moment the
+        damage is done, and it is the same moment either way.
+        """
+        env_file = tmp_path / "dotenv"
+        env_file.write_text(dotenv, encoding="utf-8")
+        code = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "import conftest\n"
+            "import app, os\n"
+            "print(app.AUTH_ENABLED, os.getenv('CHAT_AUTH_USER'), os.getenv('SEARXNG_URL'))\n"
+            % str(ROOT / "tests")
+        )
+        result = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
+                                capture_output=True, text=True,
+                                env={**os.environ, "CHAT_ENV_FILE": str(env_file)})
+        assert result.returncode == 0, result.stderr[-2000:]
+        return result.stdout.split()
+
+    def test_auth_settings_in_the_file_never_reach_the_app_under_test(self, tmp_path):
+        """The exact pair the README tells you to put there."""
+        enabled, user, _ = self.as_pytest_would(
+            tmp_path, "CHAT_AUTH_USER=someone\nCHAT_AUTH_PASSWORD=hunter2\n")
+        assert enabled == "False", \
+            "app captured AUTH_ENABLED at import, with a hook no fixture can remove"
+        assert user == "None"
+
+    def test_nor_do_settings_the_tests_assert_defaults_for(self, tmp_path):
+        _, _, searx = self.as_pytest_would(
+            tmp_path, "SEARXNG_URL=http://127.0.0.1:8888\nWEB_MAX_DOCS=9\n")
+        assert searx == "None"
+
+    def test_a_real_suite_run_is_clean_with_one_sitting_there(self, tmp_path):
+        """The end-to-end version of the two above, on the file whose tests
+        actually went red when this was found."""
+        env_file = tmp_path / "dotenv"
+        env_file.write_text("CHAT_AUTH_USER=someone\nCHAT_AUTH_PASSWORD=hunter2\n",
+                            encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/test_turn_survival.py", "-q"],
+            cwd=ROOT, capture_output=True, text=True,
+            env={**os.environ, "CHAT_ENV_FILE": str(env_file)})
+        assert result.returncode == 0, result.stdout[-3000:]
+        assert " 401 " not in result.stdout, "the app under test had auth switched on"
+
+    def test_the_clearing_happens_before_anything_is_collected(self):
+        """Pinned to where it is, because a fixture is the obvious place to put
+        it and the obvious place is the one that does not work."""
+        text = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+        cleared = text.index("config._FROM_ENV_FILE = ()")
+        first_fixture = text.index("@pytest.fixture")
+        assert cleared < first_fixture, \
+            "clearing it in a fixture runs after collection has already imported app"

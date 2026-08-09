@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -11,6 +12,22 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# A developer's own .env must not decide what the tests see — and this has to
+# happen here, at import, rather than in a fixture.
+#
+# config.py reads the file into the real environment the first time it is
+# imported, and the modules under test read some of that once, at *their* own
+# import: app.py captures AUTH_ENABLED from it and registers a before_request
+# hook. Collection imports those modules before any fixture runs, so a .env
+# holding the documented CHAT_AUTH_* pair left the whole suite talking to an app
+# with auth switched on, answering 401 to tests that never configured it.
+# Popping the variables per-test cannot unregister a hook that is already on.
+import config  # noqa: E402  - deliberately after the path insert above
+
+for _key in config.env_file_keys():
+    os.environ.pop(_key, None)
+config._FROM_ENV_FILE = ()
 
 
 # Modules whose functions get stubbed a lot. "app" is the one that actually
@@ -51,32 +68,6 @@ def _classify(value: object) -> bool:
     code = getattr(value, "__code__", None)
     filename = getattr(code, "co_filename", "") if code else ""
     return "/tests/" in filename.replace("\\", "/")
-
-
-@pytest.fixture(autouse=True)
-def no_dotenv_in_tests():
-    """A developer's own .env must not decide what the tests see.
-
-    config.py reads it at import, into the real environment, so without this a
-    box with SEARXNG_URL in its .env fails every test that asserts the unset
-    default — and does so only on that box, which is the worst kind.
-
-    Saved and restored by hand rather than with monkeypatch: an autouse fixture
-    that *asks* for monkeypatch drags it to the front of the setup order, which
-    puts its teardown after no_stub_left_behind's and makes the guard below
-    report every test that patched a module as a leak.
-    """
-    import os
-    import config
-    saved = {key: os.environ.pop(key)
-             for key in config.env_file_keys() if key in os.environ}
-    from_file = config._FROM_ENV_FILE
-    config._FROM_ENV_FILE = ()
-    try:
-        yield
-    finally:
-        os.environ.update(saved)
-        config._FROM_ENV_FILE = from_file
 
 
 @pytest.fixture(autouse=True)
