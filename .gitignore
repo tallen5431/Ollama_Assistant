@@ -1,4 +1,12 @@
 .venv/
+
+# The server manager's per-install settings, which is where CHAT_AUTH and
+# anything else worth keeping to yourself ends up. Untracked and unignored is
+# the dangerous combination: it shows up in every `git status` until someone
+# runs `git add -A` and commits their own credentials.
+.env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 .pytest_cache/

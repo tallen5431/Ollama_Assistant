@@ -125,6 +125,25 @@ class TestTheContainerIsNotGivenTheCheckout:
         assert "searxng/config/" in ignored, \
             "the directory the container owns must not be one git manages"
 
+
+class TestNothingPrivateIsOneCommandFromBeingCommitted:
+    """Seen on the NucBox: a `.env` sitting untracked and unignored. That is
+    the dangerous combination — it shows in every `git status` until someone
+    runs `git add -A`, and it is where CHAT_AUTH lives.
+    """
+
+    @pytest.mark.parametrize("path", [".env", ".env.local", "chat.db", "searxng/config/settings.yml"])
+    def test_it_is_ignored(self, path):
+        check = subprocess.run(["git", "check-ignore", "-q", path], cwd=ROOT)
+        if check.returncode == 128:
+            pytest.skip("not a git checkout")
+        assert check.returncode == 0, f"{path} is not ignored"
+
+    def test_but_an_example_env_could_still_be_committed(self):
+        """Ignoring .env.* must not make it impossible to ship a template."""
+        check = subprocess.run(["git", "check-ignore", "-q", ".env.example"], cwd=ROOT)
+        assert check.returncode != 0, ".env.example is ignored, so it could never be added"
+
     @pytest.mark.parametrize("spec", [
         "./config:/etc/searxng:rw",     # compose
         '"$PWD/config:/etc/searxng:rw"',  # the docker run fallback
