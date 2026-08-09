@@ -1216,3 +1216,36 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `records.py`      | Restating a routine's answer as the fields it declared |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |
+
+## Updating a checkout
+
+```bash
+git pull
+./Start.sh          # reinstalls requirements if they changed
+```
+
+If `git pull` reports **"You have divergent branches"** on a checkout you have
+not committed to, or fetches a branch you were not expecting, the clone is
+probably shallow and single-branch — which is what `git clone --depth=…` gives
+you, and what several tools clone with by default. Two symptoms, one cause:
+
+* `git log` shows `(grafted)` next to the newest commit. Without the older
+  history git cannot find a common ancestor, so an ordinary fast-forward is
+  reported as a divergence.
+* `git branch -r` lists one remote branch, and `origin/<anything-else>` "does
+  not exist" however many times you fetch. A `--depth` clone sets a refspec
+  that only ever fetches the branch it was cloned with.
+
+Both are fixed once, and neither touches your working tree:
+
+```bash
+git fetch --unshallow origin                                    # get the history
+git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+git fetch origin                                                # get the branches
+git branch --set-upstream-to=origin/$(git rev-parse --abbrev-ref HEAD)
+git merge --ff-only @{u}
+```
+
+`--unshallow` on an already-complete repository is an error rather than a
+no-op; if you get that, skip it and run the rest. After this, `git pull` does
+the obvious thing.
