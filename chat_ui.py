@@ -6,6 +6,15 @@ self-contained HTML document (inline CSS + JS, no build step, no CDN) so it
 works offline behind the server manager and on a phone. It talks to this app's
 own ``/api/models``, ``/api/chat`` (streaming), ``/api/health`` and
 ``/api/transcribe`` endpoints.
+
+``_PAGE`` is a **raw** string, and must stay one. Without the ``r`` Python
+reads the escapes before the browser ever sees them, and the ones it
+understands — ``\\b \\n \\t \\f \\v \\1`` — are consumed silently: ``\\b`` in a
+JavaScript regex becomes a backspace character, ``\\1`` becomes a control
+character, and the regex quietly stops matching. Three bugs of exactly that
+shape shipped before this was made raw. ``test_ui_shell`` now scans the
+rendered page for stray control characters and parses every script block, so
+the mistake cannot be made silently again.
 """
 
 from __future__ import annotations
@@ -856,6 +865,9 @@ _PAGE = r"""<!doctype html>
                  granted, so this fills in properly after the first recording. -->
             <select id="micDevice" title="Which microphone to record from"></select>
             <select id="voiceModel" title="Speech recognition language"></select>
+            <!-- Reading replies out is independent of dictation: this appears
+                 wherever the browser has voices, with or without vosk. -->
+            <select id="ttsVoice" title="Which voice reads replies aloud" hidden></select>
             <!-- Whether anything is actually arriving, and whether it is
                  clipping. "It transcribed wrongly" and "it heard nothing" look
                  identical without this. -->
@@ -879,6 +891,9 @@ _PAGE = r"""<!doctype html>
                  "Headphones" it invited everyone not wearing any to untick it,
                  which turns echo cancelling back on — and that is the thing
                  that was making dictation worse on a phone. -->
+            <label class="voicebar-check" id="speakbar" hidden title="Read each reply aloud as it finishes. The speaker under any reply reads that one on demand, whether this is on or not.">
+              <input type="checkbox" id="speak"> 🔊 Speak replies
+            </label>
             <label class="voicebar-check voicesetting" title="On by default, and usually the better setting. With it off, the browser's echo cancelling ducks the mic whenever audio is playing — it mutes you over music and clips quiet speech. Untick it only if you get an echo from laptop speakers.">
               <input type="checkbox" id="headset" checked> 🎙 Raw mic
             </label>
@@ -2138,6 +2153,24 @@ _PAGE = r"""<!doctype html>
         });
         view.meta.parentElement.insertBefore(btn, view.meta.nextSibling);
         view.copyBtn = btn;
+        addReplySpeak(view);
+      }
+
+      // On demand, whatever the toggle says: wanting one reply read out is not
+      // the same as wanting all of them read out, and it is the more common of
+      // the two.
+      function addReplySpeak(view) {
+        if (!ttsReady()) return;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        // Its own class as well: the label changes to "Stop reading" while it
+        // is going, so the label is not something to find it by.
+        btn.className = "replycopy replyspeak";
+        btn.textContent = "🔊 Read aloud";
+        btn.hidden = true;
+        btn.addEventListener("click", () => speakReply(view));
+        view.copyBtn.parentElement.insertBefore(btn, view.copyBtn.nextSibling);
+        view.speakBtn = btn;
       }
 
       // Render the pages a reply was grounded in, numbered to match the [n]
@@ -2464,6 +2497,9 @@ _PAGE = r"""<!doctype html>
         // routine has to still be holding its toggles and its photo count for
         // the retry the app has just invited.
         if ((!text && !images.length) || busy) return false;
+        // Asking the next question is the clearest possible sign you are done
+        // listening to the answer to the last one.
+        stopSpeaking();
         let went = true, queued = false;
         // Hidden, not merely disabled: a greyed-out Send next to a red Stop
         // is two buttons for one decision.
@@ -2657,8 +2693,13 @@ _PAGE = r"""<!doctype html>
             paintMarkdown(view.bubble, finalContent);
             view.raw = finalContent;
             if (view.copyBtn) view.copyBtn.hidden = false;
+            if (view.speakBtn) view.speakBtn.hidden = false;
             if (messages === thread) messages.push({ role: "assistant", content: finalContent });
             commitTurn();
+            // On completion, not while streaming: chunking a half-arrived
+            // sentence reads it wrong, and re-reading the corrected version
+            // reads it twice.
+            if (speakEl.checked) speakReply(view);
             if (usage) view.meta.textContent = fmtUsage(usage);
           } else {
             // The request completed but the model said nothing. Recording the
@@ -2741,6 +2782,7 @@ _PAGE = r"""<!doctype html>
       }
 
       function stop() {
+        stopSpeaking();
         // The server keeps generating after this tab stops listening — that is
         // the whole point — so aborting here alone would leave a 30b model
         // running for another minute. keepalive, because Stop is also what
@@ -2757,6 +2799,7 @@ _PAGE = r"""<!doctype html>
 
       function newChat() {
         if (controller) controller.abort();
+        stopSpeaking();
         if (recordsOpen()) closeRecords();
         currentConvoId = null;
         messages = [];
@@ -2945,6 +2988,146 @@ _PAGE = r"""<!doctype html>
           ? "📷 the photo has passed the keep-for period"
           : "📷 " + count + " photos have passed the keep-for period";
         return note;
+      }
+
+      // ---- Reading replies aloud ----
+      // The browser's own voices, which means nothing to download and nothing
+      // to install — and, unlike everything else here, one part of the app not
+      // running on your own hardware. The text never leaves the device; the
+      // voices are the operating system's. A local backend can take over
+      // behind speakText() without any of the controls moving.
+      const speakEl = document.getElementById("speak");
+      const speakBarEl = document.getElementById("speakbar");
+      const ttsVoiceEl = document.getElementById("ttsVoice");
+      const synth = window.speechSynthesis;
+      let ttsVoices = [];
+      // Which reply is being read, so its own button can say "Stop" and a new
+      // turn can silence the old one.
+      let speaking = null;
+
+      function ttsReady() { return !!(synth && window.SpeechSynthesisUtterance); }
+
+      function loadTtsVoices() {
+        if (!ttsReady()) return;
+        ttsVoices = synth.getVoices() || [];
+        if (!ttsVoices.length) return;   // Chrome fills these in asynchronously
+        const want = ttsVoiceEl.value || remembered("ttsVoice");
+        ttsVoiceEl.innerHTML = "";
+        // The page's language first: a browser typically ships thirty voices
+        // and twenty-eight of them are not the language you are reading in.
+        const here = (navigator.language || "en").slice(0, 2).toLowerCase();
+        const sorted = ttsVoices.slice().sort((a, b) => {
+          const mine = v => (v.lang || "").slice(0, 2).toLowerCase() === here ? 0 : 1;
+          return mine(a) - mine(b) || (a.name || "").localeCompare(b.name || "");
+        });
+        for (const voice of sorted) {
+          const opt = document.createElement("option");
+          opt.value = voice.name;
+          // textContent: a voice name comes from the operating system.
+          opt.textContent = voice.name + (voice.lang ? " (" + voice.lang + ")" : "");
+          ttsVoiceEl.appendChild(opt);
+        }
+        if (want && sorted.some(v => v.name === want)) ttsVoiceEl.value = want;
+        ttsVoiceEl.hidden = false;
+      }
+
+      // Markdown as something worth listening to. A reply is written to be
+      // read: fences, pipes and asterisks are layout, and a voice reciting
+      // them is unlistenable. Code is skipped rather than spelled out —
+      // "async function paint open bracket" helps nobody — but it is named, so
+      // you know something was there.
+      function speechText(raw) {
+        let out = String(raw || "");
+        out = out.replace(/```[\s\S]*?```/g, function (block) {
+          // An empty fence is nothing to announce.
+          return block.replace(/```/g, "").trim() ? " (code block) " : " ";
+        });
+        out = out.replace(/`([^`\n]+)`/g, "$1");
+        // Tables are layout too; read the cells as a list rather than
+        // reciting the pipes. The outer pipes go first, or every row is read
+        // as "comma Leg comma Miles comma".
+        out = out.replace(/^\s*\|?[\s:|-]+\|[\s:|-]*$/gm, " ");
+        // Row by row, so one ends before the next begins: run together they
+        // came out as "Leg, Miles Out, 41 Back, 39".
+        out = out.replace(/^([^\n]*\|[^\n]*)$/gm, function (row) {
+          const cells = row.replace(/^[ \t]*\|/, "").replace(/\|[ \t]*$/, "")
+                           .replace(/\s*\|\s*/g, ", ").trim();
+          return cells ? cells + "." : " ";
+        });
+        out = out.replace(/!\[[^\]]*\]\([^)]*\)/g, " ");
+        out = out.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+        out = out.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+        out = out.replace(/^\s{0,3}>\s?/gm, "");
+        // A rule before a bullet: "- - -" is a rule, and the bullet rule would
+        // eat the first dash and leave the other two to be read out.
+        out = out.replace(/^\s{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, " ");
+        out = out.replace(/^\s*[-*+]\s+/gm, "");
+        out = out.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1");
+        out = out.replace(/[ \t]+/g, " ");
+        // A paragraph break is a full stop to a listener — but only where
+        // there is not one already, or a heading is read "Trip summary..".
+        out = out.replace(/([^.!?:,;])\s*\n{2,}\s*/g, "$1. ");
+        return out.replace(/\s*\n+\s*/g, " ").replace(/\s+/g, " ").trim();
+      }
+
+      // Chrome stops speaking after roughly fifteen seconds of one utterance,
+      // so a long reply is queued a sentence at a time. It also reads better:
+      // the queue can be cancelled between sentences rather than only at the
+      // end.
+      function speechChunks(text) {
+        const parts = [];
+        for (const piece of text.split(/(?<=[.!?…])\s+|\n+/)) {
+          const line = piece.trim();
+          if (!line) continue;
+          // Still too long for one utterance: break on the next best thing.
+          if (line.length <= 220) { parts.push(line); continue; }
+          let rest = line;
+          while (rest.length > 220) {
+            let at = rest.lastIndexOf(", ", 220);
+            if (at < 60) at = rest.lastIndexOf(" ", 220);
+            if (at < 60) at = 220;
+            parts.push(rest.slice(0, at).trim());
+            rest = rest.slice(at).trim();
+          }
+          if (rest) parts.push(rest);
+        }
+        return parts;
+      }
+
+      function stopSpeaking() {
+        if (!ttsReady()) return;
+        const was = speaking;
+        speaking = null;
+        try { synth.cancel(); } catch (e) {}
+        if (was && was.button) was.button.textContent = "🔊 Read aloud";
+      }
+
+      function speakReply(view) {
+        if (!ttsReady()) return;
+        // The same button stops it: a reply being read is the one thing you
+        // want to interrupt, and hunting for a separate control to do it is
+        // the wrong answer.
+        if (speaking && speaking.view === view) { stopSpeaking(); return; }
+        stopSpeaking();
+        const text = speechText(view.raw || view.bubble.textContent || "");
+        if (!text) return;
+        const chunks = speechChunks(text);
+        if (!chunks.length) return;
+        const chosen = ttsVoices.find(v => v.name === ttsVoiceEl.value);
+        const mine = { view: view, button: view.speakBtn };
+        speaking = mine;
+        if (mine.button) mine.button.textContent = "◼ Stop reading";
+        chunks.forEach((part, i) => {
+          const say = new SpeechSynthesisUtterance(part);
+          if (chosen) { say.voice = chosen; say.lang = chosen.lang; }
+          if (i === chunks.length - 1) {
+            // Only the last one clears the state, and only if it is still ours
+            // — a new reply may have taken over while this was queued.
+            say.onend = () => { if (speaking === mine) stopSpeaking(); };
+          }
+          say.onerror = () => { if (speaking === mine) stopSpeaking(); };
+          try { synth.speak(say); } catch (e) { stopSpeaking(); }
+        });
       }
 
       // ---- Search ----
@@ -3144,6 +3327,7 @@ _PAGE = r"""<!doctype html>
         } catch (e) { return; }
 
         if (controller) controller.abort();
+        stopSpeaking();
         if (recordsOpen()) closeRecords();
         currentConvoId = convo.id;
         messages = [];
@@ -3175,6 +3359,7 @@ _PAGE = r"""<!doctype html>
               paintMarkdown(view.bubble, msg.content);
               view.raw = msg.content;      // a reopened thread copies too
               if (view.copyBtn) view.copyBtn.hidden = false;
+            if (view.speakBtn) view.speakBtn.hidden = false;
             }
             // Both panels are stored with the reply now. They were live stream
             // state only, so a thread opened on the other device had the answer
@@ -4353,6 +4538,23 @@ _PAGE = r"""<!doctype html>
       });
 
       backBtn.addEventListener("click", closeRecords);
+
+      if (ttsReady()) {
+        speakBarEl.hidden = false;
+        rememberToggle(speakEl, "chatSpeak", false);
+        ttsVoiceEl.addEventListener("change",
+                                    () => remember("ttsVoice", ttsVoiceEl.value));
+        loadTtsVoices();
+        // Chrome populates the list asynchronously and fires this when it does;
+        // without it the picker is empty on the first load of every session.
+        if (synth.addEventListener) synth.addEventListener("voiceschanged", loadTtsVoices);
+        // A tab left speaking in the background keeps speaking, which on a
+        // phone means a voice coming out of an app you have switched away from.
+        window.addEventListener("pagehide", stopSpeaking);
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState !== "visible") stopSpeaking();
+        });
+      }
       searchEl.addEventListener("input", onSearchInput);
       searchEl.addEventListener("keydown", (e) => { if (e.key === "Escape") clearSearch(); });
       searchClearEl.addEventListener("click", () => { clearSearch(); searchEl.focus(); });

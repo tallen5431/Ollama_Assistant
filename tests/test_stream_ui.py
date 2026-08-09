@@ -69,6 +69,11 @@ let errors = [], saved = { conversation: false, dropped: false, sentId: null };
 let currentConvoId = null;
 let threadEmpty = true;
 function renderThumbs() {}
+// Asking the next question stops the answer to the last one being read out.
+let stopped = 0;
+function stopSpeaking() { stopped++; }
+const speakEl = { checked: false };
+function speakReply() {}
 function autosize() {}
 function clearPlaceholder() {}
 function scrollDown() {}
@@ -544,6 +549,7 @@ class TestEveryFunctionThePageCallsExists:
         "AbortController", "Image", "Function", "parseInt", "parseFloat",
         "isFinite", "isNaN", "encodeURIComponent", "decodeURIComponent",
         "btoa", "atob", "structuredClone", "queueMicrotask",
+        "SpeechSynthesisUtterance",
         # Browser
         "document", "window", "navigator", "location", "localStorage", "console",
         "fetch", "setTimeout", "clearTimeout", "setInterval", "clearInterval",

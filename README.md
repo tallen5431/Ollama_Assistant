@@ -26,6 +26,12 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   with [Vosk](https://alphacephei.com/vosk/) — nothing is sent to the cloud.
   *(Needs the app served over HTTPS; browsers only allow the mic on a secure
   origin. See "Voice input" below.)*
+- 🔊 **Read aloud** — a speaker button under every reply reads it out, or turn
+  **🔊 Speak replies** on and each finished answer reads itself. Uses the voices
+  your browser and phone already have, so there's nothing to download and no
+  audio leaves the device. Markdown is turned into something worth hearing
+  first: a code fence is named rather than recited, table rows are read as
+  cells, and the pipes and asterisks go. See "Read aloud" below.
 - 🖼️ **Image input** — attach files with 📎, take a photo with 📷, grab a 📸
   screenshot, or paste one in, then ask about it (`llava`, `*-vision`,
   `minicpm-v`, `qwen2.5vl`, `moondream`, …). Images are downscaled in the
@@ -211,6 +217,53 @@ Korean, Hindi, and a large English model) marked with their download size. Pick
 one that isn't downloaded yet and it's fetched once (into `models/`), then used
 for transcription. Set `VOSK_MODEL` to change the default language, or
 `VOSK_MODEL_PATH` to use your own model directory.
+
+## Read aloud
+
+Under every reply, next to **Copy**, is a 🔊 **Read aloud** button. Press it and
+the answer is read out; press it again — the same button, now **◼ Stop
+reading** — and it stops. Above the message box, **🔊 Speak replies** makes
+every finished answer read itself, which is what you want with the phone on a
+dashboard mount.
+
+This one part doesn't run on your hardware: it uses `speechSynthesis`, the
+voices your browser and operating system already ship. So there's nothing to
+download and nothing to configure, and it works on the phone and the desktop
+today. The text stays on the device — it's handed to the OS speech engine, not
+to a server — but the voice is the OS's, not yours. Next to the toggle is a
+voice picker listing what your browser has, with the page's own language first;
+the choice is remembered per browser. A browser without speech synthesis shows
+none of these controls.
+
+**What it actually says.** A reply is written to be *read*, and a voice reciting
+the layout is unlistenable. Before speaking, the page turns the markdown into
+something worth hearing:
+
+- a fenced code block becomes "(code block)" — reciting `async function paint
+  open bracket` helps nobody, but silence leaves you wondering what you missed;
+- a table is read row by row as "Leg, Miles. Out, 41." rather than a hedge of
+  pipes;
+- links are read as their words, not their URLs; images are skipped;
+- headings, quotes, bullets, rules and emphasis lose their markers and keep
+  their words;
+- a paragraph break becomes a full stop, so two thoughts don't run together —
+  unless there's one there already;
+- numbers, units and money survive all of it.
+
+**Why it's spoken in pieces.** Chrome stops speaking after roughly fifteen
+seconds of a single utterance, so a long reply spoken as one would simply stop
+part-way through. The text is queued a sentence at a time (and long sentences
+broken at punctuation, never mid-word), which also means it can be cancelled
+between sentences instead of only at the end.
+
+**When it stops.** On a phone, a voice still going after you've moved on is a
+nuisance rather than a feature — so it stops when you ask the next question,
+open another conversation, start a new chat, press **Stop**, or switch away
+from the tab.
+
+Replies are spoken once finished rather than as they stream: chunking a
+half-arrived sentence reads it wrong, and re-reading the corrected version
+reads it twice.
 
 ## Web access
 
