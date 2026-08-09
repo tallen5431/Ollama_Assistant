@@ -532,12 +532,26 @@ docker compose up -d
 ```
 
 `docker compose` is the v2 plugin, which Ubuntu's `docker.io` package does not
-include. If that line fails — `unknown shorthand flag: 'd' in -d`, or `'compose'
-is not a docker command` — you have Docker without it. Either install it
-(`sudo apt install docker-compose-v2`, or `docker-compose-plugin` from Docker's
-own repository), use the v1 binary if that is what is there
-(`docker-compose up -d`, hyphenated), or skip compose altogether — this is the
-same container, spelled out, and depends on nothing but `docker` itself:
+include. If that line fails — `unknown shorthand flag: 'd' in -d`, or
+`docker: unknown command: docker compose` — you have Docker without it.
+
+**Do not reach for the hyphenated `docker-compose`.** That is v1, it has been
+end-of-life since 2023, and against any current Docker Engine it fails on the
+recreate path with:
+
+```
+KeyError: 'ContainerConfig'
+```
+
+Docker no longer emits `ContainerConfig` in image inspect and v1 reads it
+unconditionally, so this is not something in the compose file and not something
+you can configure around. It bites the second time you run it, not the first,
+which makes it look like the file broke rather than the tool.
+
+So: install the plugin (`sudo apt install docker-compose-v2`, or
+`docker-compose-plugin` from Docker's own repository), or skip compose
+altogether. This is the same container, spelled out, and depends on nothing but
+`docker` itself:
 
 ```bash
 docker run -d --name searxng --restart unless-stopped \
@@ -550,8 +564,13 @@ docker run -d --name searxng --restart unless-stopped \
 ```
 
 Run that from inside `searxng/`, so `$PWD` is the directory holding
-`settings.yml`. Check it came up with `docker logs searxng` — a container that
-exits immediately is almost always the secret key still being the default.
+`settings.yml`. If a previous attempt left a container behind — `docker run`
+will say `the container name "/searxng" is already in use` — clear it first
+with `docker rm -f searxng`; nothing in it is worth keeping, since all of the
+state is the `settings.yml` you are mounting in.
+
+Check it came up with `docker logs searxng` — a container that exits
+immediately is almost always the secret key still being the default.
 
 Then come back up to the project root, point the app at it, and restart it:
 

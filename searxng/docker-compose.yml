@@ -12,10 +12,15 @@
 #
 # `docker compose` is the v2 plugin and Ubuntu's docker.io package ships
 # without it — "unknown shorthand flag: 'd' in -d" is what that looks like,
-# because the -d never reaches a compose that would understand it. Either
-# install it (docker-compose-v2), use the hyphenated v1 binary if that is what
-# is there, or run the container directly; the README spells out the equivalent
-# docker run, which needs nothing but docker.
+# because the -d never reaches a compose that would understand it.
+#
+# The hyphenated `docker-compose` is NOT the answer: that is v1, end-of-life
+# since 2023, and against a current Docker Engine it dies on the recreate path
+# with KeyError: 'ContainerConfig' — Docker stopped emitting that field in
+# image inspect and v1 reads it unconditionally. Nothing in this file causes it
+# and nothing in this file can avoid it. Install docker-compose-v2, or run the
+# container directly; the README spells out the equivalent docker run, which
+# needs nothing but docker.
 
 services:
   searxng:

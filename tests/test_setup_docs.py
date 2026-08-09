@@ -72,9 +72,26 @@ class TestTheStepsCanBeFollowedInOrder:
             "the setup walks into searxng/ and never comes back, but the next " \
             "command it gives needs the project root"
 
-    def test_the_compose_variants_are_named_where_the_command_is(self):
+    @pytest.mark.parametrize("error", [
+        # No compose v2 plugin: the -d never reaches a compose that would
+        # understand it, so Docker's root command rejects it and prints its own
+        # usage — which reads like a typo rather than a missing plugin.
+        "unknown shorthand flag: 'd' in -d",
+        # And the trap on the other side. The hyphenated docker-compose is v1,
+        # end-of-life since 2023, and against a current Docker Engine it dies
+        # here on the *second* run — the recreate path — so it looks like the
+        # compose file broke rather than the tool.
+        "KeyError: 'ContainerConfig'",
+    ])
+    def test_the_errors_someone_will_paste_into_a_search_box_are_here(self, error):
         start = README.index("docker compose up -d")
-        window = README[start:start + 1200]
-        assert "docker-compose" in window, "the v1 binary is not mentioned"
-        assert "unknown shorthand flag" in window, \
-            "the error someone actually sees is what they will search for"
+        window = README[start:start + 2500]
+        assert error in window, f"{error!r} is not named where the command is"
+
+    def test_and_v1_is_named_as_the_trap_it_is_rather_than_an_option(self):
+        """It was offered here as a fallback, which sent someone straight into
+        the KeyError above. Two wrong turns on the same paragraph."""
+        start = README.index("docker compose up -d")
+        window = README[start:start + 2500]
+        assert "Do not reach for the hyphenated" in window
+        assert "use the v1 binary if that is what is there" not in README
