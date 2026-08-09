@@ -831,15 +831,28 @@ def api_chat() -> Any:
                     kept_steps.append(entry)
                 emit(line)
         finally:
-            _end_turn(convo_id, cancel)
-            # In produce's own finally, so it completes before the stream
-            # closes: the browser refreshes its list the moment the reply ends,
-            # and saving afterwards made that a race the list usually lost — a
-            # finished thread with no title until something else refreshed it.
-            # Saved even when cancelled: Stop usually means "I have read
-            # enough", and the half you read is worth keeping.
-            _keep_turn(convo_id, last_user, "".join(answer), kept_sources,
-                       "".join(thinking), kept_steps)
+            try:
+                # In produce's own finally, so it completes before the stream
+                # closes: the browser refreshes its list the moment the reply
+                # ends, and saving afterwards made that a race the list usually
+                # lost — a finished thread with no title until something else
+                # refreshed it. Saved even when cancelled: Stop usually means
+                # "I have read enough", and the half you read is worth keeping.
+                #
+                # Before _end_turn, not after. /api/chat/status is nothing but
+                # membership in _TURNS, so between deregistering and committing
+                # there is a window where a reconnecting page is told the turn
+                # is not running *and* finds nothing written — which reads to it
+                # as "the reply did not survive", about a reply sitting in the
+                # database milliseconds later.
+                _keep_turn(convo_id, last_user, "".join(answer), kept_sources,
+                           "".join(thinking), kept_steps)
+            finally:
+                # Nested, because a turn left registered forever would break
+                # Stop and /api/chat/status for that conversation for the life
+                # of the process. _keep_turn swallows store failures, but the
+                # reasoning-strip ahead of them is outside its try.
+                _end_turn(convo_id, cancel)
 
     return _detached_stream(produce, "chat-turn")
 
@@ -1557,7 +1570,10 @@ def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
     futures: Dict[Any, int] = {}
     try:
         futures = {pool.submit(func, item): i for i, item in enumerate(items)}
+        recorded = set()
+
         def record(future: Any) -> bool:
+            recorded.add(future)
             index = futures[future]
             try:
                 results[index] = future.result()
@@ -1585,8 +1601,18 @@ def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
         # until the next completion whenever it is, which is not a grace period
         # at all — it is the full wait the early return exists to avoid.
         if enough is not None and done >= enough:
-            best_kept = max((i for i, r in enumerate(results) if r), default=-1)
-            better = [f for f, i in futures.items() if not f.done() and i < best_kept]
+            best_kept = max((i for i, r in enumerate(results) if r is not None), default=-1)
+            # "not yet recorded", not "not yet done". A future that finished in
+            # the moment between the break and this line is done, so it was
+            # excluded here — and nothing had called record() on it, so its
+            # result was simply thrown away. That is the top search result
+            # arriving on time and being dropped in favour of a lower-ranked
+            # page, which is the exact selection this grace period exists to
+            # prevent. Reproduced 10 times out of 10 with the window widened;
+            # in the wild the window is microseconds, which is why it read as
+            # working. wait() returns the already-done ones on its first check,
+            # so nothing waits for them.
+            better = [f for f, i in futures.items() if f not in recorded and i < best_kept]
             if better:
                 done_futures, _ = wait(better, timeout=_STRAGGLER_GRACE)
                 for future in done_futures:
@@ -1598,7 +1624,11 @@ def _run_all(func: Any, items: List[Any], enough: Optional[int] = None) -> Any:
         for future in futures:
             future.cancel()
         pool.shutdown(wait=False)
-    return [r for r in results if r], errors
+    # `is not None`, not truthiness: a search that legitimately matched nothing
+    # returns [], which record() counts as a success — so `enough` was reached
+    # while the caller got fewer than that back. No caller can produce a falsy
+    # success today; the disagreement is the kind that only shows up later.
+    return [r for r in results if r is not None], errors
 
 
 @app.route("/api/voice/models", methods=["GET"])

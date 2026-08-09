@@ -106,6 +106,9 @@ let DROP_AFTER = -1;
 // What the server says once the page comes back asking. `landedAfter` is how
 // many polls it takes for the finished turn to appear in the thread.
 let TURN_RUNNING = true, LANDED_AFTER = 1, polls = 0, statusAsks = 0;
+// How many messages the thread already held: 0 for a first question,
+// 2 for the second, 4 for the third.
+let PRIOR_TURNS = 0;
 let loadedConvo = null;
 async function loadConversation(id) { loadedConvo = id; }
 async function fetch(url, opts) {
@@ -127,9 +130,20 @@ async function fetch(url, opts) {
     // writes the question and the answer together when generation ends, so at
     // the moment a connection dies the thread has nothing in it at all. That
     // is exactly what made dropIfEmpty() delete it out from under the reply.
+    // PRIOR_TURNS is what the thread already held before this turn started —
+    // zero for the first question in a thread, two for the second, and so on.
+    // The stored thread therefore *ends in an assistant message* the whole
+    // time this turn is still being generated, which is the case the recovery
+    // has to tell apart from its own reply arriving.
+    const before = [];
+    for (let n = 0; n < PRIOR_TURNS; n++) {
+      before.push({ role: "user", content: "earlier q" + n },
+                  { role: "assistant", content: "earlier answer " + n });
+    }
     return { ok: true, json: async () => ({ messages: done
-      ? [{ role: "user", content: "q" }, { role: "assistant", content: "the answer" }]
-      : [] }) };
+      ? before.concat([{ role: "user", content: "q" },
+                       { role: "assistant", content: "the answer" }])
+      : before }) };
   }
   if (opts && opts.body) saved.sentId = JSON.parse(opts.body).conversation_id || null;
   let i = 0;
@@ -152,10 +166,19 @@ async function run(script, abortAfter, typed, typeDuring, opts) {
   DROP_AFTER = opts.dropAfter === undefined ? -1 : opts.dropAfter;
   TURN_RUNNING = opts.running !== false;
   LANDED_AFTER = opts.landedAfter === undefined ? 1 : opts.landedAfter;
+  PRIOR_TURNS = opts.priorTurns || 0;
   polls = 0; statusAsks = 0; loadedConvo = null;
-  messages = []; errors = [];
+  // The live thread starts out holding whatever the stored one does — a
+  // follow-up question is asked into a conversation already on the screen.
+  messages = [];
+  for (let n = 0; n < PRIOR_TURNS; n++) {
+    messages.push({ role: "user", content: "earlier q" + n },
+                  { role: "assistant", content: "earlier answer " + n });
+  }
+  errors = [];
   saved = { conversation: false, dropped: false, sentId: null };
-  currentConvoId = null; threadEmpty = opts.threadEmpty !== false;
+  currentConvoId = PRIOR_TURNS ? "convo-1" : null;
+  threadEmpty = opts.threadEmpty !== false;
   chatEl.children = []; pendingImages = [];
   inputEl.value = typed;
   await send();
@@ -560,12 +583,46 @@ class TestLosingTheConnectionIsNotLosingTheTurn:
         assert r["polls"] == 1, r["polls"]
         assert r["statusAsks"] == 0, "the status was asked for despite the reply landing"
 
+    def test_a_dropped_follow_up_is_not_mistaken_for_a_landed_one(self):
+        """Every test above asks the first question in a thread, where "the
+        stored thread ends in an assistant message" can only mean this turn's
+        reply. On the second question and every one after it, that is already
+        true of the *previous* turn — so the first poll concluded the reply had
+        landed, stopped waiting, and re-read the thread from the database:
+        the question just asked disappeared off the screen, the thread went
+        back to ending at the old answer, and the real reply — still being
+        generated — never appeared without a manual reload.
+
+        Unlike the first-turn case this is not a race. It happened every time.
+        """
+        r = self.dropped(priorTurns=2, landedAfter=3, settleMs=3400)
+        assert r["polls"] >= 2, "it stopped at the previous turn's answer"
+        assert r["loadedConvo"] == "convo-1", "the real reply was never collected"
+
+    def test_and_it_still_asks_whether_that_turn_is_running(self):
+        """Which it could not do before: concluding "landed" on the first poll
+        skipped the status call entirely, so a follow-up turn that really had
+        died was never distinguished from one still being written."""
+        r = self.dropped(priorTurns=2, landedAfter=99, settleMs=600)
+        assert r["statusAsks"] >= 1
+
+    def test_and_a_dead_follow_up_is_still_given_up_on(self):
+        r = self.dropped(priorTurns=4, landedAfter=99, running=False, settleMs=400)
+        assert "did not survive" in r["turnStatus"], r["turnStatus"]
+
+    def test_the_first_question_in_a_thread_is_unaffected(self):
+        """storedBefore is 0 there, which is the test that was already being
+        made — so this must not have moved."""
+        r = self.dropped(priorTurns=0)
+        assert r["loadedConvo"] == "convo-1"
+        assert r["polls"] == 1
+
     def test_an_unsaved_conversation_still_reports_the_failure(self):
         """With history off there is no thread to collect anything from, so
         the old behaviour is the only one available and must stay."""
         page = _page()
         at = page.index("} else if (messages === thread && currentConvoId) {")
-        assert "waitForTurn(currentConvoId, view, err)" in page[at:at + 1400]
+        assert "waitForTurn(currentConvoId, view, err, storedBefore)" in page[at:at + 1400]
         assert "markError(err.message || String(err))" in page[at:at + 3000], \
             "the no-thread branch lost its error"
 

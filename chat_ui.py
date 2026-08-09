@@ -2519,6 +2519,16 @@ _PAGE = r"""<!doctype html>
           // mean the details do not go — not just that new photos skip them.
           if (exifOn && meta.some(Boolean)) userMsg.image_meta = meta;
         }
+        // How many messages the server has for this thread right now — the
+        // turn about to start is not among them, since the server writes the
+        // question and the answer together when generation ends. If this
+        // connection drops, that is the number the recovery has to see the
+        // stored thread grow past. Without it, "the thread ends in an
+        // assistant message" was already true of the *previous* turn, so a
+        // dropped follow-up concluded on its first poll that the reply had
+        // landed, re-read the thread, and wiped the question just asked off
+        // the screen while the real reply was still being generated.
+        const storedBefore = messages.length;
         messages.push(userMsg);
         inputEl.value = ""; autosize();
         // The thread has to exist before the stream starts, because the server
@@ -2756,7 +2766,7 @@ _PAGE = r"""<!doctype html>
               + "being written. Waiting for it…";
             view.status.hidden = false;
             setStatus("bad", "reconnecting");
-            waitForTurn(currentConvoId, view, err);
+            waitForTurn(currentConvoId, view, err, storedBefore);
           } else {
             // No thread to collect it from — an unsaved conversation, or one
             // the user has already navigated away from. An error can still
@@ -2818,9 +2828,10 @@ _PAGE = r"""<!doctype html>
       // inside it, so anything still missing by now is not coming.
       const WAIT_FOR_TURN_MS = 6 * 60 * 1000;
 
-      function waitForTurn(convoId, view, err) {
+      function waitForTurn(convoId, view, err, storedBefore) {
         stopWaiting();
         waiting = { convoId: convoId, view: view, err: err, timer: 0, tries: 0,
+                    storedBefore: storedBefore || 0,
                     until: Date.now() + WAIT_FOR_TURN_MS };
         lookForTurn();
       }
@@ -2839,7 +2850,13 @@ _PAGE = r"""<!doctype html>
           const resp = await fetch("api/conversations/" + mine.convoId);
           if (resp.ok) {
             const msgs = (await resp.json()).messages || [];
-            landed = msgs.length > 0 && msgs[msgs.length - 1].role === "assistant";
+            // Grown *past what was already there*, not merely ending in an
+            // assistant message. On the first turn of a thread those are the
+            // same test; on every turn after it they are not, and the weaker
+            // one was satisfied by the previous turn's answer before this one
+            // had been written at all.
+            landed = msgs.length > mine.storedBefore
+                     && msgs[msgs.length - 1].role === "assistant";
           }
           // Only worth asking if the answer is not already there — and it is
           // asked second on purpose, because a turn that finishes between the

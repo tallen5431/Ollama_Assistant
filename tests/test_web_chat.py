@@ -432,6 +432,65 @@ class TestFetchesDoNotWaitOnStragglers:
         assert "rank0" not in [d["url"] for d in docs]
         assert elapsed < 4, f"waited {elapsed:.1f}s on a hopeless straggler"
 
+    def test_a_straggler_that_lands_in_the_gap_is_not_lost(self, monkeypatch):
+        """The grace period asked for futures that were "not done", so one that
+        finished in the moment between the break and that line was excluded —
+        and nothing had recorded it, so a successful, better-ranked fetch was
+        thrown away for a lower-ranked one. In the wild the window is
+        microseconds, which is why it read as working; widened here it dropped
+        the top-ranked page every time.
+        """
+        import time as clock
+        from concurrent.futures import as_completed as real
+
+        def unhurried(futures):
+            for future in real(futures):
+                yield future
+                clock.sleep(0.05)      # the scheduler gets a moment; that is all it takes
+
+        monkeypatch.setattr(app_module, "as_completed", unhurried)
+
+        def fetch(url):
+            clock.sleep(0.06 if url == "rank0" else 0.001)
+            return {"url": url, "title": url, "text": "body"}
+
+        docs, _ = app_module._run_all(
+            fetch, ["rank0", "rank1", "rank2", "rank3", "rank4"], enough=3)
+        assert "rank0" in [d["url"] for d in docs], "the top-ranked page was dropped"
+
+    def test_and_a_failure_is_only_reported_once(self, monkeypatch):
+        """The narrower fix — dropping the "not done" test alone — would let an
+        already-recorded future be recorded a second time, and the panel's
+        "Pages read" line would show the same failure twice as if two pages had
+        failed."""
+        import time as clock
+        from concurrent.futures import as_completed as real
+
+        def unhurried(futures):
+            for future in real(futures):
+                yield future
+                clock.sleep(0.05)
+
+        monkeypatch.setattr(app_module, "as_completed", unhurried)
+
+        def fetch(url):
+            clock.sleep(0.06 if url == "rank0" else 0.001)
+            if url in ("rank0", "rank1"):
+                raise web.WebError(f"dead: {url}")
+            return {"url": url, "title": url, "text": "body"}
+
+        _, errors = app_module._run_all(
+            fetch, ["rank0", "rank1", "rank2", "rank3", "rank4"], enough=3)
+        assert sorted(errors) == ["dead: rank0", "dead: rank1"], errors
+
+    def test_a_result_that_is_merely_falsy_is_still_a_result(self):
+        """A search that legitimately matched nothing returns [], which counted
+        towards `enough` and was then filtered out of the answer — so the caller
+        asked for three and could get two, with nothing saying why."""
+        wanted = {"a": [], "b": [{"url": "u"}], "c": [{"url": "v"}]}
+        docs, errors = app_module._run_all(lambda k: wanted[k], ["a", "b", "c"], enough=3)
+        assert len(docs) == 3 and errors == []
+
     def test_fewer_successes_than_wanted_does_not_hang(self):
         import time as clock
         def fetch(url):

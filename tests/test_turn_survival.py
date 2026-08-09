@@ -260,6 +260,39 @@ class TestAskingWhetherATurnIsStillRunning:
         client.post("/api/chat/cancel", json={"conversation_id": "cid-cancelled"})
         assert self.running(client, "cid-cancelled") is True
 
+    def test_it_never_says_no_before_the_reply_is_readable(self, client, monkeypatch):
+        """The pair a reconnecting page reads as "the reply did not survive":
+        the thread has nothing in it *and* nothing is running. Deregistering
+        the turn before committing it opened exactly that window — small, but
+        the page polls straight into it, and the reply is in the database
+        milliseconds later.
+
+        The save is made slow so the window, if there is one, is wide enough to
+        observe rather than raced for.
+        """
+        convo = store.create("")["id"]
+        real = store.save_turn
+        seen = []
+
+        def slow(*a, **kw):
+            # Where a reconnecting page would look, at the worst moment.
+            seen.append((self.running(client, convo),
+                         len(store.get(convo)["messages"])))
+            time.sleep(0.2)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(app_module.store, "save_turn", slow)
+        monkeypatch.setattr(app_module, "chat_stream", _FakeOllama(["68 miles."]))
+        resp = client.post("/api/chat", json={
+            "model": "m", "messages": [{"role": "user", "content": "how far?"}],
+            "conversation_id": convo})
+        resp.get_data()
+        assert seen, "the save never ran"
+        for running, stored in seen:
+            assert running or stored, \
+                "asked mid-save: nothing running and nothing stored — the page " \
+                "reads that as a lost reply"
+
     def test_it_is_behind_the_same_guard_as_everything_else(self, monkeypatch):
         monkeypatch.setenv("CHAT_AUTH", "tj:hunter2")
         guarded = importlib.reload(app_module).app.test_client()
