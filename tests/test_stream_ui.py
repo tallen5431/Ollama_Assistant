@@ -78,7 +78,10 @@ function autosize() {}
 function clearPlaceholder() {}
 function scrollDown() {}
 function setStatus() {}
-function markError(m) { errors.push(m); }
+// The real one folds `detail` into the error block; here we only need to know
+// it was handed over rather than removed with the turn.
+let errorDetails = [];
+function markError(m, detail) { errors.push(m); if (detail) errorDetails.push(detail); }
 function paintMarkdown(e, raw) { e.textContent = raw; }
 function fmtUsage() { return ""; }
 function showSources() {}
@@ -153,7 +156,7 @@ async function run(script, abortAfter, typed, typeDuring, opts) {
   TURN_RUNNING = opts.running !== false;
   LANDED_AFTER = opts.landedAfter === undefined ? 1 : opts.landedAfter;
   polls = 0; statusAsks = 0; loadedConvo = null;
-  messages = []; errors = [];
+  messages = []; errors = []; errorDetails = [];
   saved = { conversation: false, dropped: false, sentId: null };
   currentConvoId = null; threadEmpty = opts.threadEmpty !== false;
   chatEl.children = []; pendingImages = [];
@@ -169,7 +172,7 @@ async function run(script, abortAfter, typed, typeDuring, opts) {
     sentThreadId: saved.sentId,
     input: inputEl.value,
     onScreen: chatEl.children.filter(c => !c.removed).length,
-    errors, hint: hintEl.textContent,
+    errors, errorDetails, hint: hintEl.textContent,
     panel: lastView ? lastView.thinkBody.textContent : "",
     panelShown: lastView ? lastView.think.hidden === false : false,
     bubble: lastView ? lastView.bubble.textContent : "",
@@ -238,6 +241,18 @@ class TestTurnBookkeeping:
         assert r["threadDropped"], "an empty reply must not leave an empty thread"
         assert any("empty reply" in e for e in r["errors"])
         assert r["input"] == "what is 2+2?"
+
+    def test_an_empty_reply_hands_over_the_reasoning_rather_than_binning_it(self):
+        """The turn is still rolled back — but the scratchpad was the only
+        evidence of what happened, and it was being removed with the view."""
+        r = drive([{"message": {"content": "", "thinking": "weighing the sources"}},
+                   {"done": True, "done_reason": "length",
+                    "eval_count": 3891, "prompt_eval_count": 4301}])
+        assert r["messageRoles"] == [], "the rollback still has to happen"
+        assert r["threadDropped"]
+        assert r["onScreen"] == 0, "the turn itself still goes"
+        assert any("weighing the sources" in d for d in r["errorDetails"]), \
+            "the reasoning has to survive somewhere"
 
     def test_a_rollback_does_not_clobber_a_newly_typed_message(self):
         """You start typing the next question while the first is in flight."""
@@ -742,3 +757,78 @@ class TestEveryFunctionThePageCallsExists:
             f"the page calls {missing}, which nothing in it defines — "
             "most likely an edit spliced over a helper"
         )
+
+
+class TestAnEmptyReplySaysWhy:
+    """Reported from the NucBox: a 4b answering a photo question with three
+    fetched pages in front of it filled its window with reasoning and never
+    wrote a word. The screen said "The model returned an empty reply", which is
+    what a crash, a stopped model and this all looked like — while done_reason,
+    the field that separates them, arrived in the final line and was parsed and
+    dropped along with everything else on it.
+    """
+
+    LENGTH = {"done": True, "done_reason": "length",
+              "eval_count": 3891, "prompt_eval_count": 4301}
+    STOPPED = {"done": True, "done_reason": "stop",
+               "eval_count": 12, "prompt_eval_count": 4301}
+
+    def thinking(self, text="weighing the three sources"):
+        return {"message": {"content": "", "thinking": text}}
+
+    def said(self, r):
+        return " ".join(r["errors"])
+
+    def test_the_window_running_out_is_named_and_so_is_the_fix(self):
+        said = self.said(drive([self.thinking(), self.LENGTH]))
+        assert "context window" in said
+        assert "reasoning" in said
+        assert "OLLAMA_NUM_CTX" in said, "the setting that actually fixes it"
+        assert "WEB_MAX_DOCS" in said, "and the other lever"
+
+    def test_the_counts_are_there_to_compare_against_the_window(self):
+        said = self.said(drive([self.thinking(), self.LENGTH]))
+        assert "4301" in said and "3891" in said, \
+            "measured, not configured — this is what the window actually held"
+
+    def test_running_out_with_nothing_to_show_reads_differently(self):
+        """No scratchpad: the prompt alone left no room, which is a different
+        thing from a model that reasoned itself out of the window."""
+        said = self.said(drive([self.LENGTH]))
+        assert "ran out of context window" in said
+        assert "OLLAMA_NUM_CTX" in said
+        assert "reasoning" not in said, "there wasn't any"
+
+    def test_stopping_after_reasoning_is_not_called_a_full_window(self):
+        said = self.said(drive([self.thinking(), self.STOPPED]))
+        assert "reasoning" in said and "stopped" in said
+        assert "context window" not in said, "that is the other diagnosis"
+        assert "OLLAMA_NUM_CTX" not in said, "raising it would not help here"
+
+    def test_a_plain_empty_reply_still_says_the_plain_thing(self):
+        """Nothing to diagnose from, so nothing is invented."""
+        said = self.said(drive([{"done": True}]))
+        assert "empty reply" in said
+        assert "OLLAMA_NUM_CTX" not in said
+
+    def test_the_message_is_still_handed_back(self):
+        r = drive([self.thinking(), self.LENGTH])
+        assert r["input"] == "what is 2+2?"
+        assert "back in the box" in self.said(r)
+
+    def test_a_reply_that_arrived_is_untouched_by_any_of_this(self):
+        r = drive([{"message": {"content": "4", "thinking": "2+2"}},
+                   {"done": True, "done_reason": "length"}])
+        assert r["messageRoles"] == ["user", "assistant"]
+        assert r["errors"] == [], "a truncated answer is still an answer"
+
+    def test_the_reasoning_reaches_the_page_as_text_not_markup(self):
+        """A scratchpad is model output, and it is now rendered somewhere new.
+        Nothing about "the model wrote it" changes when it moves house."""
+        page = _page()
+        at = page.index("      function markError(")
+        body = page[at:page.index("\n      }", at)]
+        assigned = re.findall(r"(\w+)\s*=\s*detail\b", body)
+        assert assigned, "markError has to render the detail somewhere"
+        assert all(name == "textContent" for name in assigned), \
+            f"detail assigned to {assigned}; only textContent is safe here"

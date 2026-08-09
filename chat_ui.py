@@ -1492,6 +1492,39 @@ _PAGE = r"""<!doctype html>
         return { content, thinking };
       }
 
+      // Why nothing came back, out of the summary line Ollama already sends.
+      //
+      // "The model returned an empty reply" was true and useless. A reasoning
+      // model that spent its whole window on scratchpad, a chat template that
+      // emitted nothing, and a model that simply stopped all read identically
+      // — and the one field that tells them apart, done_reason, was arriving
+      // in the final line, being parsed, and thrown away with everything else
+      // on it. On a 4b with three fetched pages in front of it the first case
+      // is the common one, and nothing on screen said so.
+      function emptyReplyWhy(usage, thinking) {
+        if (!usage) return "The stream ended before the model said anything.";
+        const thought = (thinking || "").trim();
+        const out = usage.eval_count || 0, prompt = usage.prompt_eval_count || 0;
+        // Measured, not configured: these are what the window actually held,
+        // which is the number to compare against OLLAMA_NUM_CTX.
+        const counts = prompt || out
+          ? " (" + prompt + " tokens of prompt, " + out + " generated)" : "";
+        if (usage.done_reason === "length") {
+          return thought
+            ? "The model filled its context window with reasoning and never "
+              + "started the answer" + counts + ". Raise OLLAMA_NUM_CTX, lower "
+              + "WEB_MAX_DOCS so less page text goes in, or answer with a model "
+              + "that does not reason."
+            : "The model ran out of context window before writing anything"
+              + counts + ". Raise OLLAMA_NUM_CTX or lower WEB_MAX_DOCS.";
+        }
+        if (thought) {
+          return "The model produced reasoning and then stopped without writing "
+            + "an answer" + counts + ".";
+        }
+        return "The model returned an empty reply" + counts + ".";
+      }
+
       function fmtUsage(u) {
         const parts = [];
         if (u.eval_count) parts.push(u.eval_count + " tokens");
@@ -2190,12 +2223,30 @@ _PAGE = r"""<!doctype html>
         view.sources.hidden = false;
       }
 
-      function markError(msg) {
+      // `detail` is whatever the failed turn produced that is worth keeping —
+      // a reasoning model's scratchpad, most of the time. It used to go with
+      // the rolled-back turn: minutes of work removed from the screen at the
+      // moment it became the only evidence of what went wrong. It cannot go
+      // back in the thread (nothing was written, and the turn is being undone
+      // precisely so the screen and the store agree), so it comes here, folded
+      // away, attached to the explanation.
+      function markError(msg, detail, label) {
         const wrap = document.createElement("div");
         wrap.className = "wrap";
         wrap.innerHTML = '<div class="msg error"><div class="col"><div class="role">Error</div>' +
                          '<div class="bubble"></div></div></div>';
         wrap.querySelector(".bubble").textContent = msg;
+        if (detail) {
+          const more = document.createElement("details");
+          more.className = "stepmore";
+          const sum = document.createElement("summary");
+          sum.textContent = label || "show";
+          const body = document.createElement("pre");
+          body.textContent = detail;      // never innerHTML: the model wrote this
+          more.appendChild(sum); more.appendChild(body);
+          const col = wrap.querySelector(".col");
+          if (col) col.appendChild(more);
+        }
         chatEl.appendChild(wrap); scrollDown(true);   // an error must not be missed
       }
 
@@ -2687,7 +2738,12 @@ _PAGE = r"""<!doctype html>
               scrollDown();
             }
           }
-          const finalContent = splitThink(rawContent).content;
+          const finalSplit = splitThink(rawContent);
+          const finalContent = finalSplit.content;
+          // Both channels: <think> tags inline in the content, and the separate
+          // "thinking" field a newer Ollama streams. On the empty path this is
+          // the whole of what the turn produced.
+          const finalThinking = (thinkingField + finalSplit.thinking).trim();
           view.status.hidden = true;
           if (finalContent) {
             paintMarkdown(view.bubble, finalContent);
@@ -2710,8 +2766,9 @@ _PAGE = r"""<!doctype html>
             went = false;
             const returned = rollBackTurn();
             dropIfEmpty();
-            markError("The model returned an empty reply." +
-                      (returned ? " Your message is back in the box." : ""));
+            markError(emptyReplyWhy(usage, finalThinking) +
+                      (returned ? " Your message is back in the box." : ""),
+                      finalThinking, "show the reasoning it did produce");
           }
           setStatus("ok", "connected");
         } catch (err) {
