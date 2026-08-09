@@ -32,7 +32,7 @@ from typing import Any, Dict, Iterator, List, Optional
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, request, stream_with_context
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import authz
@@ -95,6 +95,24 @@ def _too_large(_exc: RequestEntityTooLarge) -> Any:
     limit = app.config["MAX_CONTENT_LENGTH"]
     # :.3g not // — a sub-megabyte cap otherwise reports itself as "limit 0 MB".
     return jsonify({"error": f"Request body too large (limit {limit / (1024 * 1024):.3g} MB)"}), 413
+
+
+@app.errorhandler(HTTPException)
+def _http_error(exc: HTTPException) -> Any:
+    """Answer an /api/ request as JSON whatever went wrong.
+
+    Every handler here returns JSON and the page parses it as JSON — but a 404
+    from an unmatched path, or a 405 from the wrong method, came from Werkzeug
+    as an HTML page. `await resp.json()` throws on that, so the reason arrived
+    at the browser as a parse error with the actual status lost. This is the
+    same fix _too_large already applies to 413, applied to the rest.
+
+    Pages keep the HTML: a person who mistypes a URL should see the friendly
+    page, not a JSON blob.
+    """
+    if not request.path.startswith("/api/"):
+        return exc
+    return jsonify({"error": exc.description or exc.name}), exc.code or 500
 
 
 # -------------------------------------------------------------------
@@ -579,16 +597,28 @@ def api_record_delete(record_id: str) -> Any:
 
 # Excel and Sheets read a leading =, + or @ as a formula, so a value that
 # arrived here as text becomes something that runs when the file is opened.
-# Not "-": a negative number is an ordinary reading — a temperature, a
-# correction — and quoting it would corrupt the log to prevent nothing, since
-# a spreadsheet only treats "-" as a formula when what follows is not a number.
 _CSV_FORMULA = ("=", "+", "@", "\t", "\r")
+
+# "-" is the awkward one. A negative number is an ordinary reading — a
+# temperature, a correction — and quoting every one of them would corrupt the
+# log to prevent nothing. But a spreadsheet does evaluate a leading "-" when
+# what follows is not simply a number: "-2+3" opens as 1, and "-1+cmd|'/c
+# calc'!A0" opens as rather more than that. So: leave the readings alone and
+# defuse the rest, which is what the comment here used to claim was happening.
+_FORMULA_CHARS = re.compile(r"[+*/()!|=&^\[\]{}]")
 
 
 def _csv_safe(value: str) -> str:
     """One cell, with a leading formula character defused."""
     text = str(value or "")
-    return "'" + text if text.startswith(_CSV_FORMULA) else text
+    if text.startswith(_CSV_FORMULA):
+        return "'" + text
+    # A leading "-" only matters when an operator or a reference follows it:
+    # "-5 °C" and "-1,250.75" are readings, "-2+3" opens as 1, and
+    # "-1+cmd|'/c calc'!A0" opens as rather more than that.
+    if text.startswith("-") and _FORMULA_CHARS.search(text):
+        return "'" + text
+    return text
 
 
 @app.route("/api/records.csv", methods=["GET"])

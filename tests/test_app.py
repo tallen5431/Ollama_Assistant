@@ -388,3 +388,29 @@ class TestStoreErrorsAreClassified:
         resp = mod.app.test_client().get("/api/conversations")
         assert resp.status_code == 503
         assert resp.get_json()["history"] is False
+
+class TestAnApiErrorIsAlwaysJson:
+    """Every handler here returns JSON and the page parses it as JSON — but a
+    404 from an unmatched path and a 405 from the wrong method came back from
+    Werkzeug as an HTML page, so `resp.json()` threw and the actual status was
+    lost behind a parse error. _too_large already did this for 413.
+    """
+
+    @pytest.mark.parametrize("method, path", [
+        ("GET", "/api/nope"),
+        ("POST", "/api/health"),
+        ("DELETE", "/api/models"),
+        ("GET", "/api/conversations/../../etc/passwd"),
+    ])
+    def test_an_unmatched_or_wrong_method_api_call(self, client, method, path):
+        resp = client.open(path, method=method)
+        assert resp.status_code in (404, 405)
+        assert "json" in resp.headers.get("Content-Type", "")
+        assert resp.get_json().get("error")
+
+    def test_but_a_page_still_gets_the_friendly_html(self, client):
+        """Someone who mistypes a URL in the address bar should see the page,
+        not a JSON blob."""
+        resp = client.get("/nope")
+        assert resp.status_code == 404
+        assert "html" in resp.headers.get("Content-Type", "")

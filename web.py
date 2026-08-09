@@ -163,27 +163,39 @@ def _resolve(host: str, timeout: float) -> Any:
     return box.get("infos")
 
 
-def _is_public(host: str) -> bool:
-    """True only when every address ``host`` resolves to is on the public net.
+def _address_check(host: str) -> str:
+    """Where ``host`` points: ``"public"``, ``"private"`` or ``"unresolved"``.
 
     ``is_global`` is the right test rather than a private-range list: it also
     rejects loopback, link-local, multicast, reserved space and the 100.64/10
     carrier range that Tailscale uses.
+
+    Both failures refuse the fetch, and that does not change — but they are not
+    the same thing to whoever has to work out why. A name that does not resolve
+    was reported as resolving to a private address, so a box whose DNS is not
+    up yet — this app's own launcher notes that it starts before DNS after a
+    power cut — answered every web question by claiming the whole internet was
+    on the local network.
+
+    This replaced a boolean ``_is_public``. It is the seam tests patch to allow
+    a loopback stand-in; there is deliberately no boolean wrapper left behind,
+    because one that check_url no longer consulted would be a trap for whoever
+    patched it next and wondered why nothing changed.
     """
     try:
         infos = _resolve(host, _RESOLVE_TIMEOUT)
     except (socket.gaierror, UnicodeError, ValueError):
-        return False
+        return "unresolved"
     if not infos:
-        return False
+        return "unresolved"
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
-            return False
+            return "private"      # unreadable is not something to dial either
         if not ip.is_global:
-            return False
-    return True
+            return "private"
+    return "public"
 
 
 def check_url(url: str) -> str:
@@ -221,7 +233,16 @@ def check_url(url: str) -> str:
     host = (parsed.host or "").strip("[]")
     if not host:
         raise WebError("That URL has no host")
-    if not _is_public(host):
+    # One lookup: a blackholed nameserver costs the resolver timeout once, not
+    # twice, which is the whole reason this returns a reason rather than a bool.
+    where = _address_check(host)
+    if where == "unresolved":
+        raise WebError(
+            f"Could not look up {host} — the name does not resolve from here. "
+            "If that is a site you expect to work, check this machine's DNS "
+            "rather than the address."
+        )
+    if where != "public":
         raise WebError(
             f"Refusing to fetch {host} — it resolves to a private or "
             "local address, which is not something this app will reach on a "

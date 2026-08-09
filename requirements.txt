@@ -2,3 +2,13 @@
 Flask==3.0.3
 requests==2.32.3
 waitress==3.0.0
+
+# Imported directly, not only via Flask and requests. Both arrive as transitive
+# dependencies today, which is exactly why they are pinned here: app.py imports
+# werkzeug.exceptions and werkzeug.middleware.proxy_fix, and web.py imports
+# urllib3.util.parse_url — deliberately, so the URL guard parses a host the same
+# way the library that dials it does. A resolver that dropped either from the
+# tree, or moved to a major version with a different API, would break this app
+# at import time with no line in any manifest to explain why.
+Werkzeug==3.1.8
+urllib3==2.7.0

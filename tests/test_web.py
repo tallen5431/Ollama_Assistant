@@ -206,7 +206,7 @@ def site(monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     # The guard is exercised directly elsewhere; here we need it out of the way
     # so the fetch/extract path can be tested against a real socket.
-    monkeypatch.setattr(web, "_is_public", lambda host: True)
+    monkeypatch.setattr(web, "_address_check", lambda host: "public")
     try:
         yield f"http://127.0.0.1:{server.server_port}"
     finally:
@@ -254,9 +254,9 @@ class TestRedirectGuard:
 
         def guard(_host):
             calls["n"] += 1
-            return calls["n"] == 1
+            return "public" if calls["n"] == 1 else "private"
 
-        monkeypatch.setattr(web, "_is_public", guard)
+        monkeypatch.setattr(web, "_address_check", guard)
         try:
             with pytest.raises(web.WebError, match="private or local"):
                 web.fetch(f"http://127.0.0.1:{server.server_port}/redirect-to-localhost")
@@ -888,7 +888,7 @@ class TestReviewRegressions:
         def dying_get(*a, **k):
             raise requests.exceptions.ChunkedEncodingError("connection died mid-body")
 
-        monkeypatch.setattr(web, "_is_public", lambda h: True)
+        monkeypatch.setattr(web, "_address_check", lambda h: "public")
         monkeypatch.setattr(web._SESSION, "get", dying_get)
         with pytest.raises(web.WebError):
             web.fetch("http://example.com/")
@@ -1027,10 +1027,46 @@ class TestResolverIsBounded:
         monkeypatch.setattr(socket_module, "getaddrinfo", blackhole)
         monkeypatch.setattr(web, "_RESOLVE_TIMEOUT", 1.0)
         started = time.monotonic()
-        with pytest.raises(web.WebError, match="private or local"):
+        # A nameserver that never answers is a lookup that failed, not an
+        # address that turned out to be private — and saying the second sends
+        # whoever is debugging it to the wrong place entirely.
+        with pytest.raises(web.WebError, match="does not resolve"):
             web.check_url("https://blackhole.example/")
         elapsed = time.monotonic() - started
         assert elapsed < 5, f"waited {elapsed:.1f}s on a hung resolver"
+
+    def test_a_name_that_does_not_resolve_says_so(self, monkeypatch):
+        """Refusing either way is right; saying which is what changed. A box
+        whose DNS is not up — this app's launcher notes it starts before DNS
+        after a power cut — used to answer every web question by claiming the
+        whole internet was on the local network."""
+        import socket as socket_module
+        monkeypatch.setattr(socket_module, "getaddrinfo",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                socket_module.gaierror("Name or service not known")))
+        with pytest.raises(web.WebError) as caught:
+            web.check_url("https://en.wikipedia.org/wiki/Ada_Lovelace")
+        said = str(caught.value)
+        assert "does not resolve" in said and "DNS" in said
+        assert "private or local" not in said, "that is the other diagnosis"
+
+    def test_and_one_that_resolves_privately_still_says_that(self, monkeypatch):
+        import socket as socket_module
+        monkeypatch.setattr(socket_module, "getaddrinfo",
+                            lambda *a, **k: [(2, 1, 6, "", ("192.168.1.50", 0))])
+        with pytest.raises(web.WebError, match="private or local"):
+            web.check_url("https://looks-fine.example/")
+
+    def test_it_is_only_looked_up_once(self, monkeypatch):
+        """The reason used to come from a second lookup, which doubled the wait
+        on exactly the hosts that hang."""
+        import socket as socket_module
+        calls = []
+        monkeypatch.setattr(socket_module, "getaddrinfo",
+                            lambda *a, **k: calls.append(1) or [(2, 1, 6, "", ("10.0.0.1", 0))])
+        with pytest.raises(web.WebError):
+            web.check_url("https://private.example/")
+        assert len(calls) == 1, f"resolved {len(calls)} times"
 
     def test_a_normal_lookup_is_unaffected(self):
         assert web.check_url("http://8.8.8.8/") == "http://8.8.8.8/"

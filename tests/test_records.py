@@ -565,13 +565,36 @@ class TestTheLayoutFitsWhereItIsShown:
     def test_a_cell_cannot_become_a_formula(self, client, value, expected):
         """Excel runs a leading =, + or @ when the file is opened.
 
-        Not "-": a negative number is an ordinary reading, and a spreadsheet
-        only treats it as a formula when what follows is not one.
+        "-" is handled separately, by the two tests below: a bare negative
+        number is a reading and is left alone, but "-2+3" opens as 1.
         """
         store.add_record("T", {"v": value})
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
         assert rows[1][2] == expected
+
+    @pytest.mark.parametrize("value", [
+        "-2+3",                      # a spreadsheet opens this as 1
+        "-1+cmd|'/c calc'!A0",       # and this as a running program
+        "-1*7", "-(1)", "-1&\"x\"",
+    ])
+    def test_a_leading_minus_is_defused_when_it_starts_a_formula(self, value):
+        """The rule used to skip "-" entirely, on the stated grounds that a
+        spreadsheet only treats it as a formula when what follows is not a
+        number. It does: "-2+3" opens as 1. Record values are written by a
+        model reading a page or a photo, so they are not the owner's own
+        typing."""
+        import app
+        assert app._csv_safe(value).startswith("'"), value
+
+    @pytest.mark.parametrize("value", [
+        "-5 °C", "-40", "-1,250.75", "-2.5", "-5-3", "-",
+    ])
+    def test_but_a_reading_is_left_exactly_as_it_was(self, value):
+        """Which is why the rule is not simply "quote every minus": quoting a
+        temperature corrupts the log to prevent nothing."""
+        import app
+        assert app._csv_safe(value) == value
 
     def test_a_routine_name_cannot_become_a_formula_either(self, client):
         store.add_record("=HYPERLINK(\"http://evil\")", {"v": "1"})

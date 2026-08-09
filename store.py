@@ -150,8 +150,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
         names = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         # An empty set means the table does not exist, which _SCHEMA has just
         # ruled out; adding a column to nothing would raise.
-        if names and column not in names:
+        if not names or column in names:
+            continue
+        try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        except sqlite3.OperationalError as exc:
+            # Another connection added it between the check and the ALTER.
+            # Measured on an un-migrated database: 12 threads opening it at
+            # once, four of them raised — which is precisely the first moment
+            # after an update, with the phone and the desktop both reconnecting.
+            # sqlite3.Error is caught upstream and reported as "conversations
+            # are no longer being saved", so a successful migration announced
+            # itself as a broken database.
+            #
+            # The loser's error means the column exists, which is the outcome
+            # this wanted. Anything else is a real problem and still raises.
+            if "duplicate column" not in str(exc).lower():
+                raise
+            logger.debug("Column %s.%s was added by another connection", table, column)
 
 
 def available() -> bool:

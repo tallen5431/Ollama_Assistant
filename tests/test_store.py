@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -379,3 +380,124 @@ class TestOneBadRowCannotCostYouAConversation:
     @pytest.mark.parametrize("query", [123, None, object()])
     def test_a_search_for_something_that_is_not_a_phrase(self, query):
         assert store.search(query) == {"conversations": [], "records": []}
+
+class TestUpgradingWhileTwoDevicesReconnect:
+    """The first moment after an update is the one where both devices come
+    back at once, and it is the only moment the migration has anything to do.
+
+    Measured before the fix: 12 threads opening an un-migrated database, four
+    raised OperationalError("duplicate column name: image_meta"). That is a
+    sqlite3.Error, which app.py's handler reports as "conversations are no
+    longer being saved" — a successful migration announcing itself as a broken
+    database.
+    """
+
+    OLD_SCHEMA = """
+    CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+      model TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL,
+      content TEXT NOT NULL, images TEXT, sources TEXT, created_at REAL NOT NULL);
+    CREATE TABLE routines (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+      body TEXT NOT NULL, photos INTEGER NOT NULL DEFAULT 0, web INTEGER,
+      photo_meta INTEGER, position REAL NOT NULL, created_at REAL NOT NULL,
+      updated_at REAL NOT NULL);
+    """
+
+    def old_database(self, tmp_path, monkeypatch):
+        path = tmp_path / "old.db"
+        conn = sqlite3.connect(str(path))
+        conn.executescript(self.OLD_SCHEMA)
+        conn.execute("INSERT INTO conversations VALUES ('c1','kept','m',0,0)")
+        conn.commit()
+        conn.close()
+        monkeypatch.setenv("CHAT_DB", str(path))
+        return path
+
+    def test_a_crowd_of_them_does_not_collide(self, tmp_path, monkeypatch):
+        """The scenario, end to end. It asserts on the collision specifically
+        rather than on "no errors at all": sixteen threads contending for one
+        sqlite file can also hit an ordinary busy timeout, which is a different
+        condition the app handles elsewhere, and folding the two together made
+        this fail about one run in five under load."""
+        self.old_database(tmp_path, monkeypatch)
+        errors = []
+        ready = threading.Barrier(12)
+
+        def hit():
+            ready.wait()
+            try:
+                store.list_conversations()
+            except Exception as exc:            # noqa: BLE001
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=hit) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        collided = [e for e in errors if "duplicate column" in e.lower()]
+        assert not collided, collided
+
+    def test_and_the_columns_really_did_arrive(self, tmp_path, monkeypatch):
+        path = self.old_database(tmp_path, monkeypatch)
+        store.list_conversations()
+        conn = sqlite3.connect(str(path))
+        try:
+            names = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        finally:
+            conn.close()
+        assert {"image_meta", "thinking", "steps"} <= names
+
+    def test_and_nothing_that_was_there_was_lost(self, tmp_path, monkeypatch):
+        self.old_database(tmp_path, monkeypatch)
+        assert [c["title"] for c in store.list_conversations()] == ["kept"]
+
+    def test_losing_the_race_deterministically_is_not_an_error(self, tmp_path, monkeypatch):
+        """The sixteen-thread test above only *usually* collides, so on its own
+        it would let the fix be removed without complaint. This one is the
+        losing thread exactly: another connection adds the column in the gap
+        between this one's check and its ALTER.
+        """
+        path = self.old_database(tmp_path, monkeypatch)
+
+        class Racy(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                out = super().execute(sql, *args, **kwargs)
+                if "table_info(messages)" in str(sql):
+                    # Read the rows first. A sqlite cursor is lazy, so leaving
+                    # it unread meant the check below saw the column the racing
+                    # connection was about to add — and skipped the ALTER, which
+                    # is the collision this is trying to cause.
+                    rows = out.fetchall()
+                    other = sqlite3.connect(str(path))
+                    try:
+                        other.execute("ALTER TABLE messages ADD COLUMN image_meta TEXT")
+                        other.commit()
+                    except sqlite3.OperationalError:
+                        pass          # a later pass; already added
+                    finally:
+                        other.close()
+                    return rows
+                return out
+
+        conn = sqlite3.connect(str(path), factory=Racy)
+        conn.row_factory = sqlite3.Row
+        try:
+            store._migrate(conn)          # must not raise
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_but_a_real_migration_failure_is_still_raised(self, tmp_path, monkeypatch):
+        """Swallowing "duplicate column" is the point; swallowing a full disk
+        or a read-only file would hide the thing worth knowing."""
+        self.old_database(tmp_path, monkeypatch)
+        # A column sqlite will refuse for a different reason entirely.
+        # sqlite refuses to add a UNIQUE column to an existing table, which is
+        # an OperationalError that is emphatically not "duplicate column".
+        monkeypatch.setattr(store, "_ADDED_COLUMNS",
+                            (("messages", "nope", "TEXT UNIQUE"),))
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            store.list_conversations()
+        assert "duplicate column" not in str(caught.value).lower()

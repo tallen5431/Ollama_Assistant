@@ -78,7 +78,7 @@ def rig(monkeypatch):
     ollama, site = _serve(_Ollama), _serve(_Site)
     monkeypatch.setenv("OLLAMA_HOST", f"http://127.0.0.1:{ollama.server_port}")
     monkeypatch.setenv("WEB_ENABLED", "1")
-    monkeypatch.setattr(web, "_is_public", lambda host: True)
+    monkeypatch.setattr(web, "_address_check", lambda host: "public")
     site_url = f"http://127.0.0.1:{site.server_port}/article"
     monkeypatch.setattr(web, "search", lambda q, limit=3: [{"url": site_url, "title": "Widget 5"}])
     try:
