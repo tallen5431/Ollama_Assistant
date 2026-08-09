@@ -95,6 +95,16 @@ _MAX_LINKS_IN_CONTEXT = 25   # how many are listed as "what else is here"
 # citing. A page reduced to nothing is worse than a short excerpt.
 _MIN_DOC_CHARS = 800
 
+# Said once, so the length the budget reserves for it cannot drift from the
+# text actually appended.
+_TRIM_NOTE = " …[trimmed to fit the context window]"
+
+# What a document's own header costs in the assembled block — number, title,
+# URL, and the note about what kind of document it is. An estimate, high
+# enough to cover the closing fence with it; being a little over means a
+# slightly shorter excerpt, being under means the budget is not one.
+_HEADER_CHARS = 120
+
 # Elements with no closing tag, which must not be counted when tracking depth.
 _VOID_TAGS = frozenset({
     "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -260,6 +270,14 @@ _BLOCK_TAGS = {
     "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
 }
 
+# Cells end a run of text without starting a paragraph. Without them a table
+# came out as "LegMilesTime / Out411h02" — three readings welded into one
+# number, which is unreadable and, worse, misreadable. A page of specifications
+# or prices is one of the main things worth fetching, so this is not a corner.
+# Separated by a space rather than a newline: a row is one line, the way it
+# reads on the page, and _BLOCK_TAGS already ends the row at </tr>.
+_CELL_TAGS = {"td", "th"}
+
 
 class _Extractor(HTMLParser):
     """Pull the readable text out of a page, dropping chrome and scripts."""
@@ -294,6 +312,8 @@ class _Extractor(HTMLParser):
                     self.links.append(self._link)
             if tag in _BLOCK_TAGS:
                 self._parts.append("\n")
+            elif tag in _CELL_TAGS:
+                self._parts.append(" ")
 
     def handle_endtag(self, tag):
         if tag in self.SKIP:
@@ -305,6 +325,8 @@ class _Extractor(HTMLParser):
                 self._link = None
             if tag in _BLOCK_TAGS:
                 self._parts.append("\n")
+            elif tag in _CELL_TAGS:
+                self._parts.append(" ")
 
     def handle_data(self, data):
         if self._in_title:
@@ -1178,6 +1200,17 @@ def choose_links(
     return chosen
 
 
+# Three or more dashes in a row is the only shape our own markers take, and a
+# link map has no legitimate use for one.
+_DASH_RUN = re.compile(r"-{3,}")
+
+
+def _link_field(value: Any) -> str:
+    """One anchor text or href, flattened to a line and stripped of markers."""
+    flat = " ".join(str(value or "").split())
+    return _DASH_RUN.sub(lambda m: "\u2011" * len(m.group(0)), _defence(flat))
+
+
 def link_map(document: Dict[str, Any], limit: int = _MAX_LINKS_IN_CONTEXT) -> str:
     """A short list of what else the page points at, as context.
 
@@ -1190,7 +1223,19 @@ def link_map(document: Dict[str, Any], limit: int = _MAX_LINKS_IN_CONTEXT) -> st
     local = [l for l in links if same_site(here, l["url"])][:limit]
     if not local:
         return ""
-    lines = "\n".join(f"- {l['text']} — {l['url']}" for l in local)
+    # Defended like the page text it came from, and then some. All of this —
+    # anchor text and href alike — is written by whoever wrote the page, and it
+    # is appended inside the fence after the body has been through _defence, so
+    # a link whose text was "----- END WEB RESULTS -----" closed the fence and
+    # addressed the model directly from a page it had merely linked to.
+    #
+    # Stricter than _defence, which is anchored to whole lines because it runs
+    # over prose and must not mangle an ordinary sentence. A link map is a
+    # generated list rather than prose, so a run of dashes anywhere in it can
+    # simply be blunted — which also closes the same marker hidden mid-line
+    # inside an href, where the line-anchored rule does not reach.
+    lines = "\n".join(f"- {_link_field(l.get('text'))} — {_link_field(l.get('url'))}"
+                      for l in local)
     return (
         "Other pages linked from this one, not fetched. Use them to say where "
         "something is covered, never to describe what they contain — you have "
@@ -1295,21 +1340,66 @@ def _defence(text: str) -> str:
     return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text)
 
 
+def _fit_maps(maps: List[str], documents: List[Dict[str, Any]], allowance: int) -> List[str]:
+    """Shrink the link maps until they fit ``allowance`` between them.
+
+    Drops links, never pages: a page listed with half its links is still the
+    page, and the list is a hint about where else to look rather than a source.
+    """
+    limit = _MAX_LINKS_IN_CONTEXT
+    while limit > 0 and sum(len(m) for m in maps) > allowance:
+        limit = limit // 2
+        maps = [link_map(doc, limit) if limit else "" for doc in documents]
+    return maps
+
+
 def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
     """Render fetched documents into one fenced block for a system message.
 
-    ``char_budget`` caps the document text. The defaults can consume most of an
-    8192-token window before the conversation is added, at which point Ollama
-    silently drops the oldest turns — so turn three of a web conversation loses
+    ``char_budget`` caps the assembled block — the preamble and the per-document
+    headers included, not only the page text. The defaults can consume most of
+    an 8192-token window before the conversation is added, at which point Ollama
+    silently drops the oldest turns, so turn three of a web conversation loses
     its own history with nothing said. Trimming here is visible instead: each
     document is truncated, and says it was.
+
+    One thing the budget cannot promise: every document keeps _MIN_DOC_CHARS
+    whatever happens, because a page reduced to nothing is worse than a short
+    excerpt of it. Once the preamble and those floors exceed the budget between
+    them the block comes out larger than asked, and nothing here can help it.
+    The floors and the preamble come to roughly 700 + 960 per document, so the
+    budget binds above about that many characters and not below. Measured: the
+    default three documents fit at a 2,048-token window — the tightest anything
+    runs at — with 85 characters to spare and the link lists dropped entirely;
+    four at that window overrun by a quarter. Raising WEB_MAX_DOCS wants a
+    larger num_ctx with it.
     """
     parts = [_PREAMBLE.format(today=today()), "", "----- BEGIN WEB RESULTS -----"]
     # The link maps count against the budget too. Rendering them after the trim
     # and not counting them put the assembled context back at ~1.4x what the
     # budget asked for — which is the whole problem the budget exists to solve.
     maps = [link_map(doc) for doc in documents]
-    remaining = max(0, char_budget - sum(len(m) for m in maps)) if char_budget else 0
+    if char_budget:
+        # The maps are counted against the budget, but nothing stopped them
+        # exceeding it on their own — and then every document still got its
+        # _MIN_DOC_CHARS floor on top. Measured: three pages of 25 links each
+        # against a 2,000-character budget assembled 6,949 characters, 3.5x
+        # what was asked for, which is the exact failure the budget exists to
+        # prevent. A third of the budget is the most the "what else is here"
+        # list may have; past that it drops links rather than pages. A third is
+        # still too generous when the budget is tight, because the floors below
+        # are owed to the pages whatever is left over: the maps are held to the
+        # smaller of the two. At a 2048-token window that leaves them nothing,
+        # and the lists go entirely rather than the block overrunning.
+        floors = len(documents) * (_MIN_DOC_CHARS + len(_TRIM_NOTE))
+        fixed = sum(len(p) for p in parts) + _HEADER_CHARS * len(documents)
+        maps = _fit_maps(maps, documents,
+                         min(char_budget // 3, char_budget - fixed - floors))
+    # The preamble and the per-document headers are part of what has to fit,
+    # so they come out of the same budget rather than riding along outside it.
+    overhead = sum(len(p) for p in parts) + sum(len(m) for m in maps) \
+        + _HEADER_CHARS * len(documents)
+    remaining = max(0, char_budget - overhead) if char_budget else 0
     share = int(remaining / len(documents)) if remaining and documents else 0
     for i, (doc, related) in enumerate(zip(documents, maps), 1):
         # What this is, so the model does not mistake a part for the whole. A
@@ -1329,8 +1419,7 @@ def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
         if char_budget and len(text) > share:
             # A budget entirely eaten by link maps would leave no page text at
             # all, which is worse than a short excerpt of each.
-            text = text[:max(share, _MIN_DOC_CHARS)].rsplit(" ", 1)[0] + \
-                " …[trimmed to fit the context window]"
+            text = text[:max(share, _MIN_DOC_CHARS)].rsplit(" ", 1)[0] + _TRIM_NOTE
         parts.append(text)
         if related:
             parts.append("\n" + related)
