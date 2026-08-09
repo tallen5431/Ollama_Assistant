@@ -10,6 +10,7 @@ reply, and for a routine also in the records — not the picture.
 from __future__ import annotations
 
 import importlib
+import threading
 import time
 
 import pytest
@@ -109,18 +110,75 @@ class TestTheSweep:
         assert first["messages"] == 1
         assert second == {"messages": 0, "bytes": 0}, "it swept again immediately"
 
-    def test_a_broken_database_costs_the_sweep_not_the_request(self, monkeypatch):
+    @pytest.mark.parametrize("error", [
+        store.sqlite3.OperationalError("database is locked"),
+        # forget_images stats the database file before compacting, so an
+        # unwritable or vanished CHAT_DB raises this — not a sqlite3.Error, and
+        # it turned the conversation-list request into an HTML 500 with no
+        # history in it at all.
+        OSError("No such file or directory"),
+    ])
+    def test_a_broken_database_costs_the_sweep_not_the_request(self, monkeypatch, error):
         def boom(*a, **k):
-            raise store.sqlite3.OperationalError("database is locked")
+            raise error
         monkeypatch.setattr(store, "forget_images", boom)
         assert store.maybe_forget_images(30) == {"messages": 0, "bytes": 0}
+
+    def test_a_second_request_during_a_sweep_does_not_start_another(self, monkeypatch):
+        """The hour is claimed before the work, not after it. A sweep of a big
+        database takes seconds — measured at 2.8 s on 210 MB — and every
+        request arriving inside that window would otherwise start its own."""
+        runs, inside, release = [], threading.Event(), threading.Event()
+
+        def slow(days):
+            runs.append(days)
+            inside.set()
+            release.wait(5)
+            return {"messages": 0, "bytes": 0}
+
+        monkeypatch.setattr(store, "forget_images", slow)
+        first = threading.Thread(target=store.maybe_forget_images, args=(30,))
+        first.start()
+        try:
+            assert inside.wait(5), "the first sweep never started"
+            assert store.maybe_forget_images(30) == {"messages": 0, "bytes": 0}
+            assert len(runs) == 1, runs
+        finally:
+            release.set()
+            first.join(5)
 
     def test_listing_conversations_is_what_drives_it(self, client, monkeypatch):
         ran = []
         monkeypatch.setattr(store, "maybe_forget_images",
                             lambda days: ran.append(days) or {"messages": 0, "bytes": 0})
         client.get("/api/conversations")
+        for thread in threading.enumerate():
+            if thread.name == "photo-sweep":
+                thread.join(5)
         assert ran == [30.0], "the default cutoff should have been passed"
+
+    def test_but_the_request_does_not_wait_for_it(self, client, monkeypatch):
+        """The sweep ends in a VACUUM, which rewrites the whole database and
+        blocks every writer — measured at 2.8 s on 210 MB of stored photos.
+        That is the drawer hanging on open, once an hour, for work nobody
+        asked for."""
+        started, release = threading.Event(), threading.Event()
+
+        def slow(days):
+            started.set()
+            release.wait(5)
+            return {"messages": 0, "bytes": 0}
+
+        monkeypatch.setattr(store, "maybe_forget_images", slow)
+        began = time.monotonic()
+        resp = client.get("/api/conversations")
+        elapsed = time.monotonic() - began
+        try:
+            assert resp.status_code == 200
+            assert started.wait(5), "the sweep never ran at all"
+            assert elapsed < 1, f"the request waited {elapsed:.1f}s for the sweep"
+        finally:
+            release.set()
 
 
 class TestTheRoute:

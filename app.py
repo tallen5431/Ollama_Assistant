@@ -345,7 +345,13 @@ def api_conversations() -> Any:
     # Hung off the one request every client makes on every visit, and rate
     # limited to once an hour inside the store. A timer thread would have to be
     # started, stopped and kept out of the tests to do work that can wait.
-    store.maybe_forget_images(get_photo_keep_days())
+    #
+    # Started, not awaited: the sweep ends in a VACUUM, which rewrites the whole
+    # database and blocks every writer — measured at 2.8 s on 210 MB of stored
+    # photos. That is the drawer hanging on open, once an hour, for work nobody
+    # asked for. /api/photos/forget is still synchronous, because there someone
+    # did ask and is waiting for the number.
+    store.sweep_in_background(get_photo_keep_days())
     return jsonify({"conversations": store.list_conversations()})
 
 

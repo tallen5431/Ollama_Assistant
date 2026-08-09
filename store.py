@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -321,6 +322,14 @@ def add_message(
     """
     now = time.time()
     with _connect() as conn:
+        # The write lock before the read, as save_turn does. Python's sqlite3
+        # opens a transaction on the first *write*, so the "what is the next
+        # seq" query ran outside one: two appends racing both read the same
+        # answer and both use it. Measured — eight concurrent calls produced
+        # two distinct seq values between them, and get() orders by seq, so the
+        # thread came back in an order nobody chose. Nothing in the schema
+        # stops it either; there is no unique key on (conversation_id, seq).
+        conn.execute("BEGIN IMMEDIATE")
         exists = conn.execute(
             "SELECT title FROM conversations WHERE id = ?", (convo_id,)
         ).fetchone()
@@ -976,6 +985,7 @@ def search(query: str, limit: int = _SEARCH_LIMIT) -> Dict[str, List[Dict[str, A
 # the words do not.
 _SWEEP_EVERY = 3600.0
 _last_sweep = 0.0
+_SWEEP_LOCK = threading.Lock()
 
 
 def forget_images(older_than_days: float) -> Dict[str, int]:
@@ -1017,14 +1027,44 @@ def maybe_forget_images(older_than_days: float) -> Dict[str, int]:
     """
     global _last_sweep
     now = time.time()
-    if now - _last_sweep < _SWEEP_EVERY:
-        return {"messages": 0, "bytes": 0}
-    _last_sweep = now
+    # Claimed before the work, and under a lock: a sweep of a big database
+    # takes seconds, and every request arriving inside that window would
+    # otherwise start its own. The lock closes the last of it — two requests
+    # landing in the same instant, which the sequential guard alone cannot.
+    with _SWEEP_LOCK:
+        if now - _last_sweep < _SWEEP_EVERY:
+            return {"messages": 0, "bytes": 0}
+        _last_sweep = now
     try:
         return forget_images(older_than_days)
-    except sqlite3.Error as exc:      # a sweep must never cost a request
+    except Exception as exc:      # noqa: BLE001 - a sweep must never cost a request
+        # Not only sqlite3.Error: forget_images stats the database file, so an
+        # unwritable or vanished CHAT_DB raises OSError and turned the
+        # conversation-list request into an HTML 500 with no history in it.
         logger.warning("Could not sweep old photos: %s", exc)
         return {"messages": 0, "bytes": 0}
+
+
+def sweep_in_background(older_than_days: float) -> threading.Thread:
+    """maybe_forget_images, off whatever request noticed it was due.
+
+    The sweep is deliberately hung off ordinary traffic rather than a timer —
+    one process serving one household, and the work can wait for the next
+    request. What it cannot do is make that request wait for it: forget_images
+    ends in a VACUUM, which rewrites the whole database and blocks every
+    writer while it does. Measured on 210 MB of stored photos — sixty of them,
+    a couple of months of casual use — 2.8 seconds, on the one request every
+    client makes on every visit.
+
+    Returns the thread, so a test can join it rather than race it. Daemon,
+    because a VACUUM interrupted by the process exiting is safe: sqlite either
+    completed it or did not.
+    """
+    thread = threading.Thread(
+        target=maybe_forget_images, args=(older_than_days,),
+        name="photo-sweep", daemon=True)
+    thread.start()
+    return thread
 
 
 def stats() -> Dict[str, int]:

@@ -143,6 +143,32 @@ class TestConcurrency:
         assert not errors, errors
         assert len(store.get(convo["id"])["messages"]) == 40
 
+    def test_and_each_one_gets_its_own_place_in_the_thread(self):
+        """"What is the next seq" ran outside any transaction. Python's sqlite3
+        opens one on the first *write*, so two appends racing both read the
+        same answer and both used it — measured, eight at once produced two
+        distinct values between them. get() orders by seq, so the thread came
+        back in an order nobody chose, and nothing in the schema stops it:
+        there is no unique key on (conversation_id, seq).
+        """
+        convo = store.create()["id"]
+        gate = threading.Barrier(8)
+
+        def writer(n):
+            gate.wait()
+            store.add_message(convo, "user", f"m{n}")
+
+        threads = [threading.Thread(target=writer, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        with store._connect() as conn:
+            seqs = [r["seq"] for r in conn.execute(
+                "SELECT seq FROM messages WHERE conversation_id = ?", (convo,))]
+        assert sorted(seqs) == list(range(1, 9)), seqs
+
 
 class TestUnusableDatabase:
     """A bad CHAT_DB must degrade to history-off, not break /api/health."""
