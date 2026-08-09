@@ -549,13 +549,38 @@ sed: couldn't open temporary file ./sedv5wFbs: Permission denied
 error: unable to unlink old 'searxng/settings.yml': Permission denied
 ```
 
-If you are coming from that version, take the directory back before anything
-else — nothing in it is lost, since `config/settings.yml` is generated from the
-example:
+If you are coming from that version, **remove the container first**, then take
+the directory back. That order matters and is not obvious: a container with
+`--restart unless-stopped` that is failing to start is restarting every few
+seconds, and each start chowns the directory again — so a `chown` on its own
+appears to do nothing at all. Nothing is lost, since `config/settings.yml` is
+generated from the example:
 
 ```bash
+docker rm -f searxng
 sudo chown -R "$USER:$USER" ~/HTTP_Server/projects/ollama_assistant/searxng
+rm -rf searxng/config searxng/instance     # leftovers of the old mount
 ```
+
+The steps above then work as written — and their order is load-bearing too.
+`config/settings.yml` has to exist *before* the container starts: given an
+empty directory it tries to create one from its own template, which it cannot
+do in a directory owned by you, and it exits saying
+`"/etc/searxng/settings.yml" is not a valid file`. Given the file, it takes
+ownership of the directory and starts.
+
+If it still cannot write there, hand the directory over explicitly — `config/`
+is gitignored, so it is free to own it:
+
+```bash
+docker run --rm --entrypoint id docker.io/searxng/searxng:latest   # its uid/gid
+sudo chown -R <uid>:<gid> searxng/config
+docker restart searxng
+```
+
+One consequence worth knowing: once it is running, `config/settings.yml`
+belongs to the container's user, so editing it later needs `sudo` — and if you
+`chown` it back, stop the container first or it will simply take it again.
 
 `config/` is gitignored, so updates never touch your key and the container
 never touches your checkout.

@@ -85,6 +85,28 @@ class TestTheStepsCanBeFollowedInOrder:
         assert "grep secret_key config/settings.yml" in window, \
             "the result has to be checked, not the command trusted"
 
+    def test_the_container_is_removed_before_the_chown(self):
+        """The order that cost the most time. A `chown` on its own appeared to
+        do nothing at all, because a container with --restart unless-stopped
+        that is failing to start restarts every few seconds and chowns the
+        directory again on each one — so the fix was undone faster than it
+        could be checked."""
+        start = README.index("If you are coming from that version")
+        window = README[start:start + 1000]
+        assert "docker rm -f searxng" in window, "the container is never removed"
+        assert window.index("docker rm -f searxng") < window.index("chown -R"), \
+            "the chown is given before the container that would undo it is removed"
+
+    def test_and_the_config_exists_before_the_container_starts(self):
+        """The other load-bearing order. Given an empty directory the container
+        tries to create a settings.yml from its own template, cannot write to a
+        directory you own, and exits — so the file has to be there first."""
+        made = README.index("cp settings.yml.example config/settings.yml")
+        started = README.index("docker compose up -d")
+        assert made < started, "the container is started before its config exists"
+        assert "is not a valid file" in README, \
+            "the error that ordering produces is not written down"
+
     def test_the_ownership_symptoms_are_named_next_to_the_cause(self):
         """The container chowns what it is mounted, so handing it the checkout
         made git and sed fail on a box where nothing had gone wrong. Those two
@@ -126,6 +148,53 @@ class TestTheContainerIsNotGivenTheCheckout:
             "the directory the container owns must not be one git manages"
 
 
+class TestTheStartCommandsAgreeOnWhichDirectoryIsMounted:
+    """Split out from the ownership story above: this is about the two
+    start commands naming the same directory, which is the thing that
+    silently drifts."""
+
+    @pytest.mark.parametrize("spec", [
+        "./config:/etc/searxng:rw",     # compose
+        '"$PWD/config:/etc/searxng:rw"',  # the docker run fallback
+    ])
+    def test_both_ways_of_starting_it_mount_that_directory(self, spec):
+        assert spec in COMPOSE or spec in README, spec
+
+    def test_and_neither_mounts_the_directory_above_it(self):
+        assert "- ./:/etc/searxng" not in COMPOSE
+        assert '-v "$PWD:/etc/searxng' not in README
+
+
+class TestTheCommonDockerTrapsAreNamed:
+    """The two errors a box without the compose v2 plugin produces. Both
+    read as something other than their cause, so both are quoted verbatim
+    where the command is."""
+
+    @pytest.mark.parametrize("error", [
+        # No compose v2 plugin: the -d never reaches a compose that would
+        # understand it, so Docker's root command rejects it and prints its own
+        # usage — which reads like a typo rather than a missing plugin.
+        "unknown shorthand flag: 'd' in -d",
+        # And the trap on the other side. The hyphenated docker-compose is v1,
+        # end-of-life since 2023, and against a current Docker Engine it dies
+        # here on the *second* run — the recreate path — so it looks like the
+        # compose file broke rather than the tool.
+        "KeyError: 'ContainerConfig'",
+    ])
+    def test_the_errors_someone_will_paste_into_a_search_box_are_here(self, error):
+        start = README.index("docker compose up -d")
+        window = README[start:start + 4000]
+        assert error in window, f"{error!r} is not named where the command is"
+
+    def test_and_v1_is_named_as_the_trap_it_is_rather_than_an_option(self):
+        """It was offered here as a fallback, which sent someone straight into
+        the KeyError above. Two wrong turns on the same paragraph."""
+        start = README.index("docker compose up -d")
+        window = README[start:start + 4000]
+        assert "Do not reach for the hyphenated" in window
+        assert "use the v1 binary if that is what is there" not in README
+
+
 class TestNothingPrivateIsOneCommandFromBeingCommitted:
     """Seen on the NucBox: a `.env` sitting untracked and unignored. That is
     the dangerous combination — it shows in every `git status` until someone
@@ -144,37 +213,3 @@ class TestNothingPrivateIsOneCommandFromBeingCommitted:
         check = subprocess.run(["git", "check-ignore", "-q", ".env.example"], cwd=ROOT)
         assert check.returncode != 0, ".env.example is ignored, so it could never be added"
 
-    @pytest.mark.parametrize("spec", [
-        "./config:/etc/searxng:rw",     # compose
-        '"$PWD/config:/etc/searxng:rw"',  # the docker run fallback
-    ])
-    def test_both_ways_of_starting_it_mount_that_directory(self, spec):
-        assert spec in COMPOSE or spec in README, spec
-
-    def test_and_neither_mounts_the_directory_above_it(self):
-        assert "- ./:/etc/searxng" not in COMPOSE
-        assert '-v "$PWD:/etc/searxng' not in README
-
-    @pytest.mark.parametrize("error", [
-        # No compose v2 plugin: the -d never reaches a compose that would
-        # understand it, so Docker's root command rejects it and prints its own
-        # usage — which reads like a typo rather than a missing plugin.
-        "unknown shorthand flag: 'd' in -d",
-        # And the trap on the other side. The hyphenated docker-compose is v1,
-        # end-of-life since 2023, and against a current Docker Engine it dies
-        # here on the *second* run — the recreate path — so it looks like the
-        # compose file broke rather than the tool.
-        "KeyError: 'ContainerConfig'",
-    ])
-    def test_the_errors_someone_will_paste_into_a_search_box_are_here(self, error):
-        start = README.index("docker compose up -d")
-        window = README[start:start + 2500]
-        assert error in window, f"{error!r} is not named where the command is"
-
-    def test_and_v1_is_named_as_the_trap_it_is_rather_than_an_option(self):
-        """It was offered here as a fallback, which sent someone straight into
-        the KeyError above. Two wrong turns on the same paragraph."""
-        start = README.index("docker compose up -d")
-        window = README[start:start + 2500]
-        assert "Do not reach for the hyphenated" in window
-        assert "use the v1 binary if that is what is there" not in README
