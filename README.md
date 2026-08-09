@@ -133,7 +133,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_VISION_MODEL`  | *(unset)*                   | Model used to read an attached image when planning a search. Unset picks the smallest installed vision model |
 | `CHAT_MAX_BODY_MB`  | `25`                        | Maximum accepted request body size (guards the audio upload) |
 | `WEB_ENABLED`       | `1`                         | Server-side switch for web access; `0` disables it entirely |
-| `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. **Recommended.** Unset falls back to scraping DuckDuckGo's no-JS endpoints, which is what breaks first |
+| `SEARXNG_URL`       | *(unset)*                   | Self-hosted SearXNG base URL. **Recommended.** Unset falls back to scraping DuckDuckGo's no-JS endpoints, which is what breaks first. Check it arrived with `/api/health`'s `search_backend` — under the server manager this is set on the card, and a `.env` in this directory is read by nothing |
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_DISTILLER_MODEL` | *(unset)*                 | Small model that cuts each fetched page down to what bears on your question. Unset means off — see "Distilling pages". Measured 12,016 → 231 characters on a two-page turn |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
@@ -655,10 +655,38 @@ the whole path works.
 
 **That `export` only reaches this shell**, which is the last step people miss —
 the check passes while the app carries on scraping DuckDuckGo, and it looks
-like the app ignoring a setting rather than never receiving one. `Start.sh`
-does not read a `.env`; the environment comes from whatever starts the app, so
-put `SEARXNG_URL` where that does — the server manager's per-program
-environment for this card — and restart it.
+like the app ignoring a setting rather than never receiving one.
+
+Under the HTTP Server Manager, the environment is the card's own. The manager
+runs `bash Start.sh` with `{...process.env, ...program.env}`, and `program.env`
+is the per-program `env` object in its `config.json`. So:
+
+1. **Edit** this program in the manager UI
+2. Under **Environment Variables**, add `SEARXNG_URL` = `http://127.0.0.1:8888`
+3. Save, then **Restart** the card
+
+or add it to that program's `env` in `config.json` directly, alongside
+`HOST` and `PORT`:
+
+```json
+"env": {
+  "HOST": "0.0.0.0",
+  "PORT": "8070",
+  "SEARXNG_URL": "http://127.0.0.1:8888"
+}
+```
+
+> **A `.env` file in this directory does nothing.** Nothing reads one — not the
+> manager, not `Start.sh`, not the app. It is an easy and invisible place to
+> put a setting that will never arrive, and it looks like every other project
+> where that would have worked.
+
+Running the app directly instead of through the manager, an `export` in the
+same shell is all it takes:
+
+```bash
+SEARXNG_URL=http://127.0.0.1:8888 .venv/bin/python app.py
+```
 
 The app says which backend it has on startup, so you can tell the two apart at
 a glance:

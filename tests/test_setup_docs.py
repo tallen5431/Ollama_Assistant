@@ -118,6 +118,26 @@ class TestTheStepsCanBeFollowedInOrder:
         assert "is not a valid file" in README, \
             "the error that ordering produces is not written down"
 
+    def test_where_to_put_the_setting_is_named_exactly(self):
+        """"The server manager's per-program environment" was true and not
+        actionable. The manager runs Start.sh with {...process.env,
+        ...program.env}, and program.env is the per-program env object in its
+        config.json — reachable from the UI. Nothing reads a .env file, which
+        is the invisible place a setting goes to never arrive."""
+        start = README.index("That `export` only reaches this shell")
+        window = README[start:start + 1600]
+        assert "Environment Variables" in window, "the UI field is not named"
+        assert "config.json" in window, "nor the file behind it"
+        assert "A `.env` file in this directory does nothing" in window
+
+    def test_and_the_way_to_confirm_it_arrived(self):
+        """A setting that never arrived and a setting being ignored looked
+        identical; both the banner and /api/health now separate them."""
+        start = README.index("That `export` only reaches this shell")
+        window = README[start:start + 2200]
+        assert "Web search   :" in window, "the banner line is not shown"
+        assert "search_backend" in README, "/api/health's field is undocumented"
+
     def test_the_ownership_symptoms_are_named_next_to_the_cause(self):
         """The container chowns what it is mounted, so handing it the checkout
         made git and sed fail on a box where nothing had gone wrong. Those two
