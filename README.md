@@ -563,6 +563,36 @@ prints what it found. Nothing in it talks to Ollama, so a sleeping desktop
 doesn't matter — run it when a web answer looks wrong and it will tell you
 which half is at fault.
 
+Being offline is also its blind spot. Whether a small model actually *replies*
+in the two shapes link-following depends on — bare numbers from the picker, a
+bare `FETCH: [n.m]` from the answering model — can only be answered by asking a
+real model, so that has a checker of its own. This one does wake the desktop:
+
+```bash
+.venv/bin/python tools/check_links.py
+.venv/bin/python tools/check_links.py URL "a question the page does not answer"
+.venv/bin/python tools/check_links.py URL "question" --model qwen3:8b
+```
+
+It fetches the page, shows the link order the model will see and which links
+ranking promoted, asks your real picker model and reports whether its reply
+parsed, then asks your real answering model and classifies what came back —
+a well-formed request, a request for a link that doesn't exist, a malformed
+attempt, or a direct answer. It also checks that the numbering shown and the
+numbering resolved agree, which is the one failure that would silently fetch
+the wrong page.
+
+**Choose the question deliberately.** The interesting case is one the page
+*mentions* but doesn't answer, where a link plainly would — that is what the
+feature is for. If the page answers it outright, a direct answer is the correct
+result, and the tool says so rather than marking it wrong.
+
+The two `❌`s worth acting on: a picker whose reply parses to nothing means
+following will silently never happen on that model (use a small non-reasoning
+model for `WEB_PLANNER_MODEL`), and a malformed `FETCH` means the marker would
+reach the user instead of an answer (leave `WEB_FETCH_HOPS` at `0` on that
+model).
+
 ### Search backend
 
 With no configuration, search uses DuckDuckGo's HTML endpoint. It needs no key
