@@ -1240,6 +1240,21 @@ _FETCH_OFFER = (
     "clearly the missing piece; if you can answer from what is here, answer."
 )
 
+# Said only where it is true. A model told it may name "one of the numbered
+# links" will eventually name an external one, spend the hop, and be refused —
+# so where the follow scope forbids those it is cheaper to say so up front.
+_FETCH_OFFER_LOCAL_ONLY = (
+    " A link marked (external) cannot be opened — only pages of the sites "
+    "already listed above. Do not ask for one."
+)
+
+
+def _fetch_offer() -> str:
+    """The offer to read a numbered link, matching what may actually be read."""
+    if get_web_follow_scope() == "site":
+        return _FETCH_OFFER + _FETCH_OFFER_LOCAL_ONLY
+    return _FETCH_OFFER
+
 # A bare request, and only a bare request. Wrappers a small model adds around
 # it — a bullet, a bold, a code fence, a full stop — are tolerated, because the
 # alternative is spending a fetch-shaped reply on nothing and showing the user
@@ -1951,7 +1966,8 @@ def build_context(
     """
     parts = [_PREAMBLE.format(today=today()), "", "----- BEGIN WEB RESULTS -----"]
     if may_fetch:
-        parts.insert(1, _FETCH_OFFER)
+        offer = _fetch_offer()
+        parts.insert(1, offer)
     # The link maps count against the budget too. Rendering them after the trim
     # and not counting them put the assembled context back at ~1.4x what the
     # budget asked for — which is the whole problem the budget exists to solve.
@@ -1984,7 +2000,7 @@ def build_context(
     # list survives is not known until the budget has finished with them.
     # Only ever removes text, so the budget arithmetic below stays honest.
     if may_fetch and not any(maps):
-        parts.remove(_FETCH_OFFER)
+        parts.remove(offer)
 
     if link_ids is not None:
         # Rebuilt from the limit the maps were actually rendered at, which is

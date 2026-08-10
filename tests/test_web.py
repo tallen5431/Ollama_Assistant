@@ -2077,6 +2077,29 @@ class TestTheNumberingTheModelReadsIsTheNumberingWeResolve:
                           link_ids=ids)
         assert ids == {}
 
+    @pytest.mark.parametrize("may_fetch", [False, True])
+    @pytest.mark.parametrize("num_ctx", [2048, 8192, 32768])
+    @pytest.mark.parametrize("name,docs", [
+        ("a page with no links first",
+         [{"url": "https://e.com/0", "title": "P0", "text": "word " * 300, "links": []},
+          {"url": "https://e.com/1", "title": "P1", "text": "word " * 300,
+           "links": [{"url": f"https://e.com/1/l{n}", "text": f"link {n}"}
+                     for n in range(5)]}]),
+        ("a snippet-only document in the mix",
+         [{"url": "https://e.com/s", "title": "S", "text": "snip", "snippet_only": True},
+          {"url": "https://e.com/1", "title": "P1", "text": "word " * 300,
+           "links": [{"url": f"https://e.com/1/l{n}", "text": f"link {n}"}
+                     for n in range(5)]}]),
+    ])
+    def test_they_agree_however_the_documents_are_shaped(
+            self, name, docs, num_ctx, may_fetch):
+        """A document with no links still takes its [n], so the one after it
+        must not slide up a number."""
+        ids = {}
+        out = web.build_context(docs, char_budget=web.context_budget(num_ctx),
+                                question="link", link_ids=ids, may_fetch=may_fetch)
+        assert {k: v["url"] for k, v in ids.items()} == self.rendered(out), name
+
 
 class TestTheLinkListDoesNotVanishWhenItIsMostNeeded:
     """Halving used to walk 25, 12, 6, 3, 1, 0 — so the tighter the window, the
@@ -2166,6 +2189,30 @@ class TestAskingForALinkToBeRead:
     ])
     def test_holding_stops_the_moment_it_can(self, sofar, pending):
         assert web.fetch_pending(sofar) is pending
+
+    @pytest.mark.parametrize("num_ctx", [2048, 4096, 8192, 16384, 32768])
+    @pytest.mark.parametrize("links", [0, 25, 60])
+    def test_the_offer_is_inside_the_budget_too(self, num_ctx, links):
+        """It is ~570 characters of instruction added to the block, and the
+        budget tests next door all run without it — so this path had no cover
+        at all. At a 2048 window that is a sixth of everything the pages get."""
+        pages = [{"url": f"https://e.com/{i}", "title": f"Page {i}",
+                  "text": "word " * 1200,
+                  "links": [{"url": f"https://e.com/{i}/l{n}", "text": f"link {n}"}
+                            for n in range(links)]} for i in range(3)]
+        budget = web.context_budget(num_ctx)
+        out = web.build_context(pages, char_budget=budget, question="link",
+                                may_fetch=True)
+        assert len(out) <= budget, f"{len(out)} against a budget of {budget}"
+
+    def test_the_offer_matches_what_may_actually_be_opened(self, monkeypatch):
+        """A model told it may name "one of the numbered links" will name an
+        external one, spend the hop and be refused. Cheaper to say so."""
+        doc = {"url": "https://e.com/a", "title": "A", "text": "t",
+               "links": [{"url": "https://out.example/x", "text": "outside"}]}
+        assert "(external) cannot be opened" in web.build_context([doc], may_fetch=True)
+        monkeypatch.setenv("WEB_FOLLOW_SCOPE", "any")
+        assert "(external) cannot be opened" not in web.build_context([doc], may_fetch=True)
 
     def test_the_offer_is_only_made_when_it_can_be_kept(self):
         doc = {"url": "https://e.com/a", "title": "A", "text": "t",

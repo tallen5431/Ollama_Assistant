@@ -832,6 +832,126 @@ class TestTheModelAskingForALink:
         assert "FETCH" not in self.text_of(out)
         assert len(fetched) == 1, "something was fetched for a link off the list"
 
+    def test_asking_by_number_is_not_a_way_round_the_follow_scope(
+            self, asking, monkeypatch):
+        """The map *shows* external links; WEB_FOLLOW_SCOPE says which may be
+        opened, and it is the stricter of the two on purpose. Without this the
+        default settings list every outbound link and then open any of them on
+        request — exactly the surface following was kept narrow to avoid.
+        """
+        replies = ["FETCH: [1.2]", self.ANSWER]      # [1.2] is the external one
+        fetched = []
+        real = web.fetch
+
+        def fake_stream(model, messages, options=None, keep_alive=None):
+            asking["ollama"].requests.append({"stream": True, "messages": messages})
+            yield json.dumps({"message": {"content": replies.pop(0) if replies
+                                          else self.ANSWER},
+                              "done": True, "eval_count": 4})
+
+        def counting_fetch(url):
+            fetched.append(url)
+            return real(url)
+
+        monkeypatch.setattr(app_module, "chat_stream", fake_stream)
+        monkeypatch.setattr(web, "fetch", counting_fetch)
+        out = lines(self.ask(asking))
+
+        systems = [r["messages"][0]["content"]
+                   for r in asking["ollama"].requests if r.get("stream")]
+        offered = dict(re.findall(r"^\[(\d+\.\d+)\][^—]*— (\S+)$", systems[0], re.M))
+        assert "elsewhere.example" in offered.get("1.2", ""), \
+            "this test is aimed at the wrong link number"
+        assert not any("elsewhere.example" in u for u in fetched), \
+            "an off-site page was opened because the model asked for it by number"
+        assert self.text_of(out) == self.ANSWER
+
+    def test_and_the_model_is_told_so_rather_than_finding_out(self, asking):
+        """Being refused costs a whole hop; saying so up front costs a sentence."""
+        self.ask(asking).get_data()
+        system = [r["messages"][0]["content"]
+                  for r in asking["ollama"].requests if r.get("stream")][0]
+        assert "(external) cannot be opened" in system
+
+    def test_unless_the_operator_allows_it(self, asking, monkeypatch):
+        monkeypatch.setenv("WEB_FOLLOW_SCOPE", "any")
+        replies = ["FETCH: [1.2]", self.ANSWER]
+        fetched = []
+        real = web.fetch
+
+        def fake_stream(model, messages, options=None, keep_alive=None):
+            asking["ollama"].requests.append({"stream": True, "messages": messages})
+            yield json.dumps({"message": {"content": replies.pop(0) if replies
+                                          else self.ANSWER},
+                              "done": True, "eval_count": 4})
+
+        def counting_fetch(url):
+            fetched.append(url)
+            if "elsewhere.example" in url:
+                return {"url": url, "requested": url, "title": "Outside",
+                        "text": "an outside page", "links": []}
+            return real(url)
+
+        monkeypatch.setattr(app_module, "chat_stream", fake_stream)
+        monkeypatch.setattr(web, "fetch", counting_fetch)
+        self.ask(asking).get_data()
+        assert any("elsewhere.example" in u for u in fetched)
+
+    def test_the_same_link_is_not_read_twice(self, asking, monkeypatch):
+        """A link stays on the map after it is followed, so with more than one
+        hop the model can ask for the same page again — which fetched it twice,
+        cited it twice, and spent the last hop learning nothing."""
+        monkeypatch.setenv("WEB_FETCH_HOPS", "2")
+        replies = ["FETCH: [1.1]", "FETCH: [1.1]", self.ANSWER]
+        fetched = []
+        real = web.fetch
+
+        def fake_stream(model, messages, options=None, keep_alive=None):
+            asking["ollama"].requests.append({"stream": True, "messages": messages})
+            yield json.dumps({"message": {"content": replies.pop(0) if replies
+                                          else self.ANSWER},
+                              "done": True, "eval_count": 4})
+
+        def counting_fetch(url):
+            fetched.append(url)
+            return real(url)
+
+        monkeypatch.setattr(app_module, "chat_stream", fake_stream)
+        monkeypatch.setattr(web, "fetch", counting_fetch)
+        out = lines(self.ask(asking))
+        assert len([u for u in fetched if u.endswith("/hinge")]) == 1
+        sources = [s["url"] for s in [o["sources"] for o in out if "sources" in o][-1]]
+        assert len(sources) == len(set(sources)), "a source was cited twice"
+        assert self.text_of(out) == self.ANSWER
+
+    def test_a_fetch_that_explodes_does_not_take_the_turn_with_it(
+            self, asking, monkeypatch):
+        """Following a link is an enhancement. One that can lose an answer the
+        user already waited for is worse than the problem it solves."""
+        replies = ["FETCH: [1.1]", self.ANSWER]
+
+        def fake_stream(model, messages, options=None, keep_alive=None):
+            asking["ollama"].requests.append({"stream": True, "messages": messages})
+            yield json.dumps({"message": {"content": replies.pop(0) if replies
+                                          else self.ANSWER},
+                              "done": True, "eval_count": 4})
+
+        real = web.fetch
+
+        def exploding_fetch(url):
+            # Only the followed link, so the turn still has pages to answer
+            # from — which is the whole point of not dying here.
+            if url.endswith("/hinge"):
+                raise RuntimeError("not a WebError")
+            return real(url)
+
+        monkeypatch.setattr(app_module, "chat_stream", fake_stream)
+        monkeypatch.setattr(web, "fetch", exploding_fetch)
+        out = lines(self.ask(asking))
+        assert not [o for o in out if "error" in o], "the turn died"
+        assert self.text_of(out) == self.ANSWER
+        assert any("Could not read" in o.get("status", "") for o in out)
+
     def test_a_reply_that_only_looks_like_a_request_still_reaches_the_user(
             self, asking, monkeypatch):
         """Someone asking the assistant about this very feature must not have

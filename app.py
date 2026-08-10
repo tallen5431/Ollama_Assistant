@@ -848,12 +848,49 @@ def api_chat() -> Any:
                 if not wanted:
                     break
                 link = link_ids.get(wanted)
-                if link:
+                if not link:
+                    # A number that was never on the list. Nothing to fetch, so
+                    # ask again with the offer withdrawn rather than showing the
+                    # user a marker where their answer should be.
+                    logger.info("Model asked for link [%s], which is not on the "
+                                "list it was shown", wanted)
+                    yield _step("Asked to read a link",
+                                f"[{wanted}] is not one of the links offered; "
+                                "answering from what was already retrieved")
+                # The map *shows* more than may be opened: WEB_LINK_SCOPE is
+                # about what the model can see and WEB_FOLLOW_SCOPE about what
+                # it can talk us into visiting, and the second is the stricter
+                # of the two on purpose. Asking by number must not be the way
+                # round it — without this check the default settings list every
+                # outbound link and then open any of them on request, which is
+                # exactly the surface following was kept narrow to avoid.
+                elif not web.followable({"url": link.get("source", "")}, link):
+                    logger.info("Model asked for link [%s] (%s), which leaves the "
+                                "site it was found on", wanted, link.get("url"))
+                    yield _step("Asked to read a link",
+                                f"[{wanted}] leaves {_host_of(link.get('source', ''))} "
+                                "— only pages of a site already retrieved may be "
+                                "opened (WEB_FOLLOW_SCOPE)")
+                # Already read. A link stays on the map after it is followed, so
+                # with more than one hop the model can ask for the same page
+                # twice — which fetched it twice, listed it twice as a source,
+                # and spent the last hop learning nothing.
+                elif any(link["url"] in (d.get("url"), d.get("requested"))
+                         for d in documents):
+                    yield _step("Asked to read a link",
+                                f"[{wanted}] has already been read")
+                else:
                     yield _line({"status": f"Opening {_host_of(link['url'])}…"})
                     try:
                         documents.append(web.fetch(link["url"]))
-                    except web.WebError as exc:
-                        yield _line({"status": str(exc)})
+                    # Not just WebError. Following a link is an enhancement, and
+                    # an enhancement that can take the whole turn down with it is
+                    # a worse bug than the one it fixes — the reply is already
+                    # paid for and the pages to answer from are already here.
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Fetching requested link %s failed: %s",
+                                       link["url"], exc)
+                        yield _line({"status": f"Could not read {_host_of(link['url'])}."})
                         yield _step("Asked to read a link",
                                     f"[{wanted}] {link['url']} — {exc}")
                     else:
@@ -863,15 +900,6 @@ def api_chat() -> Any:
                         kept_sources.append({"url": documents[-1]["url"],
                                              "title": documents[-1]["title"]})
                         yield _line({"sources": list(kept_sources)})
-                else:
-                    # A number that was never on the list. Nothing to fetch, so
-                    # ask again with the offer withdrawn rather than showing the
-                    # user a marker where their answer should be.
-                    logger.info("Model asked for link [%s], which is not on the "
-                                "list it was shown", wanted)
-                    yield _step("Asked to read a link",
-                                f"[{wanted}] is not one of the links offered; "
-                                "answering from what was already retrieved")
                 # One offer per hop, and none once they are spent, so the model
                 # is never invited to ask for something it cannot be given.
                 hops = max(0, hops - 1)
