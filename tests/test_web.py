@@ -1853,6 +1853,24 @@ class TestLinkPicker:
         {"url": "https://x.example/about", "text": "about us"},
     ]
 
+    def test_the_prompt_describes_the_listing_it_is_actually_given(self, monkeypatch):
+        """The listing gained a second column — where the link goes — and a
+        picker that is not told what it is reads it as part of the title. This
+        runs on a 3b planner model, where an unexplained column is real cost."""
+        seen = {}
+
+        def capture(model, messages, **kw):
+            seen["system"] = messages[0]["content"]
+            seen["user"] = messages[1]["content"]
+            return "1"
+
+        monkeypatch.setattr("ollama_client.chat", capture)
+        web.choose_links("how strong is the hinge?", self.LINKS, "m")
+        assert "— where it goes" in seen["system"], \
+            "the picker is not told what the second column is"
+        assert "x.example/pricing" in seen["user"], \
+            "the picker is not actually shown where the links go"
+
     def test_it_returns_what_the_model_chose(self, monkeypatch):
         monkeypatch.setattr("ollama_client.chat", lambda *a, **k: "1\n3")
         chosen = web.choose_links("how strong is the hinge?", self.LINKS, "m", max_links=2)
@@ -1933,6 +1951,19 @@ class TestLinkMap:
         """Otherwise the model describes pages it has never seen."""
         assert "not fetched" in web.link_map(self.DOC)
         assert "you have not read them" in web.link_map(self.DOC)
+
+    def test_it_explains_its_own_numbering(self):
+        """The numbers are always there; the fetch offer that also explains
+        them is off by default. Unexplained they collide with the preamble's
+        "cite sources by their [n] number", so a model cites [1.1] as if it
+        were a source — which is the one page it definitely has not read."""
+        out = web.link_map(self.DOC, number=1)
+        assert "[page.link]" in out
+        assert "never cite one as a source" in out
+
+    def test_the_numbering_survives_into_the_assembled_block(self):
+        ctx = web.build_context([{**self.DOC, "title": "Ada", "text": "body"}])
+        assert "[1.1]" in ctx and "[page.link]" in ctx
 
     def test_a_page_with_no_links_adds_nothing(self):
         assert web.link_map({"url": "https://a.example/", "links": []}) == ""

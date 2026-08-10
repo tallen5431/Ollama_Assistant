@@ -1575,11 +1575,15 @@ def plan_searches(
 
 _LINK_PICKER = (
     "You choose which linked pages are worth reading to answer a question.\n\n"
-    "You are given a question and a numbered list of links found on a page the "
-    "user is already reading. Reply with the numbers of the links most likely "
-    "to contain the answer, best first, one per line, each as 'N'. Reply with "
-    "NONE if the page the user is on already covers it, or if none of the links "
-    "are clearly about the question.\n\n"
+    "You are given a question and a numbered list of links found on pages that "
+    "have already been read. Each line is 'N. the words the link was written "
+    "as — where it goes'. The address is often the more honest of the two: an "
+    "anchor saying 'Learn more' on a path saying /hinge/spec is a page about "
+    "the hinge specification.\n\n"
+    "Reply with the numbers of the links most likely to contain the answer, "
+    "best first, one per line, each as 'N'. Reply with NONE if the pages "
+    "already read cover it, or if none of the links are clearly about the "
+    "question.\n\n"
     "Choose pages that go deeper on what was asked. Do not choose general "
     "index, category, disambiguation or 'list of' pages, and do not choose a "
     "link merely because its words appear in the question."
@@ -1760,9 +1764,15 @@ def link_map(
         rows.append(f"{label} {_link_field(link.get('text'))}{away} "
                     f"— {_link_field(link.get('url'))}")
     return (
-        "Other pages linked from this one, not fetched. Use them to say where "
-        "something is covered, never to describe what they contain — you have "
-        "not read them.\n" + "\n".join(rows)
+        # The [n.m] numbering has to be explained here, not only in the fetch
+        # offer, because the offer is off by default and the numbers are not.
+        # Unexplained they collide with the citation rule in the preamble —
+        # "cite sources by their [n] number" — so a model reading [1.1] cites
+        # it like a source, which is precisely the page it has *not* read.
+        "Other pages linked from this one, not fetched — numbered "
+        "[page.link]. Use them to say where something is covered. Never "
+        "describe what they contain and never cite one as a source: you "
+        "have not read them.\n" + "\n".join(rows)
     )
 
 
