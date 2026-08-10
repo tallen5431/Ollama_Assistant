@@ -58,7 +58,10 @@ from config import (
     get_server_threads,
     get_share_photo_location,
     get_vision_model,
+    get_web_fetch_hops,
     get_web_follow_links,
+    get_web_follow_on_search,
+    get_web_max_hops,
     get_web_max_docs,
     logger,
     web_enabled,
@@ -788,8 +791,18 @@ def api_chat() -> Any:
             if meta_context:
                 convo = web.with_context(convo, meta_context)
 
+            # Where the numbered links point, and how many times the model may
+            # still ask for one. Both empty unless a web turn fills them in.
+            documents: List[Dict[str, str]] = []
+            link_ids: Dict[str, Dict[str, str]] = {}
+            hops = 0
+            # The conversation *without* the page context, kept so that a hop
+            # can rebuild rather than stack: inserting a second block would
+            # leave the model reading two overlapping copies of the same pages,
+            # numbered differently, which is worse than not hopping at all.
+            grounded = convo
+
             if use_web:
-                documents: List[Dict[str, str]] = []
                 outcome: Dict[str, bool] = {}
                 for line in _gather_web(model, turns, documents, transcript, outcome,
                                         photo_note=photo_note):
@@ -804,11 +817,10 @@ def api_chat() -> Any:
                     # Layer the page context on whatever the image already added,
                     # bounded so the pages cannot crowd the conversation out of
                     # the window — Ollama drops the oldest turns silently.
+                    grounded = convo
+                    hops = get_web_fetch_hops()
                     convo = web.with_context(
-                        convo,
-                        web.build_context(documents,
-                                          char_budget=web.context_budget(get_num_ctx())),
-                    )
+                        convo, _web_context(documents, turns, link_ids, hops))
                     kept_sources.extend(
                         {"url": d["url"], "title": d["title"]} for d in documents)
                     yield _line({"sources": list(kept_sources)})
@@ -818,11 +830,53 @@ def api_chat() -> Any:
                 f"characters of text, num_ctx {options.get('num_ctx')}",
                 system=[str(t.get("content") or "")[:2000]
                         for t in convo if t.get("role") == "system"])
-            for line in chat_stream(model, convo, options=options,
-                                    keep_alive=get_keep_alive() or None):
-                answer.append(_message_field(line, "content"))
-                thinking.append(_message_field(line, "thinking"))
-                yield line + "\n"
+
+            # The model may answer, or — while a hop is left and it was told it
+            # could — ask for one of the numbered links to be read first. A
+            # request is swallowed rather than shown: it is the machinery
+            # talking, not the reply, and the user gets the answer that comes
+            # back with the page in front of it.
+            for _ in range(hops + 1):
+                # The table only goes in while an offer actually stands. With
+                # the feature off the model was never told it could ask, so a
+                # reply that happens to look like a request is just a reply —
+                # and holding it back would swallow somebody's answer about
+                # this very feature.
+                wanted = yield from _stream_answer(
+                    model, convo, options, link_ids if hops else {},
+                    answer, thinking)
+                if not wanted:
+                    break
+                link = link_ids.get(wanted)
+                if link:
+                    yield _line({"status": f"Opening {_host_of(link['url'])}…"})
+                    try:
+                        documents.append(web.fetch(link["url"]))
+                    except web.WebError as exc:
+                        yield _line({"status": str(exc)})
+                        yield _step("Asked to read a link",
+                                    f"[{wanted}] {link['url']} — {exc}")
+                    else:
+                        yield _step("Asked to read a link",
+                                    f"the model asked for [{wanted}]",
+                                    urls=[documents[-1].get("url", "")])
+                        kept_sources.append({"url": documents[-1]["url"],
+                                             "title": documents[-1]["title"]})
+                        yield _line({"sources": list(kept_sources)})
+                else:
+                    # A number that was never on the list. Nothing to fetch, so
+                    # ask again with the offer withdrawn rather than showing the
+                    # user a marker where their answer should be.
+                    logger.info("Model asked for link [%s], which is not on the "
+                                "list it was shown", wanted)
+                    yield _step("Asked to read a link",
+                                f"[{wanted}] is not one of the links offered; "
+                                "answering from what was already retrieved")
+                # One offer per hop, and none once they are spent, so the model
+                # is never invited to ask for something it cannot be given.
+                hops = max(0, hops - 1)
+                convo = web.with_context(
+                    grounded, _web_context(documents, turns, link_ids, hops))
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
             message = str(exc) or exc.__class__.__name__
@@ -1056,6 +1110,87 @@ def _detached_stream(produce: Any, name: str) -> Response:
     return Response(stream_with_context(relay()), mimetype="application/x-ndjson")
 
 
+def _web_context(
+    documents: List[Dict[str, str]],
+    turns: List[Dict[str, str]],
+    link_ids: Dict[str, Dict[str, str]],
+    hops: int,
+) -> str:
+    """The fenced page block, with the link numbering it hands back recorded.
+
+    ``link_ids`` is emptied and refilled on every call, because the numbering
+    is only valid for the block it was rendered with: a hop adds a document,
+    every list below it shifts, and a table left over from the previous round
+    would resolve [3.2] against a page that is now [4.2].
+    """
+    return web.build_context(
+        documents,
+        char_budget=web.context_budget(get_num_ctx()),
+        question=web.last_user_text(turns),
+        link_ids=link_ids,
+        may_fetch=hops > 0,
+    )
+
+
+def _stream_answer(
+    model: str,
+    convo: List[Dict[str, str]],
+    options: Dict[str, Any],
+    link_ids: Dict[str, Dict[str, str]],
+    answer: List[str],
+    thinking: List[str],
+) -> Any:
+    """Stream one reply, unless it turns out to be a request to read a link.
+
+    Returns the link id asked for, or "" when this was an ordinary answer — in
+    which case every line has already been yielded and nothing was held back.
+
+    The holding is the awkward part and cannot be avoided: a request has to be
+    recognised before it is shown, or the user watches "FETCH: [2.3]" arrive,
+    sit there, and then be followed by a second answer with no explanation of
+    what the first line was. So content is buffered while it could still become
+    a request — which for ordinary prose is one token, since "The" cannot — and
+    released the moment it cannot. Reasoning is never held: it is not the reply,
+    the user is already watching it scroll, and a model that thinks for thirty
+    seconds before asking for a link would otherwise look frozen.
+    """
+    held: List[str] = []
+    holding = bool(link_ids)
+
+    def flush() -> Any:
+        for line in held:
+            answer.append(_message_field(line, "content"))
+            yield line + "\n"
+        held.clear()
+
+    for line in chat_stream(model, convo, options=options,
+                            keep_alive=get_keep_alive() or None):
+        thinking.append(_message_field(line, "thinking"))
+        if not holding:
+            answer.append(_message_field(line, "content"))
+            yield line + "\n"
+            continue
+        # Thinking-only lines go straight out; everything else waits, including
+        # the final empty one, or the reply would arrive after its own end.
+        if not _message_field(line, "content") and _message_field(line, "thinking"):
+            yield line + "\n"
+            continue
+        held.append(line)
+        if web.fetch_pending("".join(_message_field(l, "content") for l in held)):
+            continue
+        holding = False
+        yield from flush()
+
+    if held:
+        wanted = web.fetch_request("".join(_message_field(l, "content") for l in held))
+        if wanted:
+            return wanted
+        # Held to the end and not a request after all — an empty reply, or one
+        # short enough to still look like one. It is the answer; show it.
+        yield from flush()
+    return ""
+
+
 def _debug_of(line: str) -> Optional[Dict[str, Any]]:
     """The panel entry in a line, if it is one. Recorded where the lines are
     relayed rather than at each yield, so a step added later is kept without
@@ -1075,27 +1210,61 @@ def _host_of(url: str) -> str:
         return url
 
 
+# However the settings multiply out, retrieval never puts more than this many
+# documents in front of the model. WEB_MAX_DOCS × WEB_FOLLOW_LINKS × WEB_MAX_HOPS
+# reaches fifteen at the permitted maximums, and fifteen documents do not fit in
+# any window this app runs at — build_context would hand each one its 800-character
+# floor and overrun the budget by several times. A ceiling here is the one place
+# that cannot be got wrong by a combination of settings that each look reasonable.
+_DOC_CEILING = 8
+
+
+def _link_candidates(
+    question: str,
+    sources: List[Dict[str, Any]],
+    documents: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """Links worth offering the picker, best first, across every page given.
+
+    Pooled and ranked as one list rather than per page. A search turn retrieves
+    three pages from three sites; asking the picker about each in turn is three
+    model calls to answer one question, and it cannot see that the best link on
+    the whole turn was on page two.
+    """
+    seen = {d.get("url") for d in documents} | {d.get("requested") for d in documents}
+    pool: List[Dict[str, str]] = []
+    for source in sources:
+        for link in (source.get("links") or []):
+            url = link.get("url")
+            # followable(), not same_site(): what may be *opened* is a stricter
+            # question than what may be listed, and it has its own setting.
+            if not url or url in seen or not web.followable(source, link):
+                continue
+            seen.add(url)
+            pool.append(link)
+    # No `here`: these come from several pages at once, so a same-site bonus
+    # would mean "same site as whichever page this link happened to be on",
+    # which is every one of them and therefore nothing.
+    return web.rank_links(pool, question)
+
+
 def _follow_links(
     model: str,
     question: str,
-    source: Dict[str, Any],
+    sources: List[Dict[str, Any]],
     documents: List[Dict[str, str]],
     budget: int,
 ) -> Any:
-    """Open a couple of the pages ``source`` links to, if any look relevant.
+    """Open a couple of the pages ``sources`` link to, if any look relevant.
 
-    Same-site only, one hop, and every URL still goes through the address guard
-    in fetch() — a link is chosen by a model from content written by a stranger,
-    so it gets no more trust than a pasted URL does.
+    Every URL still goes through the address guard in fetch(), and by default
+    only same-site links are candidates at all — a link is chosen by a model
+    from content written by a stranger, so it gets no more trust than a pasted
+    URL does. Returns the documents it added, so the caller can hop from them.
     """
-    candidates = [
-        link for link in (source.get("links") or [])
-        if web.same_site(source.get("url", ""), link["url"])
-        and link["url"] not in {d.get("url") for d in documents}
-        and link["url"] not in {d.get("requested") for d in documents}
-    ]
+    candidates = _link_candidates(question, sources, documents)
     if not candidates:
-        return
+        return []
 
     picker = get_planner_model() or model
     try:
@@ -1103,15 +1272,50 @@ def _follow_links(
                                   answering_model=model)
     except Exception as exc:  # noqa: BLE001 - an enhancement, never a requirement
         logger.warning("Link picking failed: %s", exc)
-        return
+        return []
     if not chosen:
-        return
+        return []
 
     yield _line({"status": "Following: " + " · ".join(c["text"][:40] for c in chosen)})
     fetched, failures = _run_all(web.fetch, [c["url"] for c in chosen])
     documents.extend(fetched)
     if failures and not fetched:
         yield _line({"status": "Could not read the linked pages."})
+    yield _step("Followed links",
+                f"{len(chosen)} chosen, {len(fetched)} read"
+                + (f"; failures: {'; '.join(failures[:3])}" if failures else ""),
+                urls=[d.get("url", "") for d in fetched])
+    return fetched
+
+
+def _deepen(
+    model: str,
+    question: str,
+    documents: List[Dict[str, str]],
+) -> Any:
+    """Follow links outward from what has been retrieved, up to the hop limit.
+
+    Hop one is the case this started as: the page answers half the question and
+    points at the page with the other half. Hop two is the one that needed a
+    setting of its own — the specification linked from the release note linked
+    from the search result — and it is off by default because each hop is
+    another picker call and another round of fetches on hardware that is
+    usually running the answering model at the same time.
+    """
+    budget = get_web_follow_links()
+    hops = get_web_max_hops()
+    if budget < 1 or hops < 1:
+        return
+    frontier = list(documents)
+    for _ in range(hops):
+        room = _DOC_CEILING - len(documents)
+        if not frontier or room < 1:
+            return
+        fetched = yield from _follow_links(model, question, frontier, documents,
+                                           min(budget, room))
+        if not fetched:
+            return          # nothing chosen or nothing readable; no deeper to go
+        frontier = fetched
 
 
 def _gather_web(
@@ -1149,15 +1353,9 @@ def _gather_web(
         # A linked page is rarely self-contained: a wiki article answers half
         # the question and points at the page with the other half. Ask a small
         # model which of its links are worth opening, and follow a couple.
-        # Only from a page the *user* chose, and only within the same site —
-        # following a model's pick of an arbitrary outbound link is a much
-        # larger surface for very little gain.
-        budget = get_web_follow_links()
-        for source in list(documents):
-            if budget < 1:
-                break
-            yield from _follow_links(model, question, source, documents, budget)
-            budget = 0     # one hop, from the first page only
+        # Only within the same site by default — following a model's pick of an
+        # arbitrary outbound link is a much larger surface for very little gain.
+        yield from _deepen(model, question, documents)
         # Deliberately not distilled. A page reached by searching is one this
         # app chose, and cutting it down to the question it was chosen to
         # answer loses nothing. A page the *user* pasted is a deliberate act,
@@ -1288,6 +1486,15 @@ def _gather_web(
     yield _step("Pages read", f"{len(fetched)} of {len(urls)} tried"
                 + (f"; failures: {'; '.join(fetch_failures[:4])}" if fetch_failures else ""),
                 urls=[d.get("url", "") for d in fetched[:max_docs]])
+
+    # The same half-an-answer problem the pasted-URL path has, and for a long
+    # time the search path did not do this at all: a search lands on the
+    # overview and the specifics are one click away, exactly as they are on a
+    # page pasted by hand. Before the snippet documents are added, so the
+    # picker is only ever offered pages that were actually read — a snippet has
+    # no links, and its own URL is already a document.
+    if get_web_follow_on_search():
+        yield from _deepen(model, question, documents)
 
     # Paywalled, JS-only and dead pages are routine. Their search snippets are
     # already paid for, so use them to fill out the budget rather than throwing

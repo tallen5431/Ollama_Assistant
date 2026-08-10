@@ -603,6 +603,249 @@ class TestFollowingLinks:
         assert len(rounds) == 1
 
 
+class TestFollowingLinksFromASearch:
+    """Following used to happen only for a URL you pasted, which left out the
+    common case: a search lands on the overview page and the specifics are one
+    click away, exactly as they are on a page you paste by hand.
+    """
+
+    @pytest.fixture
+    def searched_site(self, rig, monkeypatch):
+        import web as web_module
+
+        def fake_fetch(url):
+            if url.endswith("/hinge"):
+                return {"url": url, "requested": url, "title": "Hinge design",
+                        "text": "A titanium four-bar linkage rated to 200000 cycles.",
+                        "links": []}
+            parsed = web_module.html_to_text(
+                TestFollowingLinks.LINKED, base_url=url)
+            return {"url": url, "requested": url, "title": parsed["title"],
+                    "text": parsed["text"], "links": parsed["links"]}
+
+        monkeypatch.setattr(web, "fetch", fake_fetch)
+        return rig
+
+    def ask(self, rig, question="how strong is the hinge?"):
+        return rig["client"].post("/api/chat", json={
+            "messages": [{"role": "user", "content": question}], "web": True})
+
+    def system_of(self, rig):
+        return [r for r in rig["ollama"].requests if r.get("stream")][-1]["messages"][0]["content"]
+
+    def test_a_page_found_by_searching_has_its_links_followed(
+            self, searched_site, monkeypatch):
+        rig = searched_site
+        monkeypatch.setattr(web, "choose_links",
+                            lambda q, links, model, max_links=2, **kw: links[:1])
+        out = lines(self.ask(rig))
+        assert "titanium four-bar" in self.system_of(rig), \
+            "the search path never followed the link"
+        assert any("Following" in o.get("status", "") for o in out)
+
+    def test_it_can_be_switched_off(self, searched_site, monkeypatch):
+        rig = searched_site
+        monkeypatch.setenv("WEB_FOLLOW_ON_SEARCH", "0")
+        called = []
+        monkeypatch.setattr(web, "choose_links",
+                            lambda *a, **k: called.append(1) or [])
+        self.ask(rig).get_data()
+        assert not called
+
+    def test_the_picker_is_asked_once_for_the_whole_turn(
+            self, searched_site, monkeypatch):
+        """Three pages from three sites is one question, not three: asking per
+        page is three model calls and none of them can see that the best link
+        on the turn was on page two."""
+        rig = searched_site
+        rounds = []
+        monkeypatch.setattr(
+            web, "choose_links",
+            lambda q, links, model, max_links=2, **kw: rounds.append(links) or [])
+        self.ask(rig).get_data()
+        assert len(rounds) == 1
+
+    def test_a_second_hop_is_off_by_default(self, searched_site, monkeypatch):
+        rig = searched_site
+        rounds = []
+        monkeypatch.setattr(
+            web, "choose_links",
+            lambda q, links, model, max_links=2, **kw: rounds.append(1) or links[:1])
+        self.ask(rig).get_data()
+        assert len(rounds) == 1
+
+    def test_but_can_be_turned_on(self, searched_site, monkeypatch):
+        """The specification linked from the release note linked from the
+        search result."""
+        rig = searched_site
+        monkeypatch.setenv("WEB_MAX_HOPS", "2")
+        rounds = []
+
+        def picker(q, links, model, max_links=2, **kw):
+            rounds.append(1)
+            return links[:1]
+
+        # The followed page has to link somewhere for a second hop to exist.
+        deep = {"url": "https://x.example/deep", "requested": "https://x.example/deep",
+                "title": "Deep", "text": "the specification", "links": []}
+        real = web.fetch
+
+        def fetch(url):
+            if url.endswith("/deep"):
+                return deep
+            doc = real(url)
+            if doc["url"].endswith("/hinge"):
+                doc = {**doc, "links": [{"url": "https://x.example/deep",
+                                         "text": "the specification"}]}
+            return doc
+
+        monkeypatch.setattr(web, "fetch", fetch)
+        monkeypatch.setenv("WEB_FOLLOW_SCOPE", "any")
+        monkeypatch.setattr(web, "choose_links", picker)
+        self.ask(rig).get_data()
+        assert len(rounds) == 2, "the second hop never ran"
+        assert "the specification" in self.system_of(rig)
+
+    def test_retrieval_never_exceeds_the_document_ceiling(
+            self, searched_site, monkeypatch):
+        """Whatever the settings multiply out to. Fifteen documents do not fit
+        in any window this app runs at."""
+        rig = searched_site
+        monkeypatch.setenv("WEB_MAX_HOPS", "3")
+        monkeypatch.setenv("WEB_FOLLOW_LINKS", "4")
+        monkeypatch.setenv("WEB_FOLLOW_SCOPE", "any")
+        seen = []
+
+        def endless(url):
+            doc = {"url": url, "requested": url, "title": url, "text": "text",
+                   "links": [{"url": f"{url}/{n}", "text": f"link {n}"}
+                             for n in range(6)]}
+            seen.append(url)
+            return doc
+
+        monkeypatch.setattr(web, "fetch", endless)
+        monkeypatch.setattr(web, "choose_links",
+                            lambda q, links, model, max_links=2, **kw: links[:max_links])
+        out = lines(self.ask(rig))
+        sources = [o["sources"] for o in out if "sources" in o]
+        assert sources and len(sources[-1]) <= app_module._DOC_CEILING
+
+
+class TestTheModelAskingForALink:
+    """The model has read the pages and says the answer is behind one of the
+    links. Nothing judges whether a page answered the question as well as the
+    model trying to answer from it.
+    """
+
+    ANSWER = "The hinge is rated to 200000 cycles."
+
+    @pytest.fixture
+    def asking(self, rig, monkeypatch):
+        """An Ollama that asks for link [1.1] once, then answers."""
+        replies = ["FETCH: [1.1]", self.ANSWER]
+
+        def fake_stream(model, messages, options=None, keep_alive=None):
+            rig["ollama"].requests.append({"stream": True, "messages": messages})
+            text = replies.pop(0) if replies else self.ANSWER
+            yield json.dumps({"message": {"content": text}, "done": True,
+                              "eval_count": 4})
+
+        monkeypatch.setattr(app_module, "chat_stream", fake_stream)
+
+        def fake_fetch(url):
+            if url.endswith("/hinge"):
+                return {"url": url, "requested": url, "title": "Hinge design",
+                        "text": "A titanium four-bar linkage rated to 200000 cycles.",
+                        "links": []}
+            parsed = web.html_to_text(TestFollowingLinks.LINKED, base_url=url)
+            return {"url": url, "requested": url, "title": parsed["title"],
+                    "text": parsed["text"], "links": parsed["links"]}
+
+        monkeypatch.setattr(web, "fetch", fake_fetch)
+        monkeypatch.setattr(web, "choose_links", lambda *a, **k: [])
+        monkeypatch.setenv("WEB_FETCH_HOPS", "1")
+        return rig
+
+    def ask(self, rig):
+        return rig["client"].post("/api/chat", json={
+            "messages": [{"role": "user", "content": "how strong is the hinge?"}],
+            "web": True})
+
+    def text_of(self, out):
+        return "".join(o.get("message", {}).get("content", "") for o in out)
+
+    def test_the_page_is_fetched_and_the_answer_comes_back_with_it(self, asking):
+        out = lines(self.ask(asking))
+        assert self.text_of(out) == self.ANSWER
+        systems = [r["messages"][0]["content"]
+                   for r in asking["ollama"].requests if r.get("stream")]
+        assert len(systems) == 2, "the model was not asked again"
+        assert "titanium four-bar" in systems[1], "the requested page was not added"
+
+    def test_the_request_is_never_shown_to_the_user(self, asking):
+        """It is the machinery talking, not the reply."""
+        assert "FETCH" not in self.text_of(lines(self.ask(asking)))
+
+    def test_the_new_page_is_cited(self, asking):
+        out = lines(self.ask(asking))
+        urls = [s["url"] for s in [o["sources"] for o in out if "sources" in o][-1]]
+        assert any(u.endswith("/hinge") for u in urls)
+
+    def test_the_offer_is_withdrawn_once_spent(self, asking):
+        """Or the model asks again, and again, for as long as it is invited to."""
+        systems = []
+        self.ask(asking).get_data()
+        systems = [r["messages"][0]["content"]
+                   for r in asking["ollama"].requests if r.get("stream")]
+        assert "FETCH:" in systems[0]
+        assert "FETCH:" not in systems[1]
+
+    def test_it_is_off_by_default(self, asking, monkeypatch):
+        monkeypatch.delenv("WEB_FETCH_HOPS", raising=False)
+        out = lines(self.ask(asking))
+        systems = [r for r in asking["ollama"].requests if r.get("stream")]
+        assert len(systems) == 1, "a hop ran with the feature off"
+        # With no offer made, a reply shaped like one is just a reply.
+        assert "FETCH" in self.text_of(out)
+
+    def test_a_link_that_was_never_offered_is_not_fetched(self, asking, monkeypatch):
+        """A number off the end of the list. Nothing to fetch, so ask again
+        rather than showing the user a marker where the answer should be."""
+        replies = ["FETCH: [9.9]", self.ANSWER]
+        fetched = []
+        real = web.fetch
+
+        def fake_stream(model, messages, options=None, keep_alive=None):
+            asking["ollama"].requests.append({"stream": True, "messages": messages})
+            yield json.dumps({"message": {"content": replies.pop(0) if replies
+                                          else self.ANSWER},
+                              "done": True, "eval_count": 4})
+
+        def counting_fetch(url):
+            fetched.append(url)
+            return real(url)
+
+        monkeypatch.setattr(app_module, "chat_stream", fake_stream)
+        monkeypatch.setattr(web, "fetch", counting_fetch)
+        out = lines(self.ask(asking))
+        assert self.text_of(out) == self.ANSWER
+        assert "FETCH" not in self.text_of(out)
+        assert len(fetched) == 1, "something was fetched for a link off the list"
+
+    def test_a_reply_that_only_looks_like_a_request_still_reaches_the_user(
+            self, asking, monkeypatch):
+        """Someone asking the assistant about this very feature must not have
+        their answer swallowed by it."""
+        def fake_stream(model, messages, options=None, keep_alive=None):
+            asking["ollama"].requests.append({"stream": True, "messages": messages})
+            yield json.dumps({"message": {"content": "Reply with FETCH: [1.1] "
+                                                     "to open the first link."},
+                              "done": True, "eval_count": 4})
+
+        monkeypatch.setattr(app_module, "chat_stream", fake_stream)
+        assert "FETCH: [1.1]" in self.text_of(lines(self.ask(asking)))
+
+
 class TestLookingAtThePhotoBeforeSearchingForIt:
     """Reported with a photo of a dog: the panel showed glm-ocr reading it, a
     search planned as "what creatures is this", and three results that were all

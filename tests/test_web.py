@@ -8,6 +8,7 @@ none of those are trusted to point somewhere sensible.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import ssl
 import subprocess
@@ -1764,6 +1765,87 @@ class TestSameSite:
         assert web.same_site(a, b) is expected
 
 
+class TestRankingLinks:
+    """A page has a hundred links and room for five. Taking the first five in
+    document order takes the site's navigation furniture every time, because
+    that is what sits at the top of a page — and the link that answered the
+    question was reliably somewhere in the ninety that were dropped.
+    """
+
+    LINKS = [
+        {"url": "https://x.example/", "text": "Home"},
+        {"url": "https://x.example/company", "text": "About the company"},
+        {"url": "https://x.example/hinge-strength", "text": "Hinge load ratings"},
+    ]
+
+    def order(self, question, links=None, here=""):
+        return [l["text"] for l in web.rank_links(links or self.LINKS, question, here)]
+
+    def test_the_relevant_link_comes_first(self):
+        assert self.order("how strong is the hinge?")[0] == "Hinge load ratings"
+
+    def test_a_url_slug_counts_when_the_anchor_says_nothing(self):
+        """"Read the specification" is useless next to a URL saying /spec/hinge."""
+        links = [{"url": "https://x.example/a", "text": "Read more"},
+                 {"url": "https://x.example/hinge/spec", "text": "Read the document"}]
+        assert self.order("hinge spec", links)[0] == "Read the document"
+
+    def test_underscores_in_a_path_are_word_breaks(self):
+        links = [{"url": "https://x.example/a", "text": "one"},
+                 {"url": "https://x.example/four_bar_linkage", "text": "two"}]
+        assert self.order("four bar linkage", links)[0] == "two"
+
+    def test_common_words_do_not_decide_it(self):
+        """Otherwise every link matching "the" or "about" ranks alike."""
+        assert self.order("what is this about?")[0] == "Home", \
+            "a stopword pulled a link to the top"
+
+    def test_ties_keep_the_order_the_page_was_written_in(self):
+        assert self.order("nothing here matches at all") == \
+            ["Home", "About the company", "Hinge load ratings"]
+
+    def test_a_question_with_nothing_to_go_on_changes_nothing(self):
+        assert self.order("") == ["Home", "About the company", "Hinge load ratings"]
+
+    def test_the_site_you_are_on_wins_a_tie(self):
+        links = [{"url": "https://other.example/x", "text": "elsewhere"},
+                 {"url": "https://x.example/y", "text": "here"}]
+        assert self.order("", links, here="https://x.example/a")[0] == "here"
+
+    def test_but_only_a_tie(self):
+        """A plainly relevant outside link still beats an irrelevant local one,
+        which is the whole point of showing outside links at all."""
+        links = [{"url": "https://x.example/y", "text": "contact us"},
+                 {"url": "https://other.example/hinge", "text": "hinge load ratings"}]
+        assert self.order("hinge load ratings", links,
+                          here="https://x.example/a")[0] == "hinge load ratings"
+
+    def test_nothing_is_lost(self):
+        assert len(web.rank_links(self.LINKS, "hinge")) == len(self.LINKS)
+        assert web.rank_links([], "hinge") == []
+
+
+class TestFollowable:
+    """What may be *opened* is a stricter question than what may be listed."""
+
+    DOC = {"url": "https://x.example/a"}
+
+    def test_same_site_may_be_opened(self):
+        assert web.followable(self.DOC, {"url": "https://x.example/b"})
+
+    def test_another_site_may_not(self):
+        assert not web.followable(self.DOC, {"url": "https://other.example/b"})
+
+    def test_unless_the_operator_says_so(self, monkeypatch):
+        monkeypatch.setenv("WEB_FOLLOW_SCOPE", "any")
+        assert web.followable(self.DOC, {"url": "https://other.example/b"})
+
+    def test_an_unknown_scope_is_the_strict_one(self, monkeypatch):
+        """A typo must not quietly widen what a page can talk us into visiting."""
+        monkeypatch.setenv("WEB_FOLLOW_SCOPE", "yes please")
+        assert not web.followable(self.DOC, {"url": "https://other.example/b"})
+
+
 class TestLinkPicker:
     LINKS = [
         {"url": "https://x.example/hinge", "text": "new hinge design"},
@@ -1818,10 +1900,34 @@ class TestLinkMap:
         ],
     }
 
-    def test_it_lists_same_site_links_only(self):
+    def test_it_lists_what_the_page_points_at(self):
+        out = web.link_map(self.DOC)
+        assert "the engine" in out
+        assert "somewhere else" in out
+
+    def test_a_link_that_leaves_the_site_says_so(self):
+        """The reader has to weigh "another page of this site" against
+        "somebody else's site", and a URL alone does not make that obvious."""
+        out = web.link_map(self.DOC)
+        assert "somewhere else (external)" in out
+        assert "the engine (external)" not in out
+
+    def test_the_old_same_site_only_list_can_be_restored(self, monkeypatch):
+        monkeypatch.setenv("WEB_LINK_SCOPE", "site")
         out = web.link_map(self.DOC)
         assert "the engine" in out
         assert "somewhere else" not in out
+
+    def test_an_unknown_scope_is_ignored_rather_than_obeyed(self, monkeypatch):
+        monkeypatch.setenv("WEB_LINK_SCOPE", "sideways")
+        assert "somewhere else" in web.link_map(self.DOC)
+
+    def test_the_list_can_be_switched_off(self, monkeypatch):
+        monkeypatch.setenv("WEB_LINKS_IN_CONTEXT", "0")
+        assert web.link_map(self.DOC, limit=0) == ""
+        assert "the engine" not in web.build_context(
+            [{**self.DOC, "title": "Ada", "text": "body"}],
+            char_budget=web.context_budget(8192))
 
     def test_it_says_the_pages_were_not_read(self):
         """Otherwise the model describes pages it has never seen."""
@@ -1915,6 +2021,159 @@ class TestTheBudgetIsActuallyABudget:
         assert "trimmed to fit" not in out
 
 
+class TestTheNumberingTheModelReadsIsTheNumberingWeResolve:
+    """[2.3] has to mean the same link to the model reading the list and to the
+    app resolving a request against it. The two are produced at different
+    moments — the list when the block is rendered, the table after the budget
+    has finished trimming it — so nothing but a test keeps them in step. Get it
+    wrong and a request for one page quietly fetches another, which is the one
+    failure mode here that is worse than not following links at all.
+    """
+
+    def pages(self, count=3, links=25):
+        return [{"url": f"https://e.com/{i}", "title": f"Page {i}",
+                 "text": "word " * 800,
+                 "links": [{"url": f"https://e.com/{i}/l{n}",
+                            "text": f"Some link title {n}"} for n in range(links)]}
+                for i in range(count)]
+
+    def rendered(self, out):
+        """The {id: url} the assembled block actually shows the model."""
+        found = {}
+        for line in out.splitlines():
+            match = re.match(r"^\[(\d+\.\d+)\][^—]*— (\S+)", line)
+            if match:
+                found[match.group(1)] = match.group(2)
+        return found
+
+    @pytest.mark.parametrize("num_ctx", [2048, 4096, 8192, 16384, 32768])
+    def test_they_agree_at_every_window(self, num_ctx):
+        ids = {}
+        out = web.build_context(self.pages(), char_budget=web.context_budget(num_ctx),
+                                question="some link", link_ids=ids)
+        assert {k: v["url"] for k, v in ids.items()} == self.rendered(out)
+
+    def test_they_agree_with_no_budget_at_all(self):
+        ids = {}
+        out = web.build_context(self.pages(), question="some link", link_ids=ids)
+        assert {k: v["url"] for k, v in ids.items()} == self.rendered(out)
+
+    def test_the_table_is_rebuilt_rather_than_added_to(self):
+        """A hop adds a document and every list below it shifts. A table left
+        over from the previous round would resolve [3.2] against a page that is
+        now [4.2]."""
+        ids = {"9.9": {"url": "https://stale.example/"}}
+        web.build_context(self.pages(count=1), question="link", link_ids=ids)
+        assert "9.9" not in ids
+
+    def test_each_entry_remembers_the_page_it_was_found_on(self):
+        ids = {}
+        web.build_context(self.pages(count=2), question="link", link_ids=ids)
+        assert ids["2.1"]["source"] == "https://e.com/1"
+
+    def test_no_links_means_no_table(self):
+        ids = {}
+        web.build_context([{"url": "https://e.com/a", "title": "A", "text": "t"}],
+                          link_ids=ids)
+        assert ids == {}
+
+
+class TestTheLinkListDoesNotVanishWhenItIsMostNeeded:
+    """Halving used to walk 25, 12, 6, 3, 1, 0 — so the tighter the window, the
+    likelier the model was shown no links whatsoever. That is backwards: a model
+    on a small context window is precisely the one that cannot hold a site in
+    its head and most needs telling where the rest of it is.
+    """
+
+    def pages(self, count=3, links=40):
+        return [{"url": f"https://e.com/{i}", "title": f"Page {i}",
+                 "text": "word " * 400,
+                 "links": [{"url": f"https://e.com/{i}/l{n}", "text": f"link {n}"}
+                           for n in range(links)]}
+                for i in range(count)]
+
+    def listed(self, out):
+        return len([l for l in out.splitlines() if re.match(r"^\[\d+\.\d+\]", l)])
+
+    def test_a_tight_window_still_gets_a_few(self):
+        out = web.build_context(self.pages(count=1),
+                                char_budget=web.context_budget(4096), question="link")
+        assert self.listed(out) >= web._MIN_LINKS_IN_CONTEXT
+
+    def test_the_steps_stop_at_the_useful_minimum(self):
+        assert min(web._LINK_STEPS) == web._MIN_LINKS_IN_CONTEXT
+
+    def test_but_the_pages_are_still_paid_first(self):
+        """When even three links will not fit, they go rather than the block
+        overrunning — the budget is owed to the documents."""
+        budget = web.context_budget(2048)
+        out = web.build_context(self.pages(count=4), char_budget=budget)
+        assert self.listed(out) == 0
+
+    def test_the_ceiling_is_configurable(self, monkeypatch):
+        monkeypatch.setenv("WEB_LINKS_IN_CONTEXT", "5")
+        out = web.build_context(self.pages(count=1), question="link")
+        assert self.listed(out) == 5
+
+
+class TestAskingForALinkToBeRead:
+    """The model has read the pages and says the answer is behind one of the
+    links. Recognising that has to happen before the reply is shown, or the
+    user reads "FETCH: [2.3]" and then watches a second answer appear under it.
+    """
+
+    @pytest.mark.parametrize("reply", [
+        "FETCH: [2.3]",
+        "fetch: [2.3]",
+        "FETCH [2.3]",
+        "FETCH: 2.3",
+        "  FETCH: [2.3]  ",
+        "**FETCH: [2.3]**",
+        "- FETCH: [2.3]",
+        "FETCH: [2.3].",
+        "`FETCH: [2.3]`",
+        "<think>which link…</think>\nFETCH: [2.3]",
+    ])
+    def test_a_request_is_recognised_however_it_is_dressed(self, reply):
+        assert web.fetch_request(reply) == "2.3"
+
+    @pytest.mark.parametrize("reply", [
+        "The hinge is rated to 200,000 cycles.",
+        "I could not find it; try FETCH: [2.3] yourself.",
+        "FETCH: the pricing page",
+        "Fetching the page now.",
+        "",
+    ])
+    def test_an_answer_is_never_mistaken_for_one(self, reply):
+        assert web.fetch_request(reply) == ""
+
+    def test_a_request_buried_in_prose_is_an_answer(self):
+        """Only a bare reply is a request. Otherwise a page that talks about
+        this very feature could make the model emit one mid-sentence."""
+        assert web.fetch_request("Sure. FETCH: [2.3] is what I would do.") == ""
+
+    @pytest.mark.parametrize("sofar,pending", [
+        ("", True),
+        ("F", True),
+        ("FET", True),
+        ("FETCH", True),
+        ("FETCH: [2", True),
+        ("FETCH: [2.3]", True),
+        ("The", False),
+        ("Fetching", False),
+        ("I think", False),
+        ("F" * 60, False),
+    ])
+    def test_holding_stops_the_moment_it_can(self, sofar, pending):
+        assert web.fetch_pending(sofar) is pending
+
+    def test_the_offer_is_only_made_when_it_can_be_kept(self):
+        doc = {"url": "https://e.com/a", "title": "A", "text": "t",
+               "links": [{"url": "https://e.com/b", "text": "the other page"}]}
+        assert "FETCH:" in web.build_context([doc], may_fetch=True)
+        assert "FETCH:" not in web.build_context([doc], may_fetch=False)
+
+
 class TestALinkMapCannotForgeAFence:
     """The page body goes through _defence; the link map built from the same
     page was appended after it untouched. Anchor text and href are both written
@@ -1946,7 +2205,7 @@ class TestALinkMapCannotForgeAFence:
         """A newline in anchor text puts the rest of it at the start of a line,
         which is exactly where the line-anchored rule is looking."""
         out = self.context({"url": "https://e.com/b", "text": "one\ntwo\nthree"})
-        listed = [l for l in out.split("\n") if l.startswith("- ")]
+        listed = [l for l in out.split("\n") if l.startswith("[1.")]
         assert len(listed) == 1 and "one two three" in listed[0]
 
     def test_and_an_ordinary_link_is_untouched(self):

@@ -218,13 +218,97 @@ def get_web_max_bytes() -> int:
 
 
 def get_web_follow_links() -> int:
-    """How many pages linked from a page you pasted may also be read.
+    """How many linked pages may also be read, per hop.
 
     A wiki article often answers half the question and points at the page with
-    the other half. One hop, same site only, and a small model picks which
-    links are worth opening. 0 turns it off.
+    the other half. A small model picks which links are worth opening. 0 turns
+    following off everywhere.
     """
     return max(0, min(4, int(_number("WEB_FOLLOW_LINKS", 2))))
+
+
+def get_web_follow_on_search() -> bool:
+    """Whether pages found by *searching* may have their links followed too.
+
+    Following used to happen only for a URL you pasted, which left the common
+    case out: a search lands on the overview page and the specifics are one
+    click away, exactly as they are on a page you paste by hand. The cost is
+    one picker call and up to WEB_FOLLOW_LINKS extra fetches per turn, so on
+    slow hardware ``WEB_FOLLOW_ON_SEARCH=0`` puts it back to pasted URLs only.
+    """
+    return _flag("WEB_FOLLOW_ON_SEARCH")
+
+
+def get_web_max_hops() -> int:
+    """How many times retrieval may follow links outward from where it started.
+
+    1 — the default — is one hop: the pages first retrieved may have their
+    links followed once, and there it stops. 2 lets a page reached by following
+    be followed *from* in turn, which is what finds the specification linked
+    from the release note linked from the search result. Each hop costs another
+    picker call and another round of fetches, so this is bounded hard at 3.
+
+    0 turns following off, the same as WEB_FOLLOW_LINKS=0.
+    """
+    return max(0, min(3, int(_number("WEB_MAX_HOPS", 1))))
+
+
+def get_web_fetch_hops() -> int:
+    """How many times the *answering* model may ask for a link to be read.
+
+    Off by default, and a different thing from WEB_MAX_HOPS. That one is the
+    app deciding, during retrieval, that a page looks worth opening; this is
+    the model that has read the pages saying "the answer is not here, it is
+    behind that link" and being given it. It is the better signal — nothing
+    judges whether a page answered the question as well as the model trying to
+    answer from it — and it is the more expensive, because each request spends
+    a whole generation that produced no reply.
+
+    So: 1 is a sensible setting on hardware that can afford it, and 0 is the
+    default because on a single-GPU desktop a wasted generation is the
+    difference between a reply in four seconds and a reply in twenty.
+    """
+    return max(0, min(3, int(_number("WEB_FETCH_HOPS", 0))))
+
+
+def get_web_link_scope() -> str:
+    """Which links the model is *shown*: ``"all"`` (default) or ``"site"``.
+
+    Shown, not fetched — this is the "what else is out there" list, and nothing
+    on it is retrieved. It used to be same-site only, which quietly hid the
+    single most useful link on a page: the outside source it cites. A model
+    that cannot see that link cannot tell you where to look next, which is the
+    whole job of the list. ``WEB_LINK_SCOPE=site`` restores the old behaviour.
+
+    What may be *followed* is a separate, stricter setting — see
+    ``get_web_follow_scope``.
+    """
+    value = os.getenv("WEB_LINK_SCOPE", "all").strip().lower()
+    return value if value in ("all", "site") else "all"
+
+
+def get_web_follow_scope() -> str:
+    """Which links may actually be opened: ``"site"`` (default) or ``"any"``.
+
+    Deliberately stricter than what is shown. A link is chosen by a model out
+    of content written by a stranger, so following one off-site is a much
+    larger surface than reading another page of a site the user already chose —
+    for very little gain, since the search itself is the better way to reach
+    another site. Every URL goes through the address guard either way;
+    ``WEB_FOLLOW_SCOPE=any`` only removes the same-site restriction on top of it.
+    """
+    value = os.getenv("WEB_FOLLOW_SCOPE", "site").strip().lower()
+    return value if value in ("site", "any") else "site"
+
+
+def get_web_links_in_context() -> int:
+    """How many linked pages to list per document, before the budget trims it.
+
+    The list is ranked against the question, so the first few are the ones
+    worth having; this is the ceiling, not the usual number. 0 turns the list
+    off entirely.
+    """
+    return max(0, min(50, int(_number("WEB_LINKS_IN_CONTEXT", 25))))
 
 
 def get_photo_meta_default() -> bool:

@@ -138,7 +138,13 @@ All settings are environment variables (the server manager injects them):
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_DISTILLER_MODEL` | *(unset)*                 | Small model that cuts each fetched page down to what bears on your question. Unset means off — see "Distilling pages". Measured 12,016 → 231 characters on a two-page turn |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
-| `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
+| `WEB_FOLLOW_LINKS`  | `2`                         | How many linked pages may also be read, per hop. Same site by default; `0` disables following everywhere |
+| `WEB_FOLLOW_ON_SEARCH` | `1`                      | Whether pages found by *searching* have their links followed too, not just a URL you pasted. `0` restores the old pasted-URL-only behaviour |
+| `WEB_MAX_HOPS`      | `1`                         | How far retrieval may follow links outward. `1` is one hop; `2` lets a followed page be followed *from* — the spec linked from the release note linked from the search result. Capped at `3` |
+| `WEB_FETCH_HOPS`    | `0`                         | How many times the answering model may ask for a numbered link to be read before it answers. Off by default: each request spends a whole generation that produced no reply — see "Asking to read a link" |
+| `WEB_LINKS_IN_CONTEXT` | `25`                     | How many links to list per page, before the context budget trims it. The list is ranked against your question, so this is the ceiling rather than the usual number. `0` turns the list off |
+| `WEB_LINK_SCOPE`    | `all`                       | Which links the model is *shown*: `all`, or `site` for same-site only (what it used to be). Nothing on this list is fetched |
+| `WEB_FOLLOW_SCOPE`  | `site`                      | Which links may actually be **opened**. Deliberately stricter than what is shown; `any` lifts the same-site restriction |
 | `WEB_SHARE_LOCATION` | `1`                        | Whether a photo's GPS position may inform a search query. `0` keeps the date and camera and drops the position — see "Photo details" |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
@@ -333,17 +339,34 @@ Two paths:
   the page's *readable body* — nav, footers, citations and "edit" links are
   already excluded — and does two things with them:
 
-  1. **A link map** goes to the model as context: what else the site covers, and
+  1. **A link map** goes to the model as context: what else is covered, and
      where. It's marked as not-read, so the model can say "the hinge page covers
-     that" rather than inventing what's on it.
+     that" rather than inventing what's on it. Each link is numbered `[n.m]` —
+     document `n`, link `m` — so the model can point at one exactly.
   2. **A couple are actually opened.** A small model picks which links look like
      they answer the question, and those pages are fetched too.
 
-  One hop, same site only, and every URL still goes through the address guard.
-  A link is chosen by a model out of content written by a stranger, so it gets
-  no more trust than a pasted URL does — following an arbitrary outbound link
-  would be a much larger surface for very little gain. `WEB_FOLLOW_LINKS=0`
-  turns the following off; the link map stays.
+  Every URL still goes through the address guard, and by default only same-site
+  links may be *opened*. A link is chosen by a model out of content written by a
+  stranger, so it gets no more trust than a pasted URL does — following an
+  arbitrary outbound link would be a much larger surface for very little gain.
+  `WEB_FOLLOW_SCOPE=any` lifts that if you want it. `WEB_FOLLOW_LINKS=0` turns
+  the following off; the link map stays.
+
+  **The list is ranked against your question**, not taken in page order. This
+  matters more than it sounds: a Wikipedia article has hundreds of links and
+  room for a couple of dozen, and the first couple of dozen *in document order*
+  are the site's navigation furniture every single time. The link that answered
+  the question was reliably somewhere in the ones that got dropped. Ranking is
+  lexical — question words against anchor text and URL slug — so it costs no
+  model call and runs on every page of every web turn.
+
+  **Links that leave the site are shown too**, tagged `(external)`. They used to
+  be dropped, which quietly hid the most useful link on a lot of pages: the
+  outside source being cited. Showing one is not fetching it — `WEB_FOLLOW_SCOPE`
+  still governs what may be opened — but a model that cannot *see* the link
+  cannot tell you where to look next, which is the whole job of the list.
+  `WEB_LINK_SCOPE=site` restores the old same-site-only list.
 - **Otherwise a planner turns your message into search queries.** A short,
   cheap, deterministic call replies with either `NONE` or up to three `Q: `
   lines — search-engine keywords, each attacking the topic from a different
@@ -360,10 +383,60 @@ Two paths:
   search, which from the outside looks identical to a search that found
   nothing.
 
+  **Pages found this way have their links followed too.** For a long time they
+  did not, which left out the case that comes up most: a search lands on the
+  overview page and the specifics are one click away, exactly as they are on a
+  page you paste by hand. The picker is asked once for the whole turn rather
+  than once per page — three results from three sites is one question, and
+  asking per page means three model calls, none of which can see that the best
+  link on the turn was on result two. `WEB_FOLLOW_ON_SEARCH=0` turns it off.
+
 Both the planner and the answering model are told today's date. A model's sense
 of "now" is its training cutoff, which is how *"the latest release"* gets
 answered with a version from two years ago and how the planner writes queries
 anchored to the wrong year.
+
+### Going deeper
+
+Two settings control how far retrieval travels from where it started, and they
+answer different questions.
+
+`WEB_MAX_HOPS` is **the app deciding**. At `1` — the default — the pages first
+retrieved may have their links followed once, and there it stops. At `2` a page
+reached by following can be followed *from* in turn, which is what finds the
+specification linked from the release note linked from the search result. Each
+hop is another picker call and another round of fetches, on hardware that is
+usually running the answering model at the same time, so it is capped at `3`.
+
+`WEB_FETCH_HOPS` is **the model deciding**, and it is off by default. With it
+on, the model that has actually read the pages is told it may reply with:
+
+```
+FETCH: [2.3]
+```
+
+…and nothing else, naming one of the numbered links. The page is fetched, and
+the model is asked again with it in front of it. The request is never shown to
+you — it is the machinery talking, not the reply — and it is recognised before
+it is displayed, so you don't watch a marker arrive and then get overwritten.
+
+This is the better signal of the two: nothing judges whether a page answered
+the question as well as the model trying to answer from it. It is also the more
+expensive, because a request spends a whole generation that produced no reply.
+On a single-GPU desktop that is the difference between a reply in four seconds
+and a reply in twenty, which is why it is opt-in.
+
+The offer is only made while a hop remains **and** there are numbered links to
+name, and it is withdrawn as soon as it is spent — a model invited to ask for
+something that cannot be delivered just burns a generation. Ask for a number
+that was never on the list and the app says so in the panel and asks again
+rather than leaving a marker where your answer should be.
+
+However these settings multiply out, retrieval never puts more than **eight**
+documents in front of the model. At the permitted maximums the arithmetic
+reaches fifteen, and fifteen documents do not fit in any window this app runs
+at — each would get its 800-character floor and overrun the context budget
+several times over.
 
 ### Planner model
 
