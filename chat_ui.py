@@ -723,6 +723,11 @@ _PAGE = r"""<!doctype html>
       <symbol id="i-shot" viewBox="0 0 24 24"><path d="M9 3H5a2 2 0 0 0-2 2v4M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4M15 21h4a2 2 0 0 0 2-2v-4"/></symbol>
       <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+      <!-- Two sheets, the usual "copy" shorthand. On a phone this button opens
+           the share sheet rather than the clipboard, but the meaning people
+           read off the icon — "take this text away with me" — is the same. -->
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
+      <symbol id="i-eraser" viewBox="0 0 24 24"><path d="M4 16l8-8 6 6-5 5H7z"/><path d="M9 21h11"/></symbol>
       <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
       <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></symbol>
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.4A8.6 8.6 0 0 1 9.6 3.5a8.6 8.6 0 1 0 10.9 10.9z"/></symbol>
@@ -923,6 +928,14 @@ _PAGE = r"""<!doctype html>
               <button id="camera" class="iconbtn" type="button" title="Take a photo" hidden><svg class="i" aria-hidden="true"><use href="#i-camera"></use></svg></button>
               <button id="shot" class="iconbtn" type="button" title="Capture a screenshot to analyse" hidden><svg class="i" aria-hidden="true"><use href="#i-shot"></use></svg></button>
               <button id="mic" class="iconbtn" type="button" title="Speak (offline transcription)" hidden><svg class="i i-mic" aria-hidden="true"><use href="#i-mic"></use></svg><svg class="i i-stop" aria-hidden="true"><use href="#i-stop"></use></svg></button>
+              <!-- Take the text somewhere else instead of sending it here.
+                   Dictating a message for an app with no voice input is a
+                   whole use of this page on its own, and before these two the
+                   only ways out of the box were the Send button and selecting
+                   the text by hand on a phone keyboard. Both appear only with
+                   something in the box, so an empty composer is unchanged. -->
+              <button id="copyOut" class="iconbtn" type="button" hidden title="Copy this text — or share it straight to another app"><svg class="i" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+              <button id="clearOut" class="iconbtn" type="button" hidden title="Empty the box"><svg class="i" aria-hidden="true"><use href="#i-eraser"></use></svg></button>
               <button class="primary" id="send" type="button">Send</button>
               <button class="danger" id="stop" type="button" hidden>Stop</button>
             </div>
@@ -941,6 +954,8 @@ _PAGE = r"""<!doctype html>
       const stopBtn  = document.getElementById("stop");
       const newBtn   = document.getElementById("newChat");
       const micBtn   = document.getElementById("mic");
+      const copyOutBtn  = document.getElementById("copyOut");
+      const clearOutBtn = document.getElementById("clearOut");
       const voiceBar = document.getElementById("voicebar");
       const voiceSel = document.getElementById("voiceModel");
       const headsetEl = document.getElementById("headset");
@@ -1019,6 +1034,19 @@ _PAGE = r"""<!doctype html>
       function autosize() {
         inputEl.style.height = "auto";
         inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.4) + "px";
+        syncComposerTools();
+      }
+
+      // Copy and clear are only meaningful with something to act on, and an
+      // empty composer is the state this page spends most of its life in — so
+      // they appear with the first character and go again when the box empties.
+      // Hung off autosize() rather than the input event because dictation sets
+      // .value directly, which fires no input event: the button would not have
+      // appeared for the one case it was built for.
+      function syncComposerTools() {
+        const has = !!inputEl.value.trim();
+        if (copyOutBtn) copyOutBtn.hidden = !has;
+        if (clearOutBtn) clearOutBtn.hidden = !has;
       }
       // Coalesce to one layout per frame. Writing the bubble then reading
       // scrollHeight on every token forces a synchronous re-wrap of the whole
@@ -1378,6 +1406,14 @@ _PAGE = r"""<!doctype html>
       // Telling someone to press Ctrl+C is only useful if the text is selected.
       function selectText(node) {
         try {
+          // A form field keeps its text in .value, not in child nodes, so a
+          // Range over its contents selects nothing at all — and "Press Ctrl+C"
+          // would then copy an empty selection while looking like it worked.
+          if (node && typeof node.select === "function") {
+            node.focus();
+            node.select();
+            return;
+          }
           const range = document.createRange();
           range.selectNodeContents(node);
           const sel = window.getSelection();
@@ -2115,6 +2151,49 @@ _PAGE = r"""<!doctype html>
         return view;
       }
 
+      // Getting text out of this page and into something else. Three routes,
+      // because no single one works everywhere:
+      //
+      //   1. The share sheet, on a touch device. This is the good one: it
+      //      reaches WhatsApp, Signal, Messages — the apps you would actually
+      //      paste into — without a clipboard round trip, and it works on a
+      //      plain-HTTP page where navigator.clipboard does not exist at all.
+      //   2. The clipboard, on a desktop or where sharing is unavailable.
+      //   3. Selecting the text and saying which keys to press, when the page
+      //      is not a secure context. Nothing else is possible there, and an
+      //      inert button that looks like it worked is worse than a hint.
+      //
+      // `onDone` is told which one happened so the caller can say so. Silence
+      // is the enemy here: a copy that did nothing looks exactly like a copy
+      // that worked, and the user finds out in the other app.
+      async function shareOrCopy(text, selectable, onDone) {
+        if (!text) return false;
+        if (navigator.share && window.matchMedia &&
+            window.matchMedia("(pointer: coarse)").matches) {
+          try { await navigator.share({ text: text }); onDone("shared"); return true; }
+          catch (e) {
+            // Dismissing the share sheet rejects too. That is not a failure to
+            // report — falling through to "select and copy" made cancel look
+            // like an error.
+            if (e && e.name === "AbortError") { onDone("cancelled"); return false; }
+          }
+        }
+        if (!navigator.clipboard) {
+          if (selectable) selectText(selectable);
+          onDone("manual");
+          return false;
+        }
+        try {
+          await navigator.clipboard.writeText(text);
+          onDone("copied");
+          return true;
+        } catch (e) {
+          if (selectable) selectText(selectable);
+          onDone("manual");
+          return false;
+        }
+      }
+
       // Copying a whole reply had no affordance at all — only individual code
       // blocks did. The raw markdown, not the rendered text, because that is
       // what pastes usefully into notes or an editor.
@@ -2133,23 +2212,10 @@ _PAGE = r"""<!doctype html>
         btn.addEventListener("click", async () => {
           const text = view.raw || view.bubble.textContent || "";
           if (!text) return;
-          // Share beats clipboard on a phone: it reaches the apps you would
-          // actually paste into, and works without a secure-context clipboard.
-          if (navigator.share && window.matchMedia &&
-              window.matchMedia("(pointer: coarse)").matches) {
-            try { await navigator.share({ text: text }); return; }
-            catch (e) {
-              // Dismissing the share sheet rejects too. That is not a failure
-              // to report — falling through to "select and copy" made cancel
-              // look like an error.
-              if (e && e.name === "AbortError") return;
-            }
-          }
-          if (!navigator.clipboard) { selectText(view.bubble); flash("Press Ctrl+C"); return; }
-          try {
-            await navigator.clipboard.writeText(text);
-            flash("Copied");
-          } catch (e) { selectText(view.bubble); flash("Press Ctrl+C"); }
+          await shareOrCopy(text, view.bubble, (how) => {
+            if (how === "copied") flash("Copied");
+            else if (how === "manual") flash("Press Ctrl+C");
+          });
         });
         view.meta.parentElement.insertBefore(btn, view.meta.nextSibling);
         view.copyBtn = btn;
@@ -4752,6 +4818,36 @@ _PAGE = r"""<!doctype html>
       stopBtn.addEventListener("click", stop);
       newBtn.addEventListener("click", newChat);
       micBtn.addEventListener("click", toggleMic);
+
+      // Dictate here, then take the words to an app that has no dictation of
+      // its own. On a phone the share sheet is the whole journey — tap, pick
+      // the messaging app, done — and the clipboard is the desktop's version
+      // of the same thing.
+      copyOutBtn.addEventListener("click", async () => {
+        const text = inputEl.value.trim();
+        if (!text) return;
+        // Cancelling the share sheet says nothing, because the user already
+        // knows they cancelled. Every other outcome is reported: a copy that
+        // silently did nothing is only discovered in the other app, with the
+        // words gone.
+        await shareOrCopy(text, inputEl, (how) => {
+          if (how === "copied") hintEl.textContent = "Copied — paste it wherever you like.";
+          else if (how === "shared") hintEl.textContent = "Shared.";
+          else if (how === "manual") hintEl.textContent = "Selected — press Ctrl+C to copy.";
+        });
+      });
+
+      // Its own button rather than clearing after a copy. Copying is not a
+      // decision to throw the text away — you might copy it *and* send it —
+      // and a composer that empties itself when you did not ask it to is the
+      // kind of surprise that costs a whole dictated paragraph.
+      clearOutBtn.addEventListener("click", () => {
+        inputEl.value = "";
+        autosize();
+        hintEl.textContent = "";
+        inputEl.focus();
+      });
+
       inputEl.addEventListener("input", autosize);
       inputEl.addEventListener("keydown", (e) => {
         // isComposing / keyCode 229: Enter is accepting an IME candidate, not

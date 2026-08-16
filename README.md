@@ -197,12 +197,14 @@ The mic button only shows when the `vosk` package is installed; without it the
 app runs exactly as before. Audio is captured in the browser, downsampled to
 16 kHz mono, and posted to `/api/transcribe` — it never leaves your network.
 
-**Headphones (on by default).** Next to the language picker is a 🎧 **Headphones**
-tickbox, ticked out of the box. It turns off browser echo cancellation, which
-exists to stop speaker output leaking into the mic and has nothing to cancel on
-headphones — while its residual suppressor ducks the mic whenever playback is
-loud, so leaving it on makes you go silent over music. Untick it on laptop
-speakers, where the leak is real and cancelling it helps.
+**Raw mic (on by default).** 🎙 **Raw mic** is ticked out of the box. It turns
+off browser echo cancellation, which exists to stop speaker output leaking into
+the mic and has nothing to cancel on headphones — while its residual suppressor
+ducks the mic whenever playback is loud, so leaving it on makes you go silent
+over music. Untick it on laptop speakers, where the leak is real and cancelling
+it helps. (It is named for what it does rather than for when to use it: called
+"Headphones", everyone not wearing any unticked it, which turned the very thing
+that was spoiling dictation back on.)
 
 **Auto-send.** ⚡ **Auto-send** sends the message as soon as speech is
 transcribed, instead of waiting for the Send button. Off by default.
@@ -219,6 +221,38 @@ that adapts to the room. A pause of 900 ms ends an utterance and anything
 shorter than 300 ms is treated as a noise blip rather than speech. If a reply is
 still streaming when you finish talking, the text waits in the box rather than
 being dropped.
+
+### Dictating for somewhere else
+
+Offline speech-to-text is useful well beyond talking to a model: plenty of apps
+have no dictation of their own, and this page can be the one that does. Dictate
+here, then take the words away.
+
+Once there is anything in the box, two buttons appear in the composer beside
+the mic:
+
+- 📋 **Copy** — on a phone this opens the **share sheet**, which is the whole
+  journey in one tap: pick WhatsApp, Signal, Messages, and the text arrives
+  there. No clipboard, and it works on a plain-HTTP page where the clipboard API
+  does not exist at all. On a desktop it copies to the clipboard instead. Where
+  neither is available it selects the text and tells you to press Ctrl+C —
+  because a button that quietly does nothing is worse than one that asks for
+  help. Whichever happened is said in the hint line underneath; you should never
+  have to find out in the other app.
+- 🩹 **Clear** — empties the box for the next one.
+
+Copying deliberately does **not** clear the box. Copying is not a decision to
+throw the text away — you might copy it and then send it here too — and a
+composer that empties itself unbidden costs a whole dictated paragraph the one
+time it is wrong.
+
+Both buttons are hidden while the box is empty, so nothing about the page
+changes until you have something to act on.
+
+For this use, leave ⚡ **Auto-send** off — it hands each utterance straight to
+the model, which is the opposite of what you want here. 🔁 **Continuous** is
+worth turning *on*: it keeps the mic open through pauses, so a long message can
+be spoken in several goes and accumulates in the box.
 
 ### Background noise
 
