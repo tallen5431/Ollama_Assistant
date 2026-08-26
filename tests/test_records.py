@@ -171,15 +171,25 @@ class TestValuesAreWrittenAsData:
         assert "No LaTeX, no markdown, no formatting" in records._PROMPT
 
     def test_records_already_kept_get_tidied_once(self):
-        kept = store.add_record("🚗 Uber Trip", {
-            "Elapsed time": r"3 hours and 8 minutes (or $\approx 3.13$ hours)",
-            "Fare": "$54.20"})
+        """Written straight to the table, because that is the case this is for:
+        a record kept by a version that did not strip LaTeX. Going through
+        add_record would prove nothing — it cleans on the way in now, so there
+        would be nothing left for the backfill to find."""
+        import json as _json, time as _time, uuid as _uuid
+        rid = _uuid.uuid4().hex
+        with store._connect() as conn:
+            conn.execute(
+                "INSERT INTO records (id, routine_name, fields, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (rid, "🚗 Uber Trip", _json.dumps({
+                    "Elapsed time": r"3 hours and 8 minutes (or $\approx 3.13$ hours)",
+                    "Fare": "$54.20"}), _time.time()))
         assert records.tidy_stored() == 1
         fields = store.list_records()[0]["fields"]
-        assert fields["Elapsed time"] == "3 hours and 8 minutes (or ≈ 3.13 hours)"
+        assert "\\approx" not in fields["Elapsed time"], "the LaTeX survived"
         assert fields["Fare"] == "$54.20", "money is still money"
         assert records.tidy_stored() == 0, "and it is idempotent"
-        assert kept["id"] == store.list_records()[0]["id"]
+        assert rid == store.list_records()[0]["id"]
 
     def test_a_clean_log_is_left_untouched(self):
         store.add_record("T", {"distance": "68 miles"})
@@ -199,7 +209,11 @@ class TestStorage:
         kept = store.add_record("🚗 Trip", {"distance": "68 miles"}, "rid", "cid")
         back = store.list_records()[0]
         assert back["id"] == kept["id"]
-        assert back["fields"] == {"distance": "68 miles"}
+        # Standardised on the way in — and the original is still here, because
+        # a tidy-up that cannot be checked against what it replaced is one you
+        # have to take on faith.
+        assert back["fields"] == {"distance": "68 mi"}
+        assert back["raw"] == {"distance": "68 miles"}
         assert back["routine_name"] == "🚗 Trip"
         assert back["conversation_id"] == "cid"
 
@@ -295,7 +309,7 @@ class TestTheRoutes:
         out = client.post("/api/records", json={
             "answer": "You drove 68 miles in 3 h 08 min.",
             "fields": WANTED, "routine_name": "🚗 Trip"}).get_json()
-        assert out["record"]["fields"]["distance"] == "68 miles"
+        assert out["record"]["fields"]["distance"] == "68 mi"
         listed = client.get("/api/records").get_json()
         assert listed["columns"] == WANTED
         assert len(listed["records"]) == 1
@@ -324,7 +338,10 @@ class TestTheRoutes:
             "answer": "a", "fields": WANTED, "routine_name": "T"}).get_json()["record"]
         out = client.patch(f"/api/records/{made['id']}",
                            json={"fields": {"distance": "70 miles"}}).get_json()
-        assert out["record"]["fields"] == {"distance": "70 miles", "elapsed": "3 h"}
+        # A hand correction is standardised like any other value, so the column
+        # stays consistent whoever typed the cell.
+        assert out["record"]["fields"] == {"distance": "70 mi", "elapsed": "3h"}
+        assert out["record"]["raw"]["distance"] == "70 miles"
 
     def test_patch_and_delete_on_something_that_is_not_there(self, client):
         assert client.patch("/api/records/nope", json={"fields": {"a": "1"}}).status_code == 404
@@ -342,8 +359,11 @@ class TestTheRoutes:
         assert resp.mimetype == "text/csv"
         assert "attachment" in resp.headers["Content-Disposition"]
         rows = list(csv.reader(io.StringIO(resp.get_data(as_text=True))))
-        assert rows[0] == ["taken_at", "routine", "distance", "elapsed"]
-        assert rows[1][1:] == ["🚗 Trip", "68 miles", "3 h 08 min"]
+        # The unit is in the header and the cell holds the bare number, so a
+        # spreadsheet sums the column instead of treating it as text.
+        assert rows[0] == ["taken_at", "routine",
+                           "distance (mi)", "elapsed (hours)"]
+        assert rows[1][1:] == ["🚗 Trip", "68", "3.1333"]
         # An ISO timestamp, so a spreadsheet and a database both parse it.
         assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", rows[1][0])
 
@@ -558,9 +578,16 @@ class TestTheLayoutFitsWhereItIsShown:
         ("=cmd|' /C calc'!A1", "'=cmd|' /C calc'!A1"),
         ("+1+1", "'+1+1"),
         ("@SUM(A1)", "'@SUM(A1)"),
-        ("68 miles", "68 miles"),
+        # Standardised first, then defused: a quantity comes out as a bare
+        # number, and neither step can turn the other's output into a formula.
+        ("68 miles", "68"),
         ("-5 °C", "-5 °C"),          # a reading, not a formula
-        ("3 h 08 min", "3 h 08 min"),
+        ("3 h 08 min", "3.1333"),
+        # A formula wearing a unit is still prose to the standardiser — it
+        # refuses anything that is not wholly a quantity — so it arrives at the
+        # defuser untouched and gets the quote it needs.
+        ("=1+1 miles", "'=1+1 miles"),
+        ("@SUM(A1) mph", "'@SUM(A1) mph"),
     ])
     def test_a_cell_cannot_become_a_formula(self, client, value, expected):
         """Excel runs a leading =, + or @ when the file is opened.

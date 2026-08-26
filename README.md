@@ -1172,6 +1172,66 @@ not inside the stream, so a model that's asleep or that returns something
 unparseable costs you a row and nothing else. Nothing extractable means no row,
 rather than a blank one — a blank record is worse than none.
 
+### One shape per column
+
+The fields are written by whichever model answered, in whatever words it
+reached for that day. A real log had one trip recorded twice, five minutes
+apart, agreeing about every fact and about none of the formatting:
+
+```
+"102,072"    "102,072 mi"      "100,409 miles"
+93           93 mi             66 miles
+$1.2465      $1.24 per mile    $0.55 per mile ($36.00 / 66 mi)
+21.2 mph     ≈ 23.21 mph       21.70 MPH
+```
+
+Every one of those is correct and none of them sorts against the row above it.
+So a value is put into a standard shape on its way in, and records kept before
+that existed are rewritten once at startup.
+
+**The rule: the presentation is standardised, the number never is.** `$1.2465`
+does not become `$1.25` and `$36.00` does not become `$36` — rounding is a
+change to the data. What comes off is only decoration: a thousands separator, a
+repeated unit, an "approximately", a bracket showing the working. And for any
+value that changed, **the model's own wording is kept alongside it**, so the
+tidying can always be checked against what it replaced.
+
+Two things it deliberately will not do:
+
+- **Rewrite prose.** A value that merely *contains* a number is a sentence.
+  "54 miles to Brighton" stays exactly that; turning it into "54 mi" would
+  delete where the trip went and take the word Brighton out of search with it.
+- **Guess a unit from one value.** Whether a bare `93` is ninety-three miles is
+  a fact only its column knows, so the column votes: a single value that names
+  its unit settles it for the rest, and a column that is mostly notes stays
+  notes.
+
+Timestamps come out as `2026-08-25 20:06 UTC-04:00` — sortable, and keeping the
+offset, which is the one part of a timestamp you cannot recover by looking at it
+again. A stated date with no time stays a date rather than being padded to
+midnight, which would read as a measurement rather than a gap.
+
+### Checking a log
+
+Standardising a value is safe, so it happens on its own. Changing a *number* is
+not, so nothing does it for you:
+
+```bash
+.venv/bin/python tools/check_records.py
+.venv/bin/python tools/check_records.py --csv trips.csv
+.venv/bin/python tools/check_records.py --routine "🚗 Uber Trip"
+```
+
+It reports three things and edits nothing. **Rows that disagree with their own
+arithmetic** — the derived fields are a model doing sums in prose, and a model
+given no duration will still produce an hourly rate. **The same run recorded
+twice.** And **a preview of what standardising would change**, so you can see it
+before it happens.
+
+Run against the log those samples came from, it found the same trip logged
+twice at $26.23/hour and $23.19/hour — the second row had no start or end time
+in it at all, so its rate had been worked out from nothing.
+
 **Getting it out.** Two links in the Records pane, and both are ordinary
 endpoints, so another machine can pull them:
 
@@ -1184,6 +1244,13 @@ curl -s 'http://nucbox:8070/api/records.csv?routine=🚗%20Trip'
 The CSV timestamps are ISO 8601, so a spreadsheet and a database both parse
 them, and the columns are the union of every field across the log — a routine
 whose fields changed doesn't lose the older runs' data.
+
+**The unit goes in the header and the cell holds the number alone** —
+`Total earnings (USD)` with `115.94` under it, `Distance traveled (mi)` with
+`93`. A cell reading `$115.94` or `93 mi` is *text* to a spreadsheet: it will
+not sum, it will not chart, and it sorts `100 mi` before `93 mi`. Timestamps
+and free text are written out as they stand, because a number would say less
+than they do.
 
 Records outlive the routine that made them. Deleting **🚗 Trip** doesn't touch
 a year of trips; the routine's name is copied into each row rather than looked

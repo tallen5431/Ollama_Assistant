@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+import values
 from config import logger
 
 _SCHEMA = """
@@ -103,6 +104,12 @@ _ADDED_COLUMNS = (
     ("messages", "steps", "TEXT"),
     # What a routine records after each run: a JSON list of field names.
     ("routines", "record", "TEXT"),
+    # The value exactly as the model wrote it, for any field that normalising
+    # changed. Kept because normalising is a judgement about presentation and
+    # judgements can be wrong: "≈ 23.21 mph" becoming "23.21 mph" drops the
+    # model's own admission that it was estimating, and the only honest way to
+    # tidy a record is to still have what it said before.
+    ("records", "raw", "TEXT"),
 )
 
 _TITLE_MAX = 60
@@ -791,6 +798,10 @@ def create_starters() -> List[Dict[str, Any]]:
 # joined and why deleting a routine leaves its records alone.
 
 _RECORD_VALUE_MAX = 300       # a field, not an essay
+# How many of a routine's runs are consulted when deciding what kind of
+# value a column holds. A column does not change its mind often, and the
+# vote is only ever used to read the column it came from.
+_KIND_SAMPLE = 200
 
 
 def _record_row(row: sqlite3.Row) -> Dict[str, Any]:
@@ -798,14 +809,61 @@ def _record_row(row: sqlite3.Row) -> Dict[str, Any]:
         fields = json.loads(row["fields"])
     except (TypeError, ValueError):
         fields = {}
+    raw = _loads(row["raw"]) if "raw" in row.keys() else {}
     return {
         "id": row["id"],
         "routine_id": row["routine_id"],
         "routine_name": row["routine_name"],
         "conversation_id": row["conversation_id"],
         "fields": fields if isinstance(fields, dict) else {},
+        # Only the fields normalising actually changed, so an untouched record
+        # carries nothing extra.
+        "raw": raw if isinstance(raw, dict) else {},
         "created_at": row["created_at"],
     }
+
+
+def _column_kinds(routine_name: str, extra: Dict[str, str],
+                  conn: Optional[sqlite3.Connection] = None) -> Dict[str, str]:
+    """What kind of value each of a routine's columns holds.
+
+    Decided across the column rather than per value, because per value it
+    cannot be decided at all: "102,072" is a bare number and "102,072 mi" is a
+    distance, and they are the same odometer written by the same routine a
+    minute apart. Neighbours are the only evidence there is.
+
+    ``extra`` is the record being written, which votes alongside the ones
+    already stored — for the first run of a new routine it is the only vote.
+    """
+    columns: Dict[str, List[str]] = {name: [text] for name, text in extra.items()}
+    rows = []
+    if routine_name:
+        query = ("SELECT fields FROM records WHERE routine_name = ?"
+                 " ORDER BY created_at DESC LIMIT ?")
+        if conn is not None:
+            rows = conn.execute(query, (routine_name, _KIND_SAMPLE)).fetchall()
+        else:
+            with _connect() as own:
+                rows = own.execute(query, (routine_name, _KIND_SAMPLE)).fetchall()
+    for row in rows:
+        stored = _loads(row["fields"])
+        if not isinstance(stored, dict):
+            continue
+        for name, text in stored.items():
+            columns.setdefault(name, []).append(str(text))
+    return {name: values.column_kind(seen) for name, seen in columns.items()}
+
+
+def _normalised(fields: Dict[str, str], kinds: Dict[str, str]) -> tuple:
+    """``(fields, raw)`` — the standard shape, and whatever it replaced."""
+    out: Dict[str, str] = {}
+    raw: Dict[str, str] = {}
+    for name, text in fields.items():
+        tidy = values.canonical(text, kinds.get(name, ""))
+        out[name] = tidy
+        if tidy != text:
+            raw[name] = text
+    return out, raw
 
 
 def _clean_fields(fields: Any) -> Dict[str, str]:
@@ -846,16 +904,21 @@ def add_record(
     rid = uuid.uuid4().hex
     name = _routine_name(routine_name) or "Routine"
     with _connect() as conn:
+        # Standardised on the way in, against what this routine's other runs
+        # look like. Doing it here rather than at extraction is deliberate:
+        # this is the only place that can see the column, and the column is
+        # what says whether a bare "93" is ninety-three miles or just 93.
+        clean, raw = _normalised(clean, _column_kinds(name, clean, conn))
         conn.execute(
             "INSERT INTO records"
-            " (id, routine_id, routine_name, conversation_id, fields, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            " (id, routine_id, routine_name, conversation_id, fields, raw, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (rid, routine_id or None, name, conversation_id or None,
-             json.dumps(clean), now),
+             json.dumps(clean), json.dumps(raw) if raw else None, now),
         )
     return {"id": rid, "routine_id": routine_id or None, "routine_name": name,
             "conversation_id": conversation_id or None, "fields": clean,
-            "created_at": now}
+            "raw": raw, "created_at": now}
 
 
 def list_records(routine_name: str = "", limit: int = 500) -> List[Dict[str, Any]]:
@@ -889,12 +952,65 @@ def update_record(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # Merged, not replaced. Correcting one cell from the table would
         # otherwise silently drop every column the edit did not mention, which
         # is a poor property for the thing you are keeping records in.
-        merged = dict(_record_row(row)["fields"])
+        current = _record_row(row)
+        merged = dict(current["fields"])
         merged.update(clean)
-        conn.execute("UPDATE records SET fields = ? WHERE id = ?",
-                     (json.dumps(_clean_fields(merged)), rid))
+        merged = _clean_fields(merged)
+        # A hand-typed correction is standardised like any other value, so the
+        # column stays consistent whoever wrote the cell. What it replaced is
+        # remembered only for the cells actually being edited: the originals
+        # already recorded for the untouched ones are still the originals.
+        kinds = _column_kinds(current["routine_name"], merged, conn)
+        merged, changed = _normalised(merged, kinds)
+        raw = {k: v for k, v in current["raw"].items() if k not in clean}
+        raw.update({k: v for k, v in changed.items() if k in clean})
+        conn.execute("UPDATE records SET fields = ?, raw = ? WHERE id = ?",
+                     (json.dumps(merged), json.dumps(raw) if raw else None, rid))
         row = conn.execute("SELECT * FROM records WHERE id = ?", (rid,)).fetchone()
     return _record_row(row) if row else None
+
+
+def normalise_stored(limit: int = 5000) -> Dict[str, int]:
+    """Put every record already kept into the standard shape.
+
+    Records written before this existed are the ones that need it most — they
+    are the whole log. Nothing is lost: a value that changes has its original
+    written to ``raw`` first, and a value already in shape is not touched at
+    all, which makes this idempotent and a no-op on a tidy log.
+
+    Grouped by routine, because the kind of a column is decided across the
+    column: one record on its own cannot tell you that its bare "93" belongs in
+    a list of miles.
+    """
+    if not db_path().exists():
+        return {"records": 0, "values": 0}
+    touched = fixed = 0
+    by_routine: Dict[str, List[Dict[str, Any]]] = {}
+    for record in list_records(limit=limit):
+        by_routine.setdefault(record["routine_name"], []).append(record)
+
+    for routine, group in by_routine.items():
+        columns: Dict[str, List[str]] = {}
+        for record in group:
+            for name, text in record["fields"].items():
+                columns.setdefault(name, []).append(str(text))
+        kinds = {name: values.column_kind(seen) for name, seen in columns.items()}
+        for record in group:
+            tidy, changed = _normalised(record["fields"], kinds)
+            if tidy == record["fields"]:
+                continue
+            # The first original wins. Running this twice must not overwrite
+            # what the model wrote with what the first pass made of it.
+            raw = dict(changed)
+            raw.update(record["raw"])
+            with _connect() as conn:
+                conn.execute("UPDATE records SET fields = ?, raw = ? WHERE id = ?",
+                             (json.dumps(tidy), json.dumps(raw), record["id"]))
+            touched += 1
+            fixed += len(changed)
+    if touched:
+        logger.info("Standardised %d value(s) across %d record(s)", fixed, touched)
+    return {"records": touched, "values": fixed}
 
 
 def delete_record(rid: str) -> bool:

@@ -38,6 +38,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import authz
 import records
 import store
+import values
 import voice
 import web
 from chat_ui import render_page
@@ -173,6 +174,16 @@ try:
         logger.info("Tidied LaTeX out of %d stored record(s)", _tidied)
 except Exception:  # noqa: BLE001 - a tidy-up must never stop the app starting
     logger.exception("Could not tidy stored records")
+
+# And the same for the shape of the values themselves: "102,072", "102,072 mi"
+# and "100,409 miles" are one column written three ways, none of which sorts
+# against the others. Records already kept are the ones that need this most,
+# since they are the whole log. Lossless — a value that changes has the model's
+# own wording written to `raw` first — and idempotent, so a tidy log is a no-op.
+try:
+    store.normalise_stored()
+except Exception:  # noqa: BLE001 - same rule: never stop the app starting
+    logger.exception("Could not standardise stored records")
 
 
 @app.route("/manifest.webmanifest", methods=["GET"])
@@ -656,13 +667,26 @@ def api_records_csv() -> Any:
     """
     rows = store.list_records(str(request.args.get("routine") or ""))
     columns = store.record_columns(rows)
+    # The unit moves to the header and the cell keeps the number alone. A cell
+    # reading "$115.94" or "93 mi" is text to a spreadsheet: it will not sum, it
+    # will not chart, and it sorts "100 mi" before "93 mi". Under a header
+    # saying "Total earnings (USD)" the bare 115.94 says exactly as much and is
+    # a number. Timestamps and prose are written out as they stand.
+    kinds, heads = {}, []
+    for name in columns:
+        seen = [r["fields"].get(name, "") for r in rows]
+        kinds[name] = values.column_kind(seen)
+        unit = values.unit_label(kinds[name], seen)
+        heads.append(f"{name} ({unit})" if unit else name)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["taken_at", "routine"] + columns)
+    writer.writerow(["taken_at", "routine"] + heads)
     for row in rows:
         stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
-        writer.writerow([stamp, _csv_safe(row["routine_name"])] +
-                        [_csv_safe(row["fields"].get(name, "")) for name in columns])
+        writer.writerow(
+            [stamp, _csv_safe(row["routine_name"])] +
+            [_csv_safe(values.number_of(row["fields"].get(name, ""), kinds[name]))
+             for name in columns])
     return Response(
         buffer.getvalue(),
         mimetype="text/csv",
