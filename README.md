@@ -41,8 +41,11 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   so "two odometer photos → how far did I drive and how long did it take" is two
   taps. Four are shipped. See "Routines" below.
 - 🗒 **Records** — a routine can keep a row per run. Two odometer photos become
-  *distance 68 miles · elapsed 3 h 08 min* in a table you can correct and pull
-  out as CSV or JSON with `curl`. See "Records" below.
+  *distance 68 mi · elapsed 3h 08m* in a table you can correct and pull out as
+  CSV or JSON with `curl`. Fields can say what they hold and which of them are
+  arithmetic over the others — those are worked out here rather than by a model
+  doing sums in prose, so a rate with nothing to divide by comes out empty
+  instead of invented. See "Records" below.
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
@@ -1171,6 +1174,58 @@ It never costs you an answer. The extraction runs after the reply has finished,
 not inside the stream, so a model that's asleep or that returns something
 unparseable costs you a row and nothing else. Nothing extractable means no row,
 rather than a blank one — a blank record is worse than none.
+
+### Saying what a field holds
+
+A field can be a bare name, as it always was — read it off the answer and work
+out what it is from the column. It can also say what it holds, and it can say
+that it is arithmetic over the others:
+
+```
+Start odometer: distance
+End odometer: distance
+Distance traveled = End odometer - Start odometer
+Start time: timestamp
+End time: timestamp
+Elapsed time = End time - Start time
+Total earnings: money
+Earnings per mile = Total earnings / Distance traveled
+Earnings per hour = Total earnings / Elapsed time
+Average speed = Distance traveled / Elapsed time
+```
+
+Ten columns, and **the model is asked for five**. The rest are worked out here,
+in Python, from those five.
+
+That is not a tidiness argument, it is a correctness one. A real log had one
+trip recorded twice, five minutes apart: `$26.23` an hour and then `$23.19` an
+hour, for the same 93 miles and the same $115.94. The second capture had no
+start or end time in it *at all* — so its hourly rate had been worked out from
+nothing. The model was never asked to divide; it was asked what the answer
+said, and it obliged. **Now that field comes out empty**, and the table says
+why when you hover it: *"Nothing to work it out from — needs Total earnings /
+Elapsed time"*.
+
+`name: kind` takes any of **money, distance, speed, duration, timestamp,
+number, text**. `name = a op b` takes `-`, `+`, `*`, `/` over two other fields,
+and a computed field can build on one declared above it — the hourly rate
+divides by an elapsed time that was itself computed from two timestamps.
+
+A declared kind also beats the column vote. Inference is a good guess across a
+column and a good guess is still a guess; it also cannot work on the *first*
+row of a new routine, where there is no column to look at yet.
+
+Two things it will not do, for the same reason the standardiser will not:
+
+- **Invent a figure.** Missing input, or a divide by zero, gives an empty cell
+  and a note saying which input was missing — never a number.
+- **Force a value into its declared kind.** A `Total earnings` that reads
+  `unknown` is reported and *left as it is*. Overwriting it with a blank would
+  throw away the one thing it told you, and leave a log that looks complete.
+
+Everything written before this still works: a list of bare names is a list of
+untyped read fields, which is exactly what it always meant. The shipped
+**🚗 Trip** routine now ships with the declaration above, as a worked example.
 
 ### One shape per column
 

@@ -38,6 +38,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import authz
 import records
 import store
+import fields
 import values
 import voice
 import web
@@ -594,22 +595,46 @@ def api_record_create() -> Any:
     if not isinstance(body, dict):
         body = {}
     answer = str(body.get("answer") or "").strip()
-    fields = body.get("fields")
+    # Not named `fields`: that is the module that reads them, and shadowing it
+    # here made every call below a method on a list.
+    wanted = body.get("fields")
     if not answer:
         return jsonify({"error": "Missing 'answer'"}), 400
-    if not isinstance(fields, list) or not fields:
+    if not isinstance(wanted, list) or not wanted:
         return jsonify({"error": "Missing 'fields'"}), 400
 
     model = str(body.get("model") or "") or get_default_model()
-    extracted = records.extract(answer, [str(f) for f in fields], model)
+    declared = fields.parse(wanted)
+    # Only the fields nothing can derive are asked for. A rate is arithmetic
+    # over two other fields, and asking a language model to do arithmetic in
+    # prose is how one trip came to be logged at $26.23 an hour and, five
+    # minutes later, at $23.19 — the second time from a row with no elapsed
+    # time in it at all. What can be computed is computed, below, in Python.
+    asked = fields.to_ask(declared)
+    extracted = records.extract(
+        answer, [f.name for f in asked], model,
+        kinds={f.name: f.kind for f in asked if f.kind})
+    computed, gaps = fields.compute(declared, extracted) if extracted else ({}, [])
+    # Declared order, so the table reads the way the routine was written.
+    row = {f.name: computed.get(f.name, extracted.get(f.name, ""))
+           for f in declared}
+    wrong = fields.mismatches(declared, extracted)
+    if gaps or wrong:
+        logger.info("Record for %s: %s", body.get("routine_name"),
+                    "; ".join(gaps + [f"{k}: {v}" for k, v in wrong.items()]))
     kept = store.add_record(
-        str(body.get("routine_name") or "Routine"), extracted,
+        str(body.get("routine_name") or "Routine"), row,
         str(body.get("routine_id") or "") or None,
         str(body.get("conversation_id") or "") or None,
+        declared=fields.kinds(declared),
     )
     # 200 either way. "Nothing could be pulled out of that answer" is an
     # outcome, not an error, and the reply it came from is still on screen.
-    return jsonify({"record": kept})
+    # The gaps travel with it: a blank hourly rate is only reassuring once you
+    # know it is blank because no elapsed time was recorded, rather than
+    # because something broke.
+    return jsonify({"record": kept, "gaps": gaps,
+                    "mismatched": [f"{k}: {v}" for k, v in wrong.items()]})
 
 
 @app.route("/api/records/<record_id>", methods=["PATCH"])

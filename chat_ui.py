@@ -649,6 +649,15 @@ _PAGE = r"""<!doctype html>
          is almost every cell in a healthy log, so anything louder would read
          as a column of warnings. Hover (or long-press) says what it was. */
       #recordList .tidied { border-bottom:1px dotted var(--faint); }
+      /* Worked out here rather than read off the answer. Marked because an
+         empty one is information — it means nothing was recorded to work it
+         out from — and an unmarked blank just looks like a failure. */
+      #recordList .derived { color:var(--muted); font-style:italic; }
+      #recordList .derived:empty::after { content:"—"; opacity:0.5; }
+      /* The declaration box is prose-ish, so it gets prose-ish room. */
+      #rRecord { min-height:4.5rem; resize:vertical; font-family:inherit; }
+      .rechint code { font-size:0.9em; background:var(--surface2);
+                      padding:0.05rem 0.25rem; border-radius:0.2rem; }
       #recordList a.drawer-new { text-align:center; text-decoration:none;
                                  padding:0.45rem; color:var(--on-accent);
                                  display:flex; align-items:center;
@@ -804,7 +813,17 @@ _PAGE = r"""<!doctype html>
             <option value="0">Turn off for this routine</option>
           </select>
           <label for="rRecord">Keep a record of each run</label>
-          <input id="rRecord" placeholder="distance, elapsed, average speed">
+          <!-- A box rather than a line, because a field can now say what it
+               holds and how it is worked out, and those do not fit on one
+               line three at a time. A bare list of names still works and
+               still means what it always did. -->
+          <textarea id="rRecord" rows="3" placeholder="distance, elapsed, average speed
+&#10;or, one per line:&#10;Total earnings: money&#10;Distance traveled: distance&#10;Earnings per mile = Total earnings / Distance traveled"></textarea>
+          <p class="hint rechint">A name on its own is read from the answer.
+            <code>name: kind</code> says what it holds — money, distance, speed,
+            duration, timestamp, number.
+            <code>name = a / b</code> is worked out here rather than by the
+            model, and is left empty when there is nothing to work it out from.</p>
           <p class="convo-empty">Field names, comma separated.
             After every run the model restates its own answer as these, and the
             row lands in Records. Leave empty to keep nothing.</p>
@@ -3850,7 +3869,29 @@ _PAGE = r"""<!doctype html>
       // question you usually have anyway ("how far have I driven this month").
       let recordFilter = "";
 
+      // Which of a routine's columns are worked out rather than read, and from
+      // what. Taken from the routine's own declarations, which is where the
+      // formula is written — so a blank hourly rate can say that it is blank
+      // because no elapsed time was recorded, rather than looking like a bug.
+      const derivedCache = {};
+      function derivedIn(routineName) {
+        if (derivedCache[routineName]) return derivedCache[routineName];
+        const routine = routines.filter(r => r.name === routineName)[0];
+        const out = {};
+        for (const line of (routine && routine.record) || []) {
+          const at = String(line).indexOf("=");
+          if (at > 0) {
+            out[String(line).slice(0, at).trim()] = String(line).slice(at + 1).trim();
+          }
+        }
+        derivedCache[routineName] = out;
+        return out;
+      }
+
       function renderRecords() {
+        // Routines can be edited while the table is open, and a stale formula
+        // would explain a cell by a rule that no longer applies.
+        for (const key of Object.keys(derivedCache)) delete derivedCache[key];
         recordListEl.innerHTML = "";
         if (!records.length) {
           const note = document.createElement("p");
@@ -3940,9 +3981,14 @@ _PAGE = r"""<!doctype html>
             // class added first, which is how the marker below silently never
             // appeared the first time this was written.
             const was = (record.raw || {})[name];
+            const formula = derivedIn(record.routine_name)[name];
             if (was) {
               td.title = "As it was recorded: " + was;
               td.classList.add("tidied");
+            } else if (formula) {
+              td.classList.add("derived");
+              td.title = (record.fields[name] ? "Worked out as " : "Nothing to work it "
+                          + "out from — needs ") + formula;
             }
             td.addEventListener("blur", () => {
               const value = td.textContent.trim();
@@ -4084,7 +4130,7 @@ _PAGE = r"""<!doctype html>
         rNameEl.value = routine ? routine.name : "";
         rBodyEl.value = routine ? routine.body : "";
         rPhotosEl.value = String(routine ? routine.photos : 0);
-        rRecordEl.value = routine && routine.record ? routine.record.join(", ") : "";
+        rRecordEl.value = routine && routine.record ? routine.record.join("\n") : "";
         rMetaEl.value = routine && routine.photo_meta !== null ? (routine.photo_meta ? "1" : "0") : "";
         rWebEl.value = routine && routine.web !== null ? (routine.web ? "1" : "0") : "";
         rDeleteBtn.hidden = !routine;
@@ -4127,7 +4173,7 @@ _PAGE = r"""<!doctype html>
         const payload = { name: name, body: body,
                           photos: Number(rPhotosEl.value) || 0,
                           web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value),
-                          record: rRecordEl.value.split(",")
+                          record: rRecordEl.value.split("\n")
                             .map(f => f.trim()).filter(Boolean) };
         savingRoutine = true;
         rSaveBtn.disabled = true;

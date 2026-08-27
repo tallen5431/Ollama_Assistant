@@ -28,6 +28,7 @@ this repetitive — and unlike the extraction step it cannot invent a figure.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, NamedTuple, Optional
 
 # The kinds a column can be. "text" is the honest fallback and the default:
@@ -276,8 +277,40 @@ def _timestamp(text: str) -> Optional[Value]:
             stamp += f" {hour:02d}:{minute:02d}"
     if offset:
         stamp += f" {offset}"
-    # Sorts as a string, which is the whole reason for this shape.
-    return Value(TIMESTAMP, stamp, 0.0, offset, stamp)
+    # Sorts as a string, which is the whole reason for this shape — and carries
+    # its instant as a number too, so one timestamp can be taken from another.
+    # Without that, an elapsed time computed from a start and an end had
+    # nothing to subtract and the app was back to asking a model to do it.
+    return Value(TIMESTAMP, stamp, _epoch(year, month, day, clock, off), offset, stamp)
+
+
+def _epoch(year: int, month: int, day: int,
+           clock: Optional[re.Match], off: Optional[re.Match]) -> float:
+    """The instant, in seconds, or NaN when there is no time of day.
+
+    NaN rather than midnight: a date on its own does not say when in the day
+    something happened, and treating it as 00:00 would produce a confident,
+    wrong duration rather than no duration at all.
+    """
+    if not clock:
+        return float("nan")
+    hour, minute = int(clock.group(1)), int(clock.group(2))
+    meridiem = (clock.group(3) or "").lower()
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return float("nan")
+    shift = timedelta(0)
+    if off:
+        shift = timedelta(hours=int(off.group(1)), minutes=int(off.group(2) or 0))
+    try:
+        naive = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError:                     # 31 February and friends
+        return float("nan")
+    # An offset says how far local time is *ahead* of UTC, so it comes off.
+    return (naive - shift).timestamp()
 
 
 def _bare(text: str) -> Optional[Value]:
@@ -404,6 +437,34 @@ def number_of(text: str, kind: str = "") -> str:
     if not found or found.kind == TIMESTAMP:
         return canonical(text, kind) if found else " ".join(str(text or "").split())
     return found.digits
+
+
+def render(kind: str, number: float, symbol: str = "$") -> str:
+    """A number this app worked out itself, written the way the kind is written.
+
+    Separate from ``canonical``, which re-renders something a model wrote and
+    must not touch its precision. Here the precision is ours to choose, so it
+    is chosen once and consistently: money to the cent, speed to a tenth, and
+    a duration in hours and minutes rather than as a decimal nobody reads.
+    """
+    if number != number:                      # NaN — nothing to say
+        return ""
+    if kind == MONEY:
+        sign = "-" if number < 0 else ""
+        return f"{sign}{symbol}{abs(number):.2f}"
+    if kind == SPEED:
+        return f"{_trim(round(number, 1))} mph"
+    if kind == DURATION:
+        return _hm(round(number * 60))
+    if kind == DISTANCE:
+        return f"{_trim(round(number, 2))} mi"
+    return _trim(round(number, 4))
+
+
+def _trim(number: float) -> str:
+    """A number without the trailing zeros that make it look computed."""
+    text = f"{number:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def unit_label(kind: str, values: List[str]) -> str:

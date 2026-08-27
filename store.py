@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+import fields
 import values
 from config import logger
 
@@ -528,23 +529,37 @@ def _tri_column(value: Any) -> Optional[bool]:
 # fills in a form at the roadside.
 _RECORD_FIELDS_MAX = 12
 _RECORD_NAME_MAX = 32
+# A declaration carries up to three names and an operator, so it needs far
+# more room than the name at the front of it.
+_RECORD_DECL_MAX = 160
 
 
 def _record_fields(raw: Any) -> List[str]:
-    """The field-name list off a routine row, however it was stored."""
+    """A routine's field declarations, however they were stored.
+
+    Still a list of strings, and a list of bare names still means what it
+    always did — so every routine written before fields could carry a kind or
+    a formula reads back unchanged. What the strings may now also say is
+    ``name: kind`` and ``name = a - b``; fields.py is what understands them.
+    """
     if not raw:
         return []
     try:
-        names = json.loads(raw) if isinstance(raw, str) else raw
+        listed = json.loads(raw) if isinstance(raw, str) else raw
     except (TypeError, ValueError):
         return []
-    if not isinstance(names, list):
+    if not isinstance(listed, (list, str)):
         return []
     out = []
-    for name in names[:_RECORD_FIELDS_MAX]:
-        clean = " ".join(str(name or "").split())[:_RECORD_NAME_MAX].strip()
-        if clean and clean not in out:
-            out.append(clean)
+    for field in fields.parse(listed)[:_RECORD_FIELDS_MAX]:
+        # The name is capped as it always was; the declaration around it gets
+        # its own, larger allowance, because "Earnings per hour = Total
+        # earnings / Elapsed time" is three names long and was being cut in
+        # half by the name limit.
+        clean = field._replace(name=field.name[:_RECORD_NAME_MAX].strip())
+        text = clean.declaration()[:_RECORD_DECL_MAX].strip()
+        if text and text not in out:
+            out.append(text)
     return out
 
 
@@ -706,6 +721,16 @@ _STARTERS = (
         "Capture times carry no time zone. If this trip could have crossed one, "
         "say the elapsed time may be off by whole hours.",
         2, False, True,
+        # The shipped example of a typed declaration, and the reason the syntax
+        # exists: five readings off two photos, and everything else worked out
+        # from them here rather than by a model doing arithmetic in prose.
+        ("Start odometer: distance",
+         "End odometer: distance",
+         "Distance = End odometer - Start odometer",
+         "Start time: timestamp",
+         "End time: timestamp",
+         "Elapsed time = End time - Start time",
+         "Average speed = Distance / Elapsed time"),
     ),
     (
         "📊 Before / after",
@@ -719,7 +744,7 @@ _STARTERS = (
         "them; I am asking for them, so report them. If a capture time is "
         "missing for either photo, say which one and do not estimate it.\n\n"
         "If the two photos are not of the same subject, say so and stop.",
-        2, None, True,
+        2, None, True, (),
     ),
     (
         "📄 Read this",
@@ -735,7 +760,7 @@ _STARTERS = (
         # Photo details forced off: a label or a receipt has no interesting time
         # or place, and this is the routine most likely to be pointed at
         # something in someone else's house.
-        1, None, False,
+        1, None, False, (),
     ),
     (
         "✍️ Plain words",
@@ -744,7 +769,7 @@ _STARTERS = (
         "Keep it under 200 words, define any term you have to use, and end with "
         "the one sentence that matters most. If it is ambiguous, say which part "
         "and why instead of picking one reading and running with it.",
-        0, None, None,
+        0, None, None, (),
     ),
 )
 
@@ -768,22 +793,26 @@ def create_starters() -> List[Dict[str, Any]]:
         position = conn.execute(
             "SELECT COALESCE(MAX(position), 0) AS top FROM routines"
         ).fetchone()["top"]
-        for name, body, photos, web, photo_meta in _STARTERS:
+        for name, body, photos, web, photo_meta, record in _STARTERS:
             if name in taken:
                 continue
             position += 1
             rid = uuid.uuid4().hex
             conn.execute(
                 "INSERT INTO routines"
-                " (id, name, body, photos, web, photo_meta, position, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " (id, name, body, photos, web, photo_meta, position, record,"
+                "  created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (rid, name, body, photos,
                  None if web is None else int(web),
                  None if photo_meta is None else int(photo_meta),
-                 position, now, now),
+                 position,
+                 json.dumps(_record_fields(list(record))) if record else None,
+                 now, now),
             )
             made.append({"id": rid, "name": name, "body": body, "photos": photos,
                          "web": web, "photo_meta": photo_meta, "position": position,
+                         "record": _record_fields(list(record)),
                          "created_at": now, "updated_at": now})
     return made
 
@@ -823,8 +852,30 @@ def _record_row(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _declared_kinds(routine_name: str, routine_id: Optional[str],
+                    conn: sqlite3.Connection) -> Dict[str, str]:
+    """The kinds this routine's own declaration states, if it states any.
+
+    A declaration beats inference every time. Inference is a good guess across
+    a column, and a good guess is still a guess: when someone has written down
+    that a column holds money, that is the answer and there is nothing to vote
+    on.
+    """
+    row = None
+    if routine_id:
+        row = conn.execute("SELECT record FROM routines WHERE id = ?",
+                           (routine_id,)).fetchone()
+    if row is None and routine_name:
+        row = conn.execute("SELECT record FROM routines WHERE name = ?",
+                           (routine_name,)).fetchone()
+    if row is None or not row["record"]:
+        return {}
+    return fields.kinds(fields.parse(_record_fields(row["record"])))
+
+
 def _column_kinds(routine_name: str, extra: Dict[str, str],
-                  conn: Optional[sqlite3.Connection] = None) -> Dict[str, str]:
+                  conn: Optional[sqlite3.Connection] = None,
+                  declared: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """What kind of value each of a routine's columns holds.
 
     Decided across the column rather than per value, because per value it
@@ -851,7 +902,9 @@ def _column_kinds(routine_name: str, extra: Dict[str, str],
             continue
         for name, text in stored.items():
             columns.setdefault(name, []).append(str(text))
-    return {name: values.column_kind(seen) for name, seen in columns.items()}
+    out = {name: values.column_kind(seen) for name, seen in columns.items()}
+    out.update({k: v for k, v in (declared or {}).items() if v})
+    return out
 
 
 def _normalised(fields: Dict[str, str], kinds: Dict[str, str]) -> tuple:
@@ -890,6 +943,7 @@ def add_record(
     fields: Dict[str, Any],
     routine_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
+    declared: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Keep one run. None when there was nothing worth keeping.
 
@@ -908,7 +962,13 @@ def add_record(
         # look like. Doing it here rather than at extraction is deliberate:
         # this is the only place that can see the column, and the column is
         # what says whether a bare "93" is ninety-three miles or just 93.
-        clean, raw = _normalised(clean, _column_kinds(name, clean, conn))
+        # Handed in by the caller where it knows — the record route parses the
+        # declaration anyway — and looked up otherwise. Not only looked up: a
+        # routine that has not been saved, or has been renamed since, finds
+        # nothing, and then the very first record of a column falls back to
+        # inference and comes out unlike every one after it.
+        kinds = declared or _declared_kinds(name, routine_id, conn)
+        clean, raw = _normalised(clean, _column_kinds(name, clean, conn, kinds))
         conn.execute(
             "INSERT INTO records"
             " (id, routine_id, routine_name, conversation_id, fields, raw, created_at)"
@@ -960,7 +1020,9 @@ def update_record(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # column stays consistent whoever wrote the cell. What it replaced is
         # remembered only for the cells actually being edited: the originals
         # already recorded for the untouched ones are still the originals.
-        kinds = _column_kinds(current["routine_name"], merged, conn)
+        kinds = _column_kinds(
+            current["routine_name"], merged, conn,
+            _declared_kinds(current["routine_name"], current["routine_id"], conn))
         merged, changed = _normalised(merged, kinds)
         raw = {k: v for k, v in current["raw"].items() if k not in clean}
         raw.update({k: v for k, v in changed.items() if k in clean})
@@ -995,6 +1057,10 @@ def normalise_stored(limit: int = 5000) -> Dict[str, int]:
             for name, text in record["fields"].items():
                 columns.setdefault(name, []).append(str(text))
         kinds = {name: values.column_kind(seen) for name, seen in columns.items()}
+        with _connect() as conn:
+            kinds.update({k: v for k, v in
+                          _declared_kinds(routine, group[0].get("routine_id"), conn).items()
+                          if v})
         for record in group:
             tidy, changed = _normalised(record["fields"], kinds)
             if tidy == record["fields"]:

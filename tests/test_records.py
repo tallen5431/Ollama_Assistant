@@ -572,7 +572,17 @@ class TestTheLayoutFitsWhereItIsShown:
     def test_the_editor_asks_for_the_field_names(self):
         page = self.page()
         assert 'id="rRecord"' in page
-        assert "record: rRecordEl.value.split(\",\")" in page
+        # Lines, not commas: a declaration can now carry a kind or a formula,
+        # and three field names joined by an operator do not fit on a shared
+        # line. Commas still separate — fields.py accepts either.
+        assert 'record: rRecordEl.value.split("\\n")' in page
+
+    def test_the_editor_explains_the_syntax(self):
+        """A box that silently accepts "name: money" and "a = b / c" without
+        saying so is a box nobody will ever type them into."""
+        page = self.page()
+        assert "<code>name: kind</code>" in page
+        assert "<code>name = a / b</code>" in page
 
     def test_a_standardised_cell_shows_what_it_used_to_say(self):
         """The original is stored so the tidy-up can be checked. Storing it and
@@ -670,3 +680,67 @@ class TestFieldsKeepTheirDeclaredOrder:
     def test_it_is_switched_off_at_the_app_rather_than_per_route(self):
         """Every response, so a later route cannot quietly reintroduce it."""
         assert app_module.app.json.sort_keys is False
+
+
+class TestATypedRoutineEndToEnd:
+    """The declaration reaches the model, the arithmetic, and the database."""
+
+    DECL = ["Start odometer: distance", "End odometer: distance",
+            "Distance traveled = End odometer - Start odometer",
+            "Start time: timestamp", "End time: timestamp",
+            "Elapsed time = End time - Start time",
+            "Total earnings: money",
+            "Earnings per hour = Total earnings / Elapsed time"]
+
+    FULL = ('{"Start odometer": "102,072", "End odometer": "102,165",'
+            ' "Start time": "Tuesday 25 August 2026 at 20:06 (UTC-04:00)",'
+            ' "End time": "Wednesday 26 August 2026 at 00:31 (UTC-04:00)",'
+            ' "Total earnings": "$115.94"}')
+    NO_TIMES = ('{"Start odometer": "102,072 mi", "End odometer": "102,165 mi",'
+                ' "Start time": "", "End time": "", "Total earnings": "$115.94"}')
+
+    def post(self, client, replies, text):
+        replies["text"] = text
+        return client.post("/api/records", json={
+            "answer": "a", "fields": self.DECL, "routine_name": "Trip"}).get_json()
+
+    def test_the_model_is_only_asked_for_the_readings(self, client, replies, monkeypatch):
+        asked = {}
+        real = records.extract
+        monkeypatch.setattr(records, "extract",
+                            lambda a, n, m, kinds=None: asked.update(n=n, k=kinds) or real(a, n, m, kinds))
+        self.post(client, replies, self.FULL)
+        assert asked["n"] == ["Start odometer", "End odometer", "Start time",
+                              "End time", "Total earnings"]
+        assert asked["k"]["Total earnings"] == "money"
+
+    def test_the_derived_fields_are_worked_out_here(self, client, replies):
+        got = self.post(client, replies, self.FULL)["record"]["fields"]
+        assert got["Distance traveled"] == "93 mi"
+        assert got["Elapsed time"] == "4h 25m"
+        assert got["Earnings per hour"] == "$26.25"
+
+    def test_a_rate_with_nothing_to_divide_by_is_left_empty(self, client, replies):
+        """This row is the one that used to come back as $23.19 an hour."""
+        out = self.post(client, replies, self.NO_TIMES)
+        assert out["record"]["fields"]["Earnings per hour"] == ""
+        assert any("Elapsed time" in g for g in out["gaps"])
+
+    def test_the_columns_come_out_in_the_order_declared(self, client, replies):
+        got = self.post(client, replies, self.FULL)["record"]["fields"]
+        assert list(got) == [f.split(":")[0].split(" =")[0] for f in self.DECL]
+
+    def test_the_declared_kind_settles_the_very_first_record(self, client, replies):
+        """With one row there is no column to vote, so an undeclared odometer
+        would come out bare and every row after it with a unit."""
+        got = self.post(client, replies, self.FULL)["record"]["fields"]
+        assert got["Start odometer"] == "102072 mi"
+
+    def test_a_routine_keeps_its_declaration(self, client):
+        made = client.post("/api/routines", json={
+            "name": "Trip", "body": "b", "record": self.DECL}).get_json()
+        rid = made["id"]
+        listed = client.get("/api/routines").get_json()["routines"]
+        kept = [r for r in listed if r["id"] == rid][0]["record"]
+        assert "Elapsed time = End time - Start time" in kept
+        assert "Total earnings: money" in kept
