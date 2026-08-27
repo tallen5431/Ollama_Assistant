@@ -574,6 +574,21 @@ class TestTheLayoutFitsWhereItIsShown:
         assert 'id="rRecord"' in page
         assert "record: rRecordEl.value.split(\",\")" in page
 
+    def test_a_standardised_cell_shows_what_it_used_to_say(self):
+        """The original is stored so the tidy-up can be checked. Storing it and
+        never showing it would leave that promise reachable only by curl."""
+        page = self.page()
+        assert 'td.title = "As it was recorded: " + was;' in page
+        assert 'td.classList.add("tidied");' in page
+        assert "#recordList .tidied" in page, "the marker has no style"
+
+    def test_the_marker_is_added_after_the_class_is_assigned(self):
+        """td.className = "editable" replaces the whole attribute, so adding
+        the marker first meant it silently never appeared."""
+        page = self.page()
+        assert page.index('td.className = "editable";') < \
+            page.index('td.classList.add("tidied");')
+
     @pytest.mark.parametrize("value, expected", [
         ("=cmd|' /C calc'!A1", "'=cmd|' /C calc'!A1"),
         ("+1+1", "'+1+1"),

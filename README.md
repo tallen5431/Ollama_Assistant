@@ -1191,10 +1191,16 @@ that existed are rewritten once at startup.
 
 **The rule: the presentation is standardised, the number never is.** `$1.2465`
 does not become `$1.25` and `$36.00` does not become `$36` — rounding is a
-change to the data. What comes off is only decoration: a thousands separator, a
-repeated unit, an "approximately", a bracket showing the working. And for any
-value that changed, **the model's own wording is kept alongside it**, so the
-tidying can always be checked against what it replaced.
+change to the data. A minus sign and a leading decimal point are part of the
+figure, not decoration: `-$12.50` stays negative and `.5 mi` is half a mile.
+What comes off is only decoration: a thousands separator, a repeated unit, an
+"approximately", a bracket showing the working.
+
+For any value that changed, **the model's own wording is kept alongside it**. A
+standardised cell is underlined with a faint dotted line in the Records table,
+and hovering it (or long-pressing on a phone) says what it used to read — so
+the tidy-up can always be checked against what it replaced rather than taken on
+faith.
 
 Two things it deliberately will not do:
 

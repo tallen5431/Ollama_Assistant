@@ -72,12 +72,20 @@ _WORKING = re.compile(r"\s*\((?![^()]*(?:UTC|GMT))[^()]*\)", re.I)
 # "or 3.35 hours", "≈", "about". The value is not less true without them.
 _HEDGE = re.compile(r"(?:≈|~|\bapprox(?:\.|imately)?\b|\babout\b|\baround\b)\s*", re.I)
 
-_NUM = r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?"
+# A number, whole or fractional, with or without thousands separators, and
+# with or without a leading minus. Both of the optional parts were missing at
+# first and both silently changed the figure rather than failing to read it:
+# "-$12.50" came out as "$12.50" — a refund recorded as income — and ".5 mi"
+# came out as "5 mi", ten times the distance. A parser that cannot read a value
+# must leave it alone; one that reads it wrongly is worse than not having one.
+_NUM = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+"
+_SIGNED = r"(-?\s*(?:" + _NUM + r"))"
 
-_MONEY_RE = re.compile(r"[$£€]\s*" + _NUM)
-_DISTANCE_RE = re.compile(_NUM + r"\s*(mi\b|miles?\b|km\b|kilometres?\b|kilometers?\b)", re.I)
-_SPEED_RE = re.compile(_NUM + r"\s*(mph\b|mi/h\b|km/h\b|kph\b)", re.I)
-_BARE_RE = re.compile(r"^\s*" + _NUM + r"\s*$")
+# The sign may sit either side of the symbol: -$12.50 and $-12.50 both occur.
+_MONEY_RE = re.compile(r"(-)?\s*([$£€])\s*(-)?\s*(" + _NUM + r")")
+_DISTANCE_RE = re.compile(_SIGNED + r"\s*(mi\b|miles?\b|km\b|kilometres?\b|kilometers?\b)", re.I)
+_SPEED_RE = re.compile(_SIGNED + r"\s*(mph\b|mi/h\b|km/h\b|kph\b)", re.I)
+_BARE_RE = re.compile(r"^\s*" + _SIGNED + r"\s*$")
 
 # "4 hours 25 minutes", "3 hours and 8 minutes", "3.35 hours", "45 minutes".
 _HOURS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:h\b|hr?s?\b|hours?\b)", re.I)
@@ -121,7 +129,7 @@ _RESIDUE = re.compile(
     r"per\s+(?:mile|mi|hour|hr|km|gallon|gal|day|week|trip)|"
     r"/\s*(?:mile|mi|hour|hr|km)|"
     r"an?\s+(?:mile|hour)|each|total|and|or|at|on|of|"
-    r"[\s,.;:/()+-]"
+    r"[\s,.;:/()]"
     r")*$", re.I)
 
 
@@ -140,28 +148,39 @@ def _only_a_quantity(text: str, spans: List[tuple]) -> bool:
     return bool(_RESIDUE.match(_left_over(text, spans)))
 
 
-def _digits(match: re.Match, whole: int = 1, frac: int = 2) -> str:
-    """The matched number, separators gone and every digit kept."""
-    body = match.group(whole).replace(",", "")
-    tail = match.group(frac)
-    return f"{body}.{tail}" if tail else body
+def _digits(body: str) -> str:
+    """A matched number, separators gone and every digit kept.
+
+    ".5" is written back as "0.5". The zero is not a change to the figure and
+    it stops a value being read back as 5 by anything less careful than this.
+    """
+    body = " ".join(str(body or "").split()).replace(" ", "").replace(",", "")
+    if body.startswith("."):
+        return "0" + body
+    if body.startswith("-."):
+        return "-0" + body[1:]
+    return body
 
 
 def _money(text: str) -> Optional[Value]:
     match = _MONEY_RE.search(text)
     if not match or not _only_a_quantity(text, [match.span()]):
         return None
-    digits = _digits(match)
-    symbol = text[match.start()]
-    return Value(MONEY, digits, float(digits), symbol, f"{symbol}{digits}")
+    sign = "-" if (match.group(1) or match.group(3)) else ""
+    digits = _digits(sign + match.group(4))
+    symbol = match.group(2)
+    # The sign goes outside the symbol, which is how a person writes it.
+    body = digits[1:] if digits.startswith("-") else digits
+    return Value(MONEY, digits, float(digits), symbol,
+                 f"{'-' if digits.startswith('-') else ''}{symbol}{body}")
 
 
 def _distance(text: str) -> Optional[Value]:
     match = _DISTANCE_RE.search(text)
     if not match or not _only_a_quantity(text, [match.span()]):
         return None
-    unit = "km" if match.group(3).lower().startswith(("km", "kilom")) else "mi"
-    digits = _digits(match)
+    unit = "km" if match.group(2).lower().startswith(("km", "kilom")) else "mi"
+    digits = _digits(match.group(1))
     return Value(DISTANCE, digits, float(digits), unit, f"{digits} {unit}")
 
 
@@ -169,8 +188,8 @@ def _speed(text: str) -> Optional[Value]:
     match = _SPEED_RE.search(text)
     if not match or not _only_a_quantity(text, [match.span()]):
         return None
-    unit = "km/h" if match.group(3).lower() in ("km/h", "kph") else "mph"
-    digits = _digits(match)
+    unit = "km/h" if match.group(2).lower() in ("km/h", "kph") else "mph"
+    digits = _digits(match.group(1))
     return Value(SPEED, digits, float(digits), unit, f"{digits} {unit}")
 
 
@@ -265,7 +284,7 @@ def _bare(text: str) -> Optional[Value]:
     match = _BARE_RE.match(text)
     if not match:
         return None
-    digits = _digits(match)
+    digits = _digits(match.group(1))
     return Value(NUMBER, digits, float(digits), "", digits)
 
 
@@ -304,7 +323,12 @@ def parse_as(text: str, kind: str) -> Optional[Value]:
     if not found:
         bare = _bare(body)
         if not bare:
-            return parse(text)
+            # Not this column's kind, and not a bare number either. Left alone
+            # rather than re-read as whatever else it might be: a "20:06" in a
+            # column of start times came back as a duration of twenty hours,
+            # because a clock and a stopwatch are written identically and only
+            # the column knows which one this is.
+            return None
         if kind == MONEY:
             found = Value(MONEY, bare.digits, bare.number, "$", f"${bare.digits}")
         elif kind in (DISTANCE, SPEED):

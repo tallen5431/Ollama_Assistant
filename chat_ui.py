@@ -645,6 +645,10 @@ _PAGE = r"""<!doctype html>
       #recordList { overflow:auto; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
+      /* A value that was standardised on the way in. Quiet on purpose — this
+         is almost every cell in a healthy log, so anything louder would read
+         as a column of warnings. Hover (or long-press) says what it was. */
+      #recordList .tidied { border-bottom:1px dotted var(--faint); }
       #recordList a.drawer-new { text-align:center; text-decoration:none;
                                  padding:0.45rem; color:var(--on-accent);
                                  display:flex; align-items:center;
@@ -3924,10 +3928,22 @@ _PAGE = r"""<!doctype html>
           if (!recordFilter) cell("Routine", record.routine_name);
           for (const name of columns) {
             const td = cell(name, record.fields[name] || "");
+            // Values are standardised on the way in, and the wording they
+            // replaced is kept. Show it: a tidy-up you cannot see the before
+            // of is one you have to take on faith, and the whole reason the
+            // original is stored is so that you do not have to.
             // Editable, because the fields were pulled out of prose by a model
             // and a log you cannot correct is one you stop trusting.
             td.contentEditable = "true";
             td.className = "editable";
+            // After className, not before: assigning it wholesale drops any
+            // class added first, which is how the marker below silently never
+            // appeared the first time this was written.
+            const was = (record.raw || {})[name];
+            if (was) {
+              td.title = "As it was recorded: " + was;
+              td.classList.add("tidied");
+            }
             td.addEventListener("blur", () => {
               const value = td.textContent.trim();
               if (value === (record.fields[name] || "")) return;

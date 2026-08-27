@@ -82,6 +82,47 @@ class TestPresentationChangesAndNumbersDoNot:
         assert values.canonical("$0.55 per mile ($36.00 / 66 mi)") == "$0.55"
 
 
+class TestASignAndAPointAreNotDecoration:
+    """Three defects found by sweeping odd inputs at the module already
+    written. Two of them changed the figure, which is the one thing this is
+    not allowed to do."""
+
+    @pytest.mark.parametrize("text, expected, number", [
+        ("-$12.50", "-$12.50", -12.5),
+        ("$-12.50", "-$12.50", -12.5),
+        ("-5 mi", "-5 mi", -5.0),
+        ("-12.5", "-12.5", -12.5),
+    ])
+    def test_a_minus_sign_is_part_of_the_figure(self, text, expected, number):
+        """It was falling into the "leftover punctuation" allowance and being
+        dropped, so a refund was recorded as income."""
+        assert values.canonical(text) == expected
+        assert values.parse(text).number == number
+
+    @pytest.mark.parametrize("text, expected", [
+        (".5 mi", "0.5 mi"),
+        ("$.75", "$0.75"),
+        ("0.5 mi", "0.5 mi"),
+    ])
+    def test_a_leading_point_is_not_dropped(self, text, expected):
+        """".5 mi" read as "5 mi" — ten times the distance."""
+        assert values.canonical(text) == expected
+        assert values.parse(text).number < 1
+
+    def test_a_clock_is_not_a_stopwatch(self):
+        """A clock time and a duration are written identically and only the
+        column knows which this is. "20:06" in a column of start times came
+        back as a duration of twenty hours."""
+        assert values.canonical("20:06", values.TIMESTAMP) == "20:06"
+        assert values.canonical("4:25", values.DURATION) == "4h 25m"
+
+    def test_a_value_of_the_wrong_kind_is_left_alone(self):
+        """Not re-read as whatever else it might be — that is how the clock
+        became a stopwatch."""
+        assert values.canonical("3 hours", values.MONEY) == "3 hours"
+        assert values.canonical("$40", values.DISTANCE) == "$40"
+
+
 class TestProseIsLeftAlone:
     """A value that merely contains a number is a sentence, not a quantity.
     Rewriting "54 miles to Brighton" as "54 mi" deletes where the trip went —
