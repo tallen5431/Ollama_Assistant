@@ -705,30 +705,30 @@ _STARTERS = (
         "kilometres, and if it does not say, say which you assumed.\n\n"
         "The photo details above label the two photos \"Image 1\" and \"Image 2\" "
         "in the order they were attached, and those are the same two photos as "
-        "\"[image 1]\" and \"[image 2]\" in any transcription above. Quote both "
-        "capture times back to me — I am asking for them, so the usual rule "
-        "about not reciting photo details does not apply here.\n\n"
-        "Then give me:\n"
-        "- Distance: the larger reading minus the smaller. Do not assume the "
-        "first photo is the start; the later capture time is the end of the trip.\n"
-        "- Elapsed time: the gap between the two capture times.\n"
-        "- Average speed over that elapsed time.\n\n"
-        "If either photo has no readable number, or has no capture time in the "
-        "photo details above, say exactly which photo is missing which thing and "
-        "stop there. Do not estimate either one, and do not answer from one photo "
-        "alone. If the photo with the later time shows the smaller reading, say "
-        "so plainly rather than reporting a negative distance.\n\n"
-        "Capture times carry no time zone. If this trip could have crossed one, "
-        "say the elapsed time may be off by whole hours.",
+        "\"[image 1]\" and \"[image 2]\" in any transcription above.\n\n"
+        "Say which of the two readings is the start and which is the end, using "
+        "the capture times in the photo details to decide — the later capture "
+        "is the end of the trip, whichever order they were attached in. Then "
+        "give me the distance: the end reading minus the start reading.\n\n"
+        "You do not need to work out the elapsed time or the average speed, and "
+        "you do not need to quote the capture times back. Those come from the "
+        "files themselves and are filled in for you.\n\n"
+        "If either photo has no readable number, say which one and stop there. "
+        "Do not estimate it, and do not answer from one photo alone. If the "
+        "photo with the later capture time shows the smaller reading, say so "
+        "plainly rather than reporting a negative distance.",
         2, False, True,
         # The shipped example of a typed declaration, and the reason the syntax
         # exists: five readings off two photos, and everything else worked out
         # from them here rather than by a model doing arithmetic in prose.
+        # The times are not asked for at all: they are read off the photo
+        # files, which is where they were exact to begin with. The model is
+        # left with the one job only it can do — reading two odometers.
         ("Start odometer: distance",
          "End odometer: distance",
          "Distance = End odometer - Start odometer",
-         "Start time: timestamp",
-         "End time: timestamp",
+         "Start time = earliest photo taken",
+         "End time = latest photo taken",
          "Elapsed time = End time - Start time",
          "Average speed = Distance / Elapsed time"),
     ),

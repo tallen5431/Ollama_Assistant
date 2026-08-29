@@ -3829,6 +3829,19 @@ _PAGE = r"""<!doctype html>
       // streaming path is delicate and a record is worth less than the answer
       // already on screen. A failure here is silent by design — the reply
       // stands on its own.
+      // The EXIF of the most recent turn that carried any. Held on the message
+      // itself, so it is still here after the reply — and absent entirely when
+      // the photo-details toggle is off, which is the honest answer then.
+      function lastPhotoMeta() {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          if (msg && msg.role === "user" && msg.image_meta && msg.image_meta.length) {
+            return msg.image_meta;
+          }
+        }
+        return null;
+      }
+
       async function keepRecord(routine, answer, view) {
         if (!historyOn || !routine || !routine.record || !routine.record.length) return;
         if (!answer || !answer.trim()) return;
@@ -3838,7 +3851,12 @@ _PAGE = r"""<!doctype html>
             body: JSON.stringify({
               answer: answer, fields: routine.record,
               routine_id: routine.id, routine_name: routine.name,
-              conversation_id: currentConvoId, model: modelEl.value || null }) });
+              conversation_id: currentConvoId, model: modelEl.value || null,
+              // What the camera recorded, straight from the file. A field
+              // declared "= earliest photo taken" is filled from this and the
+              // model is never asked for it — it has no labels on the pictures
+              // to match a time to, which is why it got them wrong.
+              photos: lastPhotoMeta() }) });
           if (!resp.ok) return;
           const data = await resp.json();
           if (data.record && view) showKept(view, data.record, routine.record);

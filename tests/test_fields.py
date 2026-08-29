@@ -209,3 +209,78 @@ class TestAValueOfTheWrongKindIsFlaggedNotForced:
         row = {"Total earnings": "unknown"}
         fields.mismatches(self.PARSED, row)
         assert row["Total earnings"] == "unknown"
+
+
+class TestTimesComeFromTheFileNotTheModel:
+    """The reported failure: even large models get the capture times wrong.
+
+    They are not reading them badly — they are being asked to align two lists
+    across two messages by position. The metadata block says "Image 1" and the
+    photos carry no labels at all, so the join has no anchor. It is a binding
+    problem, not a hard one, which is why model size does not rescue it.
+
+    The app has these times exactly, from the file, before any of that.
+    """
+
+    DECL = fields.parse("""
+        Start odometer: distance
+        End odometer: distance
+        Distance = End odometer - Start odometer
+        Start time = earliest photo taken
+        End time = latest photo taken
+        Elapsed time = End time - Start time
+        Average speed = Distance / Elapsed time
+    """)
+    PHOTOS = [{"taken": "2026:08:07 13:37:12", "offset": "-04:00"},
+              {"taken": "2026:08:07 16:45:03", "offset": "-04:00"}]
+
+    def test_the_model_is_not_asked_for_them(self):
+        asked = [f.name for f in fields.to_ask(self.DECL)]
+        assert asked == ["Start odometer", "End odometer"]
+        assert "Start time" not in asked
+
+    def test_they_are_read_off_the_file(self):
+        got = fields.from_photos(self.DECL, self.PHOTOS)
+        assert got["Start time"] == "2026-08-07 13:37 UTC-04:00"
+        assert got["End time"] == "2026-08-07 16:45 UTC-04:00"
+
+    def test_the_order_they_were_attached_in_does_not_matter(self):
+        """The routine's own body used to warn about this — "do not assume the
+        first photo is the start" — because a gallery hands them over in
+        whatever order it likes."""
+        got = fields.from_photos(self.DECL, list(reversed(self.PHOTOS)))
+        assert got["Start time"] == "2026-08-07 13:37 UTC-04:00"
+        assert got["End time"] == "2026-08-07 16:45 UTC-04:00"
+
+    def test_a_positional_source_takes_the_photo_it_names(self):
+        parsed = fields.parse(["First shot = photo 1 taken",
+                               "Second shot = photo 2 taken"])
+        got = fields.from_photos(parsed, self.PHOTOS)
+        assert got["First shot"] == "2026-08-07 13:37 UTC-04:00"
+        assert got["Second shot"] == "2026-08-07 16:45 UTC-04:00"
+
+    def test_the_elapsed_time_built_on_them_is_exact(self):
+        row = {"Start odometer": "100,339", "End odometer": "100,407",
+               **fields.from_photos(self.DECL, self.PHOTOS)}
+        got, notes = fields.compute(self.DECL, row)
+        assert got["Elapsed time"] == "3h 08m"
+        assert got["Average speed"] == "21.7 mph"
+        assert notes == []
+
+    @pytest.mark.parametrize("photos", [None, [], [{}, {}], [{"taken": "rubbish"}]])
+    def test_no_readable_exif_leaves_them_empty(self, photos):
+        """A screenshot, an edited copy, or the photo-details toggle turned
+        off. Empty is the honest answer and the elapsed time goes with it."""
+        got = fields.from_photos(self.DECL, photos)
+        assert all(v == "" for v in got.values())
+
+    def test_a_photo_index_past_the_end_is_empty_not_an_error(self):
+        parsed = fields.parse(["Third = photo 3 taken"])
+        assert fields.from_photos(parsed, self.PHOTOS) == {"Third": ""}
+
+    def test_a_source_field_round_trips_through_its_declaration(self):
+        assert fields.parse(fields.declarations(self.DECL)) == self.DECL
+
+    def test_a_source_field_is_always_a_timestamp(self):
+        field = fields.parse(["When = photo 1 taken"])[0]
+        assert field.kind == values.TIMESTAMP

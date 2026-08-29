@@ -2715,6 +2715,34 @@ def conversation_image_meta(messages: List[Dict[str, Any]]) -> List[Optional[Dic
     return []
 
 
+def sent_image_meta(messages: List[Dict[str, Any]]) -> List[Optional[Dict[str, Any]]]:
+    """EXIF for every photo still attached to what is about to be sent, in order.
+
+    Aligned to the images the model will actually receive, across every turn
+    that still carries them — which is the only alignment worth having, because
+    the metadata block labels its lines "Image 1", "Image 2" and nothing in the
+    image data itself says which is which.
+
+    ``conversation_image_meta`` describes one turn, and that was the bug: with
+    CHAT_IMAGE_TURNS above 1 the model is sent images from several turns while
+    the block described only the newest. "Image 1" then pointed at the third
+    photo the model could see, and every time in the answer was somebody else's.
+    """
+    out: List[Optional[Dict[str, Any]]] = []
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        images = [i for i in (msg.get("images") or []) if isinstance(i, str)]
+        if not images:
+            continue
+        meta = msg.get("image_meta")
+        meta = meta if isinstance(meta, list) else []
+        for index in range(len(images)):
+            entry = meta[index] if index < len(meta) else None
+            out.append(entry if isinstance(entry, dict) and entry else None)
+    return out if any(out) else []
+
+
 def strip_image_meta(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Copy of ``messages`` without the ``image_meta`` key.
 

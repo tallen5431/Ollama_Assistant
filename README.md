@@ -992,6 +992,13 @@ connection and rarely what was meant; earlier turns keep their text, so the
 conversation still reads. Set `CHAT_IMAGE_TURNS` higher if you compare images
 across turns.
 
+The photo-details block counts the same photos. It labels its lines "Image 1",
+"Image 2", and the pictures carry no labels of their own — so the numbering is
+only true if it counts exactly what the model is about to see. It used to
+describe the newest turn alone: at `CHAT_IMAGE_TURNS=3` with two photos a turn,
+"Image 1" pointed at the *third* photo on screen and every time in the answer
+belonged to a different picture.
+
 ## Vision models
 
 There are three ways to attach an image, up to four per message:
@@ -1210,6 +1217,46 @@ Elapsed time"*.
 number, text**. `name = a op b` takes `-`, `+`, `*`, `/` over two other fields,
 and a computed field can build on one declared above it — the hourly rate
 divides by an elapsed time that was itself computed from two timestamps.
+
+### Times come from the file, not from the model
+
+```
+Start time = earliest photo taken
+End time   = latest photo taken
+```
+
+A field declared that way is filled straight from the photo's own EXIF, and
+**the model is never asked for it**.
+
+This one is worth explaining, because it looks like a model failing at an easy
+job and it isn't. The capture times reach a model as a block of text saying
+*"Image 1: taken Friday 07 August 2026 at 13:37"* — while the photos themselves
+arrive as pixels in a different message, carrying no labels at all. To use a
+time, the model has to align two lists across two messages by position and then
+join each time to the odometer it read out of the matching picture. That join
+has no anchor in the input, so it is a *binding* problem rather than a hard
+one — which is exactly why large models get it wrong too, and confidently.
+
+The app never had that problem: your browser reads the EXIF before the image is
+re-encoded, so the exact time is already in hand. It was being rendered to
+prose, read back by a model, rewritten as prose, and parsed again — four hops
+for a figure that started out exact, and two of them can invent.
+
+`photo 1 taken` picks by position; `earliest`/`latest photo taken` pick by the
+recorded instant, which is what a trip actually wants — a gallery hands photos
+over in whatever order it likes, and the later one is the end of the trip
+whichever slot it landed in.
+
+Where the file records no time — a screenshot, an edited copy, or **📍 Photo
+details** switched off — the field is empty and anything built on it is empty
+too, with a note saying so. And where the times carry no zone (EXIF very often
+records none), the elapsed time is still worked out, with a note that it is out
+by whole hours if the clock moved in between. That caveat used to live in the
+routine's prompt; it now lives where the arithmetic does.
+
+The shipped **🚗 Trip** routine uses this. It declares seven fields and asks the
+model for **two** — the two odometer readings, which is the only part of the job
+that needs eyes.
 
 A declared kind also beats the column vote. Inference is a good guess across a
 column and a good guess is still a guess; it also cannot work on the *first*

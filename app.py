@@ -614,9 +614,17 @@ def api_record_create() -> Any:
     extracted = records.extract(
         answer, [f.name for f in asked], model,
         kinds={f.name: f.kind for f in asked if f.kind})
-    computed, gaps = fields.compute(declared, extracted) if extracted else ({}, [])
+    # Straight from the photos' own files, before anything is computed, so a
+    # field declared "= earliest photo taken" is exact and the elapsed time
+    # built on it is exact too. The model is not asked for these at all: it has
+    # no labels on the pictures to match a time against, which is precisely how
+    # it came to report somebody else's.
+    photos = body.get("photos")
+    taken = fields.from_photos(declared, photos if isinstance(photos, list) else None)
+    read = {**extracted, **{k: v for k, v in taken.items() if v}}
+    computed, gaps = fields.compute(declared, read) if read else ({}, [])
     # Declared order, so the table reads the way the routine was written.
-    row = {f.name: computed.get(f.name, extracted.get(f.name, ""))
+    row = {f.name: computed.get(f.name, read.get(f.name, ""))
            for f in declared}
     wrong = fields.mismatches(declared, extracted)
     if gaps or wrong:
@@ -787,7 +795,14 @@ def api_chat() -> Any:
             # Read it once and then take it off the messages, so that after this
             # point the facts travel as prose that was deliberately put
             # somewhere, rather than as a JSON field riding along everywhere.
-            photo_meta = web.conversation_image_meta(messages)
+            # Read off the messages *as they will be sent*, not off the whole
+            # thread. The block numbers its lines "Image 1", "Image 2", and the
+            # images carry no numbering of their own — so the numbering is only
+            # true if it counts the same photos the model is about to see.
+            # Trimming happens below for the real conversation; this runs it
+            # early, on a copy that still has the EXIF attached to it.
+            photo_meta = web.sent_image_meta(
+                web.keep_recent_images(messages, keep_turns=get_image_turns()))
             meta_context = web.image_metadata(photo_meta)
             carried = sum(1 for m in photo_meta if m)
             if not web.conversation_images(messages):

@@ -44,6 +44,22 @@ _DECLARE = re.compile(r"^(?P<name>[^:=]+?)\s*:\s*(?P<kind>[A-Za-z]+)$")
 _COMPUTE = re.compile(r"^(?P<name>[^=]+?)\s*=\s*(?P<left>.+?)\s*"
                       r"(?P<op>[-+*/])\s*(?P<right>.+)$")
 
+# A value taken from the photo's own file rather than from anything a model
+# said about it. The app already has these exactly — the browser reads the EXIF
+# before the image is re-encoded — and it was rendering them to prose, asking a
+# model to read that prose, and parsing the model's prose back. Four hops for a
+# figure that started out exact, and the middle two can invent.
+#
+# Worse than lossy: the block labels its lines "Image 1" and "Image 2" while
+# the photos themselves carry no labels at all, so the model has to align two
+# lists across two messages by position. That join is what fails, and it fails
+# on large models too, because it is a binding problem rather than a hard one.
+_SOURCE = re.compile(
+    r"^(?P<name>[^=]+?)\s*=\s*(?:"
+    r"photo\s+(?P<index>\d{1,2})\s+taken"
+    r"|(?P<order>earliest|first|latest|last)\s+photo\s+taken"
+    r")$", re.I)
+
 OPS = "-+*/"
 
 # What comes out of combining two kinds. Absent means "a number", which is the
@@ -77,13 +93,21 @@ class Field(NamedTuple):
     left: str = ""            # the other two are empty unless this is computed
     op: str = ""
     right: str = ""
+    source: str = ""          # "photo 2 taken", "earliest photo taken"
 
     @property
     def computed(self) -> bool:
         return bool(self.op)
 
+    @property
+    def derived(self) -> bool:
+        """Whether this comes from somewhere other than the model's answer."""
+        return bool(self.op or self.source)
+
     def declaration(self) -> str:
         """The text this was written as, which is also how it is stored."""
+        if self.source:
+            return f"{self.name} = {self.source}"
         if self.computed:
             return f"{self.name} = {self.left} {self.op} {self.right}"
         return f"{self.name}: {self.kind}" if self.kind else self.name
@@ -130,6 +154,15 @@ def _lines(raw: Any) -> List[str]:
 
 def _one(line: str) -> Optional[Field]:
     """One declaration, or None when there is nothing usable in it."""
+    taken = _SOURCE.match(line)
+    if taken:
+        name = taken.group("name").strip()
+        if not name:
+            return None
+        where = (f"photo {int(taken.group('index'))} taken" if taken.group("index")
+                 else f"{taken.group('order').lower()} photo taken")
+        # Always a timestamp: it is a camera's record of when the shutter went.
+        return Field(name, values.TIMESTAMP, source=where)
     computed = _COMPUTE.match(line)
     if computed:
         name = computed.group("name").strip()
@@ -155,7 +188,7 @@ def names(fields: List[Field]) -> List[str]:
 
 def to_ask(fields: List[Field]) -> List[Field]:
     """The fields a model has to supply, which is the ones nothing can derive."""
-    return [f for f in fields if not f.computed]
+    return [f for f in fields if not f.derived]
 
 
 def declarations(fields: List[Field]) -> List[str]:
@@ -179,6 +212,65 @@ def kinds(fields: List[Field], rows: Optional[List[Dict[str, str]]] = None) -> D
             if field.name not in out:
                 seen = [str(r.get(field.name, "")) for r in rows]
                 out[field.name] = values.column_kind(seen)
+    return out
+
+
+# EXIF writes "2026:08:07 13:37:12"; the colons in the date are the giveaway.
+_EXIF_TAKEN = re.compile(r"^\s*(\d{4})[:-](\d{2})[:-](\d{2})[ T](\d{2}):(\d{2})")
+_EXIF_OFFSET = re.compile(r"^[+-]\d{2}:?\d{2}$")
+
+
+def photo_time(meta: Any) -> str:
+    """One photo's capture time, as a standard timestamp. "" if it has none."""
+    if not isinstance(meta, dict):
+        return ""
+    match = _EXIF_TAKEN.match(" ".join(str(meta.get("taken") or "").split()))
+    if not match:
+        return ""
+    stamp = (f"{match.group(1)}-{match.group(2)}-{match.group(3)} "
+             f"{match.group(4)}:{match.group(5)}")
+    offset = " ".join(str(meta.get("offset") or "").split())
+    # Where the camera recorded one. Without it the time is still the time, it
+    # just cannot be compared against a photo taken in another zone.
+    if _EXIF_OFFSET.match(offset):
+        stamp += f" UTC{offset}"
+    return values.canonical(stamp, values.TIMESTAMP)
+
+
+def from_photos(fields: List[Field],
+                photos: Optional[List[Any]]) -> Dict[str, str]:
+    """Fill the fields that come from a photo's own file rather than a model.
+
+    This is the whole answer to "why does it get the times wrong": it does not
+    have to read them. The browser read the EXIF before the image was
+    re-encoded, so the exact capture time is already here — rendering it to
+    prose and asking a model to read it back was three chances to lose it and
+    one to invent it.
+
+    ``earliest`` and ``latest`` sort by the recorded instant, which is what a
+    trip actually needs: the photos are attached in whatever order they were
+    picked, and the later one is the end of the trip whichever that was.
+    """
+    wanted = [f for f in fields if f.source]
+    if not wanted or not photos:
+        return {}
+    times = [photo_time(meta) for meta in photos]
+    # Sorted by the instant, not by the text: a stamp with an offset and one
+    # without do not compare as strings in any useful way.
+    ordered = sorted(
+        (t for t in times if t),
+        key=lambda t: (values.parse_as(t, values.TIMESTAMP) or
+                       values.Value("", "", float("inf"))).number)
+    out: Dict[str, str] = {}
+    for field in wanted:
+        match = re.match(r"^photo (\d+) taken$", field.source)
+        if match:
+            index = int(match.group(1)) - 1
+            out[field.name] = times[index] if 0 <= index < len(times) else ""
+        elif field.source.startswith(("earliest", "first")):
+            out[field.name] = ordered[0] if ordered else ""
+        else:
+            out[field.name] = ordered[-1] if ordered else ""
     return out
 
 
@@ -230,6 +322,16 @@ def compute(fields: List[Field], row: Dict[str, str],
             filled[field.name] = ""
             notes.append(f"{field.name}: {field.right} is zero")
             continue
+        # A duration between two clock times that carry no zone is right only
+        # if the clock did not move between them. EXIF very often records no
+        # offset, so this is the ordinary case rather than the exotic one — and
+        # the warning used to live in the routine's prompt, which is no longer
+        # where the arithmetic happens.
+        if (left.kind, field.op, right.kind) == (values.TIMESTAMP, "-", values.TIMESTAMP) \
+                and not (left.unit and right.unit):
+            notes.append(f"{field.name}: worked out from clock times with no time "
+                         "zone recorded — out by whole hours if the clock moved "
+                         "between them")
         number *= _SECONDS_TO_HOURS.get((left.kind, field.op, right.kind), 1.0)
         if number != number:
             # One of the inputs had no number in it — a date with no time of

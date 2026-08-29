@@ -19,6 +19,7 @@ import pytest
 
 import app as app_module
 import chat_ui
+import fields
 import store
 
 
@@ -186,7 +187,37 @@ class TestTheStarters:
     def test_the_trip_routine_refuses_rather_than_estimating(self):
         trip = {r["name"]: r for r in store.create_starters()}["🚗 Trip"]
         assert "Do not estimate" in trip["body"]
-        assert "time zone" in trip["body"], "capture times carry none"
+
+    def test_the_trip_routine_leaves_the_times_to_the_app(self):
+        """It used to ask for the capture times and the elapsed time between
+        them. A model has no labels on the photos to match a time against, so
+        that join was where it went wrong — and the app has the times exactly,
+        from the files, without asking anyone."""
+        trip = {r["name"]: r for r in store.create_starters()}["🚗 Trip"]
+        assert "filled in for you" in trip["body"]
+        declared = fields.parse(trip["record"])
+        assert [f.name for f in fields.to_ask(declared)] == [
+            "Start odometer", "End odometer"]
+        assert [f.name for f in declared if f.source] == ["Start time", "End time"]
+
+    def test_the_time_zone_caveat_moved_to_where_the_sum_happens(self):
+        """The warning was in the prompt because the model did the arithmetic.
+        It does not any more, so the caveat is raised by whatever does."""
+        declared = fields.parse(["A = photo 1 taken", "B = photo 2 taken",
+                                 "Took = B - A"])
+        row = fields.from_photos(declared, [{"taken": "2026:08:07 13:37:00"},
+                                            {"taken": "2026:08:07 16:45:00"}])
+        _, notes = fields.compute(declared, row)
+        assert any("time zone" in n for n in notes)
+
+    def test_and_is_not_raised_when_the_zone_is_known(self):
+        declared = fields.parse(["A = photo 1 taken", "B = photo 2 taken",
+                                 "Took = B - A"])
+        row = fields.from_photos(declared, [
+            {"taken": "2026:08:07 13:37:00", "offset": "-04:00"},
+            {"taken": "2026:08:07 16:45:00", "offset": "-04:00"}])
+        got, notes = fields.compute(declared, row)
+        assert got["Took"] == "3h 08m" and notes == []
 
     def test_no_shipped_routine_forces_web_access_on(self):
         """Photos plus a forced search is the one path that sends a position out.
