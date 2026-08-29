@@ -2393,6 +2393,38 @@ _DESC_PREAMBLE = (
 )
 
 
+# For a model that *can* see. The other two preambles both say the answering
+# model cannot, which would be a lie here and an invitation to ignore the
+# pictures it was given.
+_PER_PHOTO_PREAMBLE = (
+    "Each photo in this message, read on its own and labelled. You can see the "
+    "photos yourself; these readings are here so that the labels are reliable. "
+    "[image 1] is the first photo attached, [image 2] the second, and they are "
+    "the same numbering the photo details use — so a capture time given for "
+    "\"Image 2\" belongs to the photo read below as [image 2]. Match them by "
+    "the number rather than by which looks like it should go with which. Where "
+    "a reading disagrees with what you can see in the photo, trust your own "
+    "eyes and say so."
+)
+
+
+def per_photo_context(transcript: Optional[str]) -> str:
+    """Labelled per-photo readings, for a model that can see them too.
+
+    The pictures carry no labels of their own, so a model asked to use "the
+    capture time of Image 2" has to align two lists across two messages by
+    position. That join has no anchor in the input, which is why it fails on
+    large models as readily as small ones. Reading each photo separately and
+    labelling the readings gives the join something to hold: text to text,
+    matched on a number, which is a thing models are reliably good at.
+    """
+    text = _defence((transcript or "").strip())
+    if not text:
+        return ""
+    return (f"{_PER_PHOTO_PREAMBLE}\n\n----- BEGIN PHOTO READINGS -----\n"
+            f"{text}\n----- END PHOTO READINGS -----")
+
+
 _META_PREAMBLE = (
     "Facts the camera recorded when the photo was taken, read from the file "
     "itself rather than from the picture. These are reliable where they are "

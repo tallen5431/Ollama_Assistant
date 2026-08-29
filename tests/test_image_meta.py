@@ -1033,3 +1033,103 @@ class TestTheDiagnosticToolActuallyRuns:
             capture_output=True, text=True, timeout=60, cwd=str(ROOT))
         assert out.returncode == 0, out.stderr
         assert "0 with a position" in out.stdout or "no position" in out.stdout.lower()
+
+
+class TestKeepingSeveralPhotosStraight:
+    """The reported failure: even large models come back with completely wrong
+    capture times.
+
+    The photos arrive as pixels carrying no labels, and the details beside them
+    say "Image 1", "Image 2" — so using a time means aligning two lists across
+    two messages by position, with nothing in the input to anchor it. It is a
+    binding problem rather than a hard one, which is why model size does not
+    help.
+    """
+
+    TWO = [{"taken": "2026:08:01 09:00:00"}, {"taken": "2026:08:01 10:00:00"}]
+    LATER = [{"taken": "2026:08:07 13:37:00"}, {"taken": "2026:08:07 16:45:00"}]
+
+    def thread(self):
+        return [
+            {"role": "user", "content": "first pair", "images": ["a", "b"],
+             "image_meta": self.TWO},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "second pair", "images": ["c", "d"],
+             "image_meta": self.LATER},
+        ]
+
+    def test_the_numbering_counts_what_is_actually_sent(self, monkeypatch):
+        """It described the newest turn alone, so at CHAT_IMAGE_TURNS=3 the
+        line saying "Image 1" pointed at the third photo on screen."""
+        import web
+        kept = web.keep_recent_images(self.thread(), keep_turns=3)
+        seen = [i for m in kept for i in (m.get("images") or [])]
+        meta = web.sent_image_meta(kept)
+        assert len(meta) == len(seen) == 4
+        assert meta[0]["taken"].startswith("2026:08:01")
+        assert meta[2]["taken"].startswith("2026:08:07")
+
+    def test_and_still_does_at_the_default_of_one_turn(self):
+        import web
+        kept = web.keep_recent_images(self.thread(), keep_turns=1)
+        meta = web.sent_image_meta(kept)
+        assert len(meta) == 2
+        assert meta[0]["taken"].startswith("2026:08:07 13:37")
+
+    def test_a_photo_with_no_exif_still_holds_its_place(self):
+        """Otherwise every photo after it shifts up a number."""
+        import web
+        msgs = [{"role": "user", "images": ["a", "b", "c"],
+                 "image_meta": [None, {"taken": "2026:08:07 16:45:00"}, None]}]
+        meta = web.sent_image_meta(msgs)
+        assert len(meta) == 3 and meta[0] is None and meta[1] is not None
+
+    def test_reading_each_photo_separately_is_off_by_default(self, rig, monkeypatch):
+        called = []
+        monkeypatch.setattr(web_module(), "read_images",
+                            lambda *a, **k: called.append(1) or "x")
+        rig["client"].post("/api/chat", json={"messages": [
+            {"role": "user", "content": "read both", "images": ["a", "b"]}]}).get_data()
+        assert not called
+
+    def test_but_can_be_turned_on_for_a_model_that_can_see(self, rig, monkeypatch):
+        monkeypatch.setenv("PHOTO_READ_EACH", "1")
+        monkeypatch.setattr(
+            web_module(), "read_images",
+            lambda *a, **k: "[image 1] reads 100,339. [image 2] reads 100,407.")
+        rig["client"].post("/api/chat", json={"messages": [
+            {"role": "user", "content": "read both", "images": ["a", "b"],
+             "image_meta": self.LATER}]}).get_data()
+        sent = _sent(rig["ollama"])
+        systems = [m["content"] for m in sent if m["role"] == "system"]
+        readings = [s for s in systems if "PHOTO READINGS" in s]
+        assert readings, "the labelled readings never reached the model"
+        assert "[image 1] reads 100,339" in readings[0]
+        # The pictures stay: this is an anchor for them, not a substitute.
+        assert any(m.get("images") for m in sent)
+
+    def test_one_photo_is_never_read_separately(self, rig, monkeypatch):
+        """There is nothing to confuse it with, and it would cost a whole call."""
+        monkeypatch.setenv("PHOTO_READ_EACH", "1")
+        called = []
+        monkeypatch.setattr(web_module(), "read_images",
+                            lambda *a, **k: called.append(1) or "x")
+        rig["client"].post("/api/chat", json={"messages": [
+            {"role": "user", "content": "read it", "images": ["a"]}]}).get_data()
+        assert not called
+
+    def test_a_failed_read_costs_the_labels_not_the_turn(self, rig, monkeypatch):
+        monkeypatch.setenv("PHOTO_READ_EACH", "1")
+        web = web_module()
+        monkeypatch.setattr(web, "read_images", lambda *a, **k: (_ for _ in ()).throw(
+            web.ReadFailed("no vram")))
+        resp = rig["client"].post("/api/chat", json={"messages": [
+            {"role": "user", "content": "read both", "images": ["a", "b"]}]})
+        out = [json.loads(l) for l in resp.get_data(as_text=True).splitlines() if l.strip()]
+        assert not [o for o in out if "error" in o], "the turn died"
+        assert "".join(o.get("message", {}).get("content", "") for o in out) == "ok"
+
+
+def web_module():
+    import web
+    return web

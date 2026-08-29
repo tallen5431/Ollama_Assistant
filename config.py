@@ -311,6 +311,26 @@ def get_web_links_in_context() -> int:
     return max(0, min(50, int(_number("WEB_LINKS_IN_CONTEXT", 25))))
 
 
+def get_photo_read_each() -> bool:
+    """Whether a vision model is also given each photo read separately first.
+
+    Off by default, because it costs one extra model call per photo.
+
+    Turn it on for routines that have to keep several photos straight. A model
+    is sent the pictures with no labels attached to them, and the photo details
+    beside them say "Image 1", "Image 2" — so using a capture time means
+    aligning two lists across two messages by position. That join has no anchor
+    in the input, and it is where two-odometer routines go wrong: not because
+    the reading is hard, but because nothing ties a reading to a number. Read
+    one at a time, the readings arrive already labelled and the join becomes
+    text-to-text on a number, which models are reliably good at.
+
+    Only applies where there is more than one photo; a single photo has nothing
+    to be confused with.
+    """
+    return _flag("PHOTO_READ_EACH", "0")
+
+
 def get_photo_meta_default() -> bool:
     """Whether a browser that has never chosen starts with photo details on.
 

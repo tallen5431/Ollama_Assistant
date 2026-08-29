@@ -129,6 +129,7 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_CONNECT_TIMEOUT` | `5`                    | How long to wait to *connect*, separately. A sleeping desktop drops the packet rather than refusing it, so this is what stops a message hanging for the full reply timeout |
 | `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
 | `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
+| `PHOTO_READ_EACH`   | `0`                         | Also read each photo on its own before answering, so the `[image n]` numbering is reliable. Costs one model call per photo; only applies with more than one — see "Keeping several photos straight" |
 | `PHOTO_META`        | `1`                         | Whether a browser that has never touched the toggle starts with **📍 Photo details** on. `0` makes off the default |
 | `PHOTO_KEEP_DAYS`   | `30`                        | How long stored photos stay in the history. Every word is kept for good; only the pixels expire. `0` keeps them for good too |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
@@ -991,6 +992,30 @@ Re-uploading every screenshot in a thread on every turn was slow over a phone
 connection and rarely what was meant; earlier turns keep their text, so the
 conversation still reads. Set `CHAT_IMAGE_TURNS` higher if you compare images
 across turns.
+
+### Keeping several photos straight
+
+A routine with two photos asks a model to do something the input does not
+support. The pictures arrive as pixels with **no labels attached to them**,
+while the details beside them say "Image 1", "Image 2" — so using a capture
+time means aligning two lists across two messages by position, and then joining
+each time to the odometer read out of the matching picture. Nothing in the
+input anchors that join. It is a *binding* problem rather than a hard one,
+which is why it fails on large models as readily as small ones.
+
+Two things address it, and they stack:
+
+- **Take the times off the file** (above). A field declared `= earliest photo
+  taken` never goes near a model, so the commonest version of this join simply
+  stops existing. This is on wherever a routine declares it, and the shipped
+  🚗 Trip routine does.
+- **`PHOTO_READ_EACH=1`** reads each photo separately *first*, the way this app
+  has always read photos for models without vision, and hands the answering
+  model the labelled readings alongside the pictures. The join becomes text to
+  text, matched on a number — a thing models are reliably good at. The pictures
+  stay, and the preamble tells the model to trust its own eyes where a reading
+  disagrees. Off by default because it costs a model call per photo, and skipped
+  for a single photo, which has nothing to be confused with.
 
 The photo-details block counts the same photos. It labels its lines "Image 1",
 "Image 2", and the pictures carry no labels of their own — so the numbering is

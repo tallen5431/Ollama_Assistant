@@ -55,6 +55,7 @@ from config import (
     get_ollama_base,
     get_photo_keep_days,
     get_photo_meta_default,
+    get_photo_read_each,
     get_planner_model,
     get_search_url,
     get_server_threads,
@@ -851,6 +852,35 @@ def api_chat() -> Any:
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
                     convo = web.with_context(web.strip_images(turns), context)
+            elif images and len(images) > 1 and get_photo_read_each():
+                # A model that *can* see, given each photo read on its own so
+                # that the labels are reliable. The pictures carry no labels,
+                # and the photo details beside them say "Image 1", "Image 2" —
+                # so using a capture time means aligning two lists across two
+                # messages by position, with nothing in the input to anchor it.
+                # That is where a two-odometer routine goes wrong, and it goes
+                # wrong on large models too. Read separately, the readings
+                # arrive already numbered and the join is text to text.
+                #
+                # The images stay: this is an anchor for them, not a substitute,
+                # and the preamble tells the model to trust its own eyes over a
+                # reading that disagrees.
+                yield _line({"status": f"Reading {len(images)} photos one at a time…"})
+                try:
+                    transcript = web.read_images(images, model, ocr=False,
+                                                 answering_model=model)
+                except web.ReadFailed as exc:
+                    # An enhancement. Losing it costs the labels, not the turn.
+                    logger.warning("Per-photo read via %s failed: %s", model, exc)
+                    yield _step("Read each photo", f"{model} failed: {exc}")
+                else:
+                    context = web.per_photo_context(transcript)
+                    if context:
+                        convo = web.with_context(convo, context)
+                    yield _step("Read each photo",
+                                f"{model}, {len(images)} photo(s) read separately "
+                                "so the numbering is reliable",
+                                text=transcript or "(nothing came back)")
 
             if meta_context:
                 convo = web.with_context(convo, meta_context)
