@@ -181,6 +181,77 @@ def _one(line: str) -> Optional[Field]:
     return Field(line) if line else None
 
 
+def problems(fields: List[Field], raw: Any = None) -> List[str]:
+    """What is wrong with a declaration, in words, or [] when nothing is.
+
+    Checked when a routine is *saved*, because the alternative is finding out
+    much later and indirectly. A formula naming a field that does not exist —
+    one typo, "Elapsed tme" — is not an error anywhere: it computes to nothing,
+    every run, forever, and an empty column looks exactly like a run where
+    there was no data. This is the difference between a mistake you fix in
+    seconds and one you notice in a month of records.
+    """
+    known = {f.name.lower() for f in fields}
+    out: List[str] = []
+    # Said once per field. A self-referential formula is also, technically, a
+    # cycle, and reporting it twice in different words reads as two faults.
+    complained: set = set()
+
+    for field in fields:
+        if not field.computed:
+            continue
+        for side, operand in (("left", field.left), ("right", field.right)):
+            if any(op in operand for op in OPS):
+                # "Net = Gross - Fees - Tax". The grammar is two operands and
+                # one operator, so the tail became part of a field name that
+                # can never exist — a column permanently empty for a reason
+                # nothing announced.
+                out.append(
+                    f"{field.name}: \"{operand}\" is more than one sum. This "
+                    "understands one operator over two fields; give the middle "
+                    "step a field of its own and build on it.")
+            elif operand.lower() not in known:
+                out.append(f"{field.name}: there is no field called \"{operand}\".")
+            elif operand.lower() == field.name.lower():
+                out.append(f"{field.name}: works itself out from itself.")
+            else:
+                continue
+            complained.add(field.name.lower())
+
+    # A line that was written as a formula and did not parse as one. It still
+    # becomes a plain field, so the column works — but it does not do what was
+    # typed, and silently keeping the name while dropping the rest is how you
+    # end up with a field called "x" and no idea why.
+    for line in _lines(raw if raw is not None else []):
+        if "=" not in line or _SOURCE.match(line):
+            continue
+        match = _COMPUTE.match(line)
+        if not match or not (match.group("left").strip()
+                             and match.group("right").strip()):
+            out.append(f"\"{line}\" is not a sum this understands, so it was "
+                       "kept as an ordinary field name.")
+
+    # Cycles, and anything else that cannot be reached. Resolution is by
+    # dependency now, so the only computed fields left unresolvable are ones
+    # that need each other.
+    resolved = {f.name.lower() for f in fields if not f.computed}
+    pending = [f for f in fields if f.computed]
+    while pending:
+        ready = [f for f in pending
+                 if f.left.lower() in resolved and f.right.lower() in resolved]
+        if not ready:
+            break
+        resolved |= {f.name.lower() for f in ready}
+        pending = [f for f in pending if f not in ready]
+    for field in pending:
+        if field.name.lower() in complained:
+            continue
+        if all(o.lower() in known for o in (field.left, field.right)):
+            out.append(f"{field.name}: this and \"{field.left}\" or "
+                       f"\"{field.right}\" each wait on the other.")
+    return out
+
+
 def names(fields: List[Field]) -> List[str]:
     """Every column, in order, computed ones included."""
     return [f.name for f in fields]
@@ -288,9 +359,9 @@ def compute(fields: List[Field], row: Dict[str, str],
     is the failure this whole idea exists to prevent — and the note says which
     input was missing, so a gap in the log reads as a gap rather than a bug.
 
-    Computed fields are resolved in the order declared and can build on one
-    another: an elapsed time computed from two timestamps is available to the
-    hourly rate declared below it.
+    Computed fields can build on one another and are resolved by what each
+    needs, not by the order they were written in — an hourly rate may divide by
+    an elapsed time declared below it.
     """
     known = dict(known or {})
     known.update(kinds(fields))
@@ -305,46 +376,65 @@ def compute(fields: List[Field], row: Dict[str, str],
         if found:
             numbers[field.name] = found
 
-    for field in fields:
-        if not field.computed:
-            continue
-        left, right = numbers.get(field.left), numbers.get(field.right)
-        missing = [n for n, v in ((field.left, left), (field.right, right)) if not v]
-        if missing:
-            filled[field.name] = ""
-            notes.append(f"{field.name}: nothing recorded for "
-                         + " or ".join(missing))
-            continue
-        kind = result_kind(left.kind, field.op, right.kind)
-        try:
-            number = _apply(left.number, field.op, right.number)
-        except ZeroDivisionError:
-            filled[field.name] = ""
-            notes.append(f"{field.name}: {field.right} is zero")
-            continue
-        # A duration between two clock times that carry no zone is right only
-        # if the clock did not move between them. EXIF very often records no
-        # offset, so this is the ordinary case rather than the exotic one — and
-        # the warning used to live in the routine's prompt, which is no longer
-        # where the arithmetic happens.
-        if (left.kind, field.op, right.kind) == (values.TIMESTAMP, "-", values.TIMESTAMP) \
-                and not (left.unit and right.unit):
-            notes.append(f"{field.name}: worked out from clock times with no time "
-                         "zone recorded — out by whole hours if the clock moved "
-                         "between them")
-        number *= _SECONDS_TO_HOURS.get((left.kind, field.op, right.kind), 1.0)
-        if number != number:
-            # One of the inputs had no number in it — a date with no time of
-            # day, most often. Not a failure worth shouting about, but not a
-            # figure either.
-            filled[field.name] = ""
-            notes.append(f"{field.name}: {field.left} or {field.right} has no "
-                         "value to work with")
-            continue
-        text = values.render(kind, number, left.unit if kind == values.MONEY else "$")
-        filled[field.name] = text
-        numbers[field.name] = values.Value(kind, text, number, "", text)
+    # Resolved by what each one needs rather than by the order they were
+    # written in. Declaration order used to decide it, so an hourly rate
+    # written above the elapsed time it divides by came out empty while the
+    # elapsed time right below it computed perfectly — a silent, order-dependent
+    # blank, which is the least debuggable kind.
+    pending = [f for f in fields if f.computed]
+    while pending:
+        stuck = []
+        for field in pending:
+            left, right = numbers.get(field.left), numbers.get(field.right)
+            if not left or not right:
+                stuck.append(field)
+                continue
+            _one_sum(field, left, right, numbers, filled, notes)
+        if len(stuck) == len(pending):
+            break                      # nothing moved; the rest cannot be done
+        pending = stuck
+
+    for field in pending:
+        missing = [n for n in (field.left, field.right) if n not in numbers]
+        filled[field.name] = ""
+        notes.append(f"{field.name}: nothing recorded for "
+                     + " or ".join(missing or [field.left, field.right]))
     return filled, notes
+
+
+def _one_sum(field: Field, left: values.Value, right: values.Value,
+             numbers: Dict[str, values.Value], filled: Dict[str, str],
+             notes: List[str]) -> None:
+    """Work out one computed field, or record why it could not be."""
+    kind = result_kind(left.kind, field.op, right.kind)
+    try:
+        number = _apply(left.number, field.op, right.number)
+    except ZeroDivisionError:
+        filled[field.name] = ""
+        notes.append(f"{field.name}: {field.right} is zero")
+        return
+    # A duration between two clock times that carry no zone is right only if
+    # the clock did not move between them. EXIF very often records no offset,
+    # so this is the ordinary case rather than the exotic one — and the warning
+    # used to live in the routine's prompt, which is no longer where the
+    # arithmetic happens.
+    if (left.kind, field.op, right.kind) == (values.TIMESTAMP, "-", values.TIMESTAMP) \
+            and not (left.unit and right.unit):
+        notes.append(f"{field.name}: worked out from clock times with no time "
+                     "zone recorded — out by whole hours if the clock moved "
+                     "between them")
+    number *= _SECONDS_TO_HOURS.get((left.kind, field.op, right.kind), 1.0)
+    if number != number:
+        # One of the inputs had no number in it — a date with no time of day,
+        # most often. Not a failure worth shouting about, but not a figure
+        # either.
+        filled[field.name] = ""
+        notes.append(f"{field.name}: {field.left} or {field.right} has no "
+                     "value to work with")
+        return
+    text = values.render(kind, number, left.unit if kind == values.MONEY else "$")
+    filled[field.name] = text
+    numbers[field.name] = values.Value(kind, text, number, "", text)
 
 
 def _apply(left: float, op: str, right: float) -> float:

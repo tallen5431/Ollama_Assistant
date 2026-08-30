@@ -284,3 +284,76 @@ class TestTimesComeFromTheFileNotTheModel:
     def test_a_source_field_is_always_a_timestamp(self):
         field = fields.parse(["When = photo 1 taken"])[0]
         assert field.kind == values.TIMESTAMP
+
+
+class TestOrderOfDeclarationDoesNotDecideTheAnswer:
+    """A silent, order-dependent blank is the least debuggable kind."""
+
+    def test_a_rate_may_divide_by_something_declared_below_it(self):
+        parsed = fields.parse(["Fare: money", "Start: timestamp", "End: timestamp",
+                               "Per hour = Fare / Took",
+                               "Took = End - Start"])
+        got, _ = fields.compute(parsed, {"Fare": "$36",
+                                         "Start": "2026-08-07 13:00 UTC-04:00",
+                                         "End": "2026-08-07 16:00 UTC-04:00"})
+        assert got["Took"] == "3h"
+        assert got["Per hour"] == "$12.00", "declaration order decided the answer"
+
+    def test_a_chain_of_three_resolves(self):
+        parsed = fields.parse(["A: number", "B = C + A", "C = A + A"])
+        got, _ = fields.compute(parsed, {"A": "2"})
+        assert got["C"] == "4" and got["B"] == "6"
+
+    def test_two_fields_waiting_on_each_other_stop_rather_than_spin(self):
+        parsed = fields.parse(["C: money", "A = B - C", "B = A + C"])
+        got, notes = fields.compute(parsed, {"C": "$1"})
+        assert got["A"] == "" and got["B"] == ""
+        assert len(notes) == 2
+
+
+class TestADeclarationIsCheckedWhenItIsWritten:
+    """A formula naming a field that does not exist is an error nowhere. It
+    computes to nothing, every run, and an empty column looks exactly like a
+    run with no data — so one typo costs a month of records before anyone
+    notices. Saying so at the moment it is saved is the whole fix."""
+
+    def check(self, lines):
+        return fields.problems(fields.parse(lines), lines)
+
+    def test_a_typo_in_an_operand_is_named(self):
+        found = self.check(["Fare: money", "Took: duration",
+                            "Per hour = Fare / Tooke"])
+        assert len(found) == 1 and 'no field called "Tooke"' in found[0]
+
+    def test_a_chained_sum_says_what_to_do_instead(self):
+        found = self.check(["Gross: money", "Fees: money", "Tax: money",
+                            "Net = Gross - Fees - Tax"])
+        assert len(found) == 1
+        assert "more than one sum" in found[0]
+        assert "field of its own" in found[0], "it should say how to fix it"
+
+    def test_a_line_that_is_not_a_sum_is_not_silently_renamed(self):
+        """"x = -5" kept the name and dropped the rest, so the box said one
+        thing and the routine did another."""
+        found = self.check(["x = -5"])
+        assert found and "not a sum this understands" in found[0]
+
+    def test_a_field_that_needs_itself(self):
+        found = self.check(["B: money", "A = B - A"])
+        assert len(found) == 1, "one fault, not two"
+        assert "itself" in found[0]
+
+    def test_two_that_need_each_other(self):
+        found = self.check(["C: money", "A = B - C", "B = A + C"])
+        assert len(found) == 2 and all("wait on the other" in f for f in found)
+
+    def test_a_sound_declaration_has_nothing_to_say(self):
+        assert self.check([
+            "Start odometer: distance", "End odometer: distance",
+            "Distance = End odometer - Start odometer",
+            "Start time = earliest photo taken", "End time = latest photo taken",
+            "Elapsed time = End time - Start time",
+            "Average speed = Distance / Elapsed time"]) == []
+
+    def test_nor_does_a_plain_list_of_names(self):
+        assert self.check(["distance", "elapsed", "notes"]) == []

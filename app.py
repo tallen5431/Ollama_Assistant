@@ -514,11 +514,22 @@ def api_routine_create() -> Any:
     if not text:
         return jsonify({"error": "Missing 'body'"}), 400
     record = body.get("record")
-    return jsonify(store.create_routine(
+    saved = store.create_routine(
         name, text, _count(body.get("photos")),
         _tri(body.get("web")), _tri(body.get("photo_meta")),
         record if isinstance(record, list) else None,
-    ))
+    )
+    # Saved either way, and told what is wrong with it. A formula naming a
+    # field that does not exist is not an error anywhere downstream — it
+    # computes to nothing, every run, and an empty column looks exactly like a
+    # run with no data. Saying so here is the difference between a typo fixed
+    # in seconds and one found in a month of records.
+    return jsonify({**saved, "problems": _record_problems(saved.get("record"))})
+
+
+def _record_problems(record: Any) -> List[str]:
+    """What is wrong with a routine's field declarations, in words."""
+    return fields.problems(fields.parse(record), record) if record else []
 
 
 @app.route("/api/routines/starters", methods=["POST"])
@@ -542,26 +553,29 @@ def api_routine_update(routine_id: str) -> Any:
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         body = {}
-    fields: Dict[str, Any] = {}
+    # Not named `fields`: that is the module which reads the declarations, and
+    # shadowing it here would turn every call on it into a method on a dict.
+    changes: Dict[str, Any] = {}
     for field in _ROUTINE_FIELDS:
         if field not in body:
             continue
         if field in ("name", "body"):
-            fields[field] = str(body[field] or "").strip()
+            changes[field] = str(body[field] or "").strip()
         elif field == "photos":
-            fields[field] = _count(body[field])
+            changes[field] = _count(body[field])
         elif field == "record":
-            fields[field] = body[field] if isinstance(body[field], list) else []
+            changes[field] = body[field] if isinstance(body[field], list) else []
         else:
-            fields[field] = _tri(body[field])
-    if not fields:
+            changes[field] = _tri(body[field])
+    if not changes:
         return jsonify({"error": "Nothing to update"}), 400
-    if not fields.get("name", "x") or not fields.get("body", "x"):
+    if not changes.get("name", "x") or not changes.get("body", "x"):
         return jsonify({"error": "A routine needs a name and a prompt"}), 400
-    routine = store.update_routine(routine_id, fields)
+    routine = store.update_routine(routine_id, changes)
     if routine is None:
         return jsonify({"error": "No such routine"}), 404
-    return jsonify({"ok": True, "routine": routine})
+    return jsonify({"ok": True, "routine": routine,
+                    "problems": _record_problems(routine.get("record"))})
 
 
 @app.route("/api/routines/<routine_id>", methods=["DELETE"])
@@ -706,10 +720,17 @@ def api_records_csv() -> Any:
     # will not chart, and it sorts "100 mi" before "93 mi". Under a header
     # saying "Total earnings (USD)" the bare 115.94 says exactly as much and is
     # a number. Timestamps and prose are written out as they stand.
+    # Declared kinds first, inference only where nothing was declared — the
+    # same order the table and the record writer use. Without this a column
+    # declared "text" and stored as text was exported as a number.
+    declared: Dict[str, str] = {}
+    for routine in {r["routine_name"] for r in rows}:
+        for name, kind in store.declared_kinds(routine).items():
+            declared.setdefault(name, kind)
     kinds, heads = {}, []
     for name in columns:
         seen = [r["fields"].get(name, "") for r in rows]
-        kinds[name] = values.column_kind(seen)
+        kinds[name] = declared.get(name) or values.column_kind(seen)
         unit = values.unit_label(kinds[name], seen)
         heads.append(f"{name} ({unit})" if unit else name)
     buffer = io.StringIO()

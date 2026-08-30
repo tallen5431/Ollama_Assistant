@@ -938,6 +938,17 @@ def _clean_fields(fields: Any) -> Dict[str, str]:
     return out
 
 
+def declared_kinds(routine_name: str) -> Dict[str, str]:
+    """The kinds a routine's own declaration states, by column name.
+
+    Public because the CSV export needs the same answer the record writer uses:
+    a column declared "text" and stored as text was being exported as a number,
+    because the export re-inferred instead of asking.
+    """
+    with _connect() as conn:
+        return _declared_kinds(routine_name, None, conn)
+
+
 def add_record(
     routine_name: str,
     fields: Dict[str, Any],

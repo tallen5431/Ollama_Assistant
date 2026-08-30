@@ -1283,6 +1283,18 @@ The shipped **🚗 Trip** routine uses this. It declares seven fields and asks t
 model for **two** — the two odometer readings, which is the only part of the job
 that needs eyes.
 
+**A declaration is checked when you save it.** A formula naming a field that
+does not exist is an error nowhere: it computes to nothing, every run, and an
+empty column looks exactly like a run where there was no data. One typo could
+cost a month of records before anyone noticed. The editor now says so straight
+away — *"Per hour: there is no field called \"Tooke\"."* — and still saves,
+because refusing would lose nine good fields over one bad one. It also catches
+chained sums (`Net = Gross - Fees - Tax`, which this grammar cannot express),
+fields that need themselves, and pairs that wait on each other.
+
+**Order does not decide the answer.** Computed fields resolve by what each one
+needs, so an hourly rate may divide by an elapsed time declared below it.
+
 A declared kind also beats the column vote. Inference is a good guess across a
 column and a good guess is still a guess; it also cannot work on the *first*
 row of a new routine, where there is no column to look at yet.

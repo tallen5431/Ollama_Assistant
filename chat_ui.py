@@ -4193,6 +4193,10 @@ _PAGE = r"""<!doctype html>
                           web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value),
                           record: rRecordEl.value.split("\n")
                             .map(f => f.trim()).filter(Boolean) };
+        // Cleared before each attempt, not after a failed one. Fixing what a
+        // warning complained about and saving again left the old text sitting
+        // there, so a routine that was now fine still read as broken.
+        routineWarnEl.textContent = "";
         savingRoutine = true;
         rSaveBtn.disabled = true;
         try {
@@ -4215,6 +4219,14 @@ _PAGE = r"""<!doctype html>
             rBodyEl.value = kept.body;
             routineWarnEl.textContent = "Saved, but the prompt was trimmed to " +
               kept.body.length + " characters.";
+            return;
+          }
+          // Saved either way, and said here rather than discovered later. A
+          // formula naming a field that does not exist is an error nowhere: it
+          // computes to nothing every run, and an empty column looks exactly
+          // like a run with no data. One typo, found in a month of records.
+          if (saved.problems && saved.problems.length) {
+            routineWarnEl.textContent = "Saved. " + saved.problems.join(" ");
             return;
           }
         } catch (e) {

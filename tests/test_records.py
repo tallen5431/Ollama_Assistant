@@ -744,3 +744,62 @@ class TestATypedRoutineEndToEnd:
         kept = [r for r in listed if r["id"] == rid][0]["record"]
         assert "Elapsed time = End time - Start time" in kept
         assert "Total earnings: money" in kept
+
+
+class TestYouAreToldWhatIsWrongWithADeclaration:
+    def test_saving_a_routine_reports_a_typo(self, client):
+        out = client.post("/api/routines", json={
+            "name": "T", "body": "b",
+            "record": ["Fare: money", "Took: duration",
+                       "Per hour = Fare / Tooke"]}).get_json()
+        assert out["problems"], "a typo saved silently"
+        assert 'no field called "Tooke"' in out["problems"][0]
+
+    def test_it_is_still_saved(self, client):
+        """The column works; it just does not do what was meant. Refusing the
+        save would lose the other nine fields over one typo."""
+        out = client.post("/api/routines", json={
+            "name": "T", "body": "b",
+            "record": ["Fare: money", "Per hour = Fare / Tooke"]}).get_json()
+        assert out["id"]
+        assert len(client.get("/api/routines").get_json()["routines"]) == 1
+
+    def test_a_sound_routine_reports_nothing(self, client):
+        out = client.post("/api/routines", json={
+            "name": "T", "body": "b",
+            "record": ["Fare: money", "Took: duration",
+                       "Per hour = Fare / Took"]}).get_json()
+        assert out["problems"] == []
+
+    def test_editing_one_reports_too(self, client):
+        made = client.post("/api/routines", json={
+            "name": "T", "body": "b", "record": ["Fare: money"]}).get_json()
+        out = client.patch(f"/api/routines/{made['id']}", json={
+            "record": ["Fare: money", "Per hour = Fare / Nope"]}).get_json()
+        assert out["problems"] and "Nope" in out["problems"][0]
+
+    def test_the_editor_shows_them(self):
+        page = chat_ui.render_page("t")
+        assert "saved.problems" in page
+
+    def test_the_csv_uses_the_declared_kind(self, client, replies):
+        """A column declared text and stored as text was exported as a number,
+        because the export re-inferred instead of asking."""
+        client.post("/api/routines", json={
+            "name": "T", "body": "b", "record": ["Code: text"]})
+        replies["text"] = '{"Code": "100"}'
+        client.post("/api/records", json={"answer": "a", "fields": ["Code: text"],
+                                          "routine_name": "T"})
+        rows = list(csv.reader(io.StringIO(
+            client.get("/api/records.csv").get_data(as_text=True))))
+        assert rows[0][2] == "Code", "a text column should carry no unit"
+        assert rows[1][2] == "100"
+
+    def test_a_fixed_declaration_stops_reading_as_broken(self):
+        """The warning was set on a failed save and never cleared, so fixing
+        the fault and saving again left the old complaint on screen."""
+        page = page_script(chat_ui.render_page("t"))
+        save = page[page.index("async function saveRoutine"):]
+        save = save[:save.index("savingRoutine = true;")]
+        assert 'routineWarnEl.textContent = "";' in save, \
+            "the warning is not cleared before a fresh attempt"
