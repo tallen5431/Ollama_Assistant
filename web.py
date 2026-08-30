@@ -1849,15 +1849,60 @@ def with_context(messages: List[Dict[str, str]], context: str) -> List[Dict[str,
 # -----" went through untouched, which is the same forgery with a bracket in
 # it. Matching the shape rather than the wording also covers markers added
 # later without anyone remembering to come back here.
-_FENCE_RE = re.compile(r"^\s*-{3,}\s*(BEGIN|END)\b[^\n]*?-{3,}\s*$", re.M | re.I)
+# `[^\w\n]*` rather than `\s*` at the front, and the same before the end of the
+# line. A leading *invisible* character is not \s, so it slipped a forged marker
+# past a rule anchored on whitespace — which is exactly the U+200B bypass the
+# list below was written for, and it recurred three times over because a list of
+# invisible characters is a list that falls behind Unicode.
+#
+# Confirmed reaching the model before this: U+00AD SOFT HYPHEN, U+061C ARABIC
+# LETTER MARK and the variation selectors U+FE00-FE0F all closed the fence
+# intact. Matching on "not a word character" needs no list: every invisible is
+# one, and so is every stray bullet or quote mark a page might lead with. It
+# cannot over-reach into prose, because a line of prose has letters in it and
+# letters are word characters.
+_FENCE_RE = re.compile(r"^[^\w\n]*-{3,}\s*(BEGIN|END)\b[^\n]*?-{3,}[^\w\n]*$",
+                       re.M | re.I)
 
 # Characters that render as nothing (or as a space) but are not \s, so an
 # anchored pattern skips right past them. A single leading U+200B was enough to
 # smuggle a forged end-marker through: invisible to the reader, invisible to
 # the regex, and read by the model as the real fence.
-_INVISIBLE_RE = re.compile(
-    "[  ᠎ -‏‪-  -⁤⁪-⁯"
-    "　﻿￹-￻]"
+# Two classes, because the right repair differs. A character that occupies
+# width becomes a plain space — it read as a gap and it still does. One that
+# occupies none is removed, because that is what a person already saw: putting
+# a space where a soft hyphen was turns "co\u00adoperate" into "co operate",
+# which is a defence quietly editing the text it is defending.
+_BLANK_RE = re.compile(
+    "["
+    "\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000"
+    # Blank by design and letters to Unicode, so neither \s nor the class below
+    # catches them: a run of these reads to a person as an empty line.
+    "\u115f\u1160\u3164\uffa0"
+    "]"
+)
+
+# Written as escapes, not as the characters themselves. The point of every
+# entry is that it is invisible, so a literal one is unreviewable — and the
+# three that were missing had been missing in plain sight for exactly that
+# reason. This is the whole format category (Cf) plus the variation selectors,
+# rather than the part that had caused trouble so far.
+#
+# What it costs to get wrong: a page could put one of these in front of a
+# forged "----- END WEB RESULTS -----" and close the fence, because the rule
+# that catches a forged marker was anchored on whitespace and none of these is
+# whitespace. Confirmed reaching the model before this fix: U+00AD SOFT HYPHEN,
+# U+061C ARABIC LETTER MARK, and the variation selectors U+FE00-FE0F.
+_ZERO_WIDTH_RE = re.compile(
+    "["
+    "\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2"
+    "\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f"
+    "\ufeff\ufff9-\ufffb"
+    "\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
+    "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
+    # Marks rather than format characters, and invisible all the same.
+    "\ufe00-\ufe0f\U000e0100-\U000e01ef"
+    "]"
 )
 
 
@@ -1890,7 +1935,7 @@ def _defence(text: str) -> str:
     # whether there was one; adding a character and counting the lines again
     # does, without a second list of terminators to keep in step with Python's.
     trailing = "\n" if lines and len((text + ".").splitlines()) > len(lines) else ""
-    text = _INVISIBLE_RE.sub(" ", "\n".join(lines) + trailing)
+    text = _ZERO_WIDTH_RE.sub("", _BLANK_RE.sub(" ", "\n".join(lines) + trailing))
     return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text)
 
 
