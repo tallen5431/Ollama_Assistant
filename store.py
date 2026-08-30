@@ -949,6 +949,23 @@ def declared_kinds(routine_name: str) -> Dict[str, str]:
         return _declared_kinds(routine_name, None, conn)
 
 
+def column_kinds(routine_name: str, row: Dict[str, str],
+                 declared: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """What kind each column of this routine holds, this row included.
+
+    Public because arithmetic needs the same answer storage does. A column's
+    kind is what says a bare "93" is ninety-three miles, and the code that
+    works out a distance from two odometer readings has to read them the same
+    way the code that files them away will.
+
+    The name is tidied exactly as ``add_record`` tidies it, so the two look the
+    column up under the same name.
+    """
+    name = _routine_name(routine_name) or "Routine"
+    with _connect() as conn:
+        return _column_kinds(name, _clean_fields(row), conn, declared)
+
+
 def add_record(
     routine_name: str,
     fields: Dict[str, Any],
@@ -1161,11 +1178,19 @@ def search(query: str, limit: int = _SEARCH_LIMIT) -> Dict[str, List[Dict[str, A
         ]
         # Records are searched on their values, which is where "Uber" or a
         # date actually lives; the routine name is searched too.
+        #
+        # And on `raw` — what the value said before it was standardised. You
+        # search for what you remember writing, and standardising turned "54
+        # miles" into "54 mi" and "1 hour 12 minutes" into "1h 12m". Without
+        # this, tidying the log quietly made half of it unfindable by the words
+        # that were actually in it, which is worse than the untidiness was.
         kept = [
             _record_row(r) for r in conn.execute(
                 "SELECT * FROM records"
                 " WHERE routine_name LIKE ? ESCAPE '\\' OR fields LIKE ? ESCAPE '\\'"
-                " ORDER BY created_at DESC LIMIT ?", (like, like, limit)).fetchall()
+                "    OR raw LIKE ? ESCAPE '\\'"
+                " ORDER BY created_at DESC LIMIT ?",
+                (like, like, like, limit)).fetchall()
         ]
     return {"conversations": found, "records": kept}
 

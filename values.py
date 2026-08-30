@@ -439,13 +439,18 @@ def number_of(text: str, kind: str = "") -> str:
     return found.digits
 
 
-def render(kind: str, number: float, symbol: str = "$") -> str:
+def render(kind: str, number: float, symbol: str = "$", unit: str = "") -> str:
     """A number this app worked out itself, written the way the kind is written.
 
     Separate from ``canonical``, which re-renders something a model wrote and
     must not touch its precision. Here the precision is ours to choose, so it
     is chosen once and consistently: money to the cent, speed to a tenth, and
     a duration in hours and minutes rather than as a decimal nobody reads.
+
+    ``unit`` is the unit the inputs were in. Without it this wrote every
+    distance as miles, so a routine logging kilometres had "13 km" minus
+    "5 km" written down as "8 mi" — the arithmetic right and the label a
+    plain untruth, which is the one thing a log must never contain.
     """
     if number != number:                      # NaN — nothing to say
         return ""
@@ -453,11 +458,11 @@ def render(kind: str, number: float, symbol: str = "$") -> str:
         sign = "-" if number < 0 else ""
         return f"{sign}{symbol}{abs(number):.2f}"
     if kind == SPEED:
-        return f"{_trim(round(number, 1))} mph"
+        return f"{_trim(round(number, 1))} {unit or UNITS[SPEED]}"
     if kind == DURATION:
         return _hm(round(number * 60))
     if kind == DISTANCE:
-        return f"{_trim(round(number, 2))} mi"
+        return f"{_trim(round(number, 2))} {unit or UNITS[DISTANCE]}"
     return _trim(round(number, 4))
 
 

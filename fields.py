@@ -62,8 +62,9 @@ _SOURCE = re.compile(
 
 OPS = "-+*/"
 
-# What comes out of combining two kinds. Absent means "a number", which is the
-# honest answer for arithmetic nobody has taught this about.
+# What comes out of combining two kinds. Absent means the sum has no meaning
+# and is refused — money plus a distance used to fall through to "a number",
+# so "$5" added to "3 mi" was written into the log as "8".
 _RESULT = {
     (values.DISTANCE, "-", values.DISTANCE): values.DISTANCE,
     (values.DISTANCE, "+", values.DISTANCE): values.DISTANCE,
@@ -79,7 +80,29 @@ _RESULT = {
     (values.DISTANCE, "/", values.DURATION): values.SPEED,
     (values.NUMBER, "-", values.NUMBER): values.NUMBER,
     (values.NUMBER, "+", values.NUMBER): values.NUMBER,
+    # Scaling by a plain count keeps the kind: half the fare, twice the run.
+    (values.DISTANCE, "/", values.NUMBER): values.DISTANCE,
+    (values.DISTANCE, "*", values.NUMBER): values.DISTANCE,
+    (values.DURATION, "/", values.NUMBER): values.DURATION,
+    (values.DURATION, "*", values.NUMBER): values.DURATION,
+    (values.SPEED, "/", values.NUMBER): values.SPEED,
+    (values.SPEED, "*", values.NUMBER): values.SPEED,
+    # Like over like is a ratio — how much of the month's mileage this trip was.
+    (values.DISTANCE, "/", values.DISTANCE): values.NUMBER,
+    (values.DURATION, "/", values.DURATION): values.NUMBER,
+    (values.MONEY, "/", values.MONEY): values.NUMBER,
+    (values.NUMBER, "*", values.NUMBER): values.NUMBER,
+    (values.NUMBER, "/", values.NUMBER): values.NUMBER,
+    # A speed held for a time is a distance.
+    (values.SPEED, "*", values.DURATION): values.DISTANCE,
+    (values.DURATION, "*", values.SPEED): values.DISTANCE,
 }
+
+# Kinds whose unit is a real unit of measurement, so two of them can only be
+# added or taken from one another when they are the same unit. Money's "unit"
+# is its currency symbol, and a duration is always held in hours. A timestamp's
+# is its zone, which subtracts correctly *because* the two may differ.
+_MUST_MATCH = (values.DISTANCE, values.SPEED, values.MONEY)
 
 # A timestamp subtracts as seconds, so the difference has to be put back into
 # the units a duration is counted in.
@@ -346,8 +369,14 @@ def from_photos(fields: List[Field],
 
 
 def result_kind(left: str, op: str, right: str) -> str:
-    """What kind the arithmetic produces."""
-    return _RESULT.get((left, op, right), values.NUMBER)
+    """What kind the arithmetic produces, or "" when it produces nothing.
+
+    "" is a refusal, not a shrug. This used to fall back to a bare number for
+    anything it had not been taught, which meant a sum with no meaning still
+    got an answer: adding "$5" to "3 mi" wrote "8" into the log, and a figure
+    in a record is read as a fact about the world.
+    """
+    return _RESULT.get((left, op, right), "")
 
 
 def compute(fields: List[Field], row: Dict[str, str],
@@ -407,6 +436,23 @@ def _one_sum(field: Field, left: values.Value, right: values.Value,
              notes: List[str]) -> None:
     """Work out one computed field, or record why it could not be."""
     kind = result_kind(left.kind, field.op, right.kind)
+    if not kind:
+        filled[field.name] = ""
+        notes.append(f"{field.name}: there is no such sum as {_a(left.kind)} "
+                     f"{field.op} {_a(right.kind)}")
+        return
+    # Same kind, different unit. The numbers are not on the same scale, so
+    # combining them is not arithmetic — "13 km" minus "5 mi" came out as
+    # "8 mi", and "£10.00" plus "$2.00" as "£12.00". Refused rather than
+    # converted: this app has no exchange rate and should not invent one, and
+    # a mile is not a kilometre however confidently a total is written down.
+    if field.op in "+-" and left.kind == right.kind and left.kind in _MUST_MATCH \
+            and left.unit and right.unit and left.unit != right.unit:
+        filled[field.name] = ""
+        notes.append(f"{field.name}: \"{field.left}\" is in {left.unit} and "
+                     f"\"{field.right}\" is in {right.unit} — the same unit "
+                     "for both, or say which the column holds")
+        return
     try:
         number = _apply(left.number, field.op, right.number)
     except ZeroDivisionError:
@@ -432,9 +478,39 @@ def _one_sum(field: Field, left: values.Value, right: values.Value,
         notes.append(f"{field.name}: {field.left} or {field.right} has no "
                      "value to work with")
         return
-    text = values.render(kind, number, left.unit if kind == values.MONEY else "$")
+    unit = _result_unit(kind, left, right)
+    text = values.render(kind, number, unit if kind == values.MONEY else "$", unit)
     filled[field.name] = text
-    numbers[field.name] = values.Value(kind, text, number, "", text)
+    # Carrying the unit, so a second field built on this one is in the same
+    # units as the first. Left blank, a kilometre total became the input to the
+    # next sum as though it were miles.
+    numbers[field.name] = values.Value(kind, text, number, unit, text)
+
+
+def _a(kind: str) -> str:
+    """A kind, as it reads in a sentence."""
+    return ("an " if kind[:1] in "aeiou" else "a ") + (kind or "value")
+
+
+def _result_unit(kind: str, left: values.Value, right: values.Value) -> str:
+    """The unit the answer is in, taken from whichever input decides it.
+
+    Not the default for the kind: a routine logging kilometres asked for a
+    distance and was handed miles.
+    """
+    if kind in (values.DISTANCE, values.MONEY):
+        for side in (left, right):
+            if side.kind == kind and side.unit:
+                return side.unit
+    if kind == values.SPEED:
+        # Distance over time: "km" and "h" make "km/h". A speed straight from
+        # an input keeps whatever it already said.
+        for side in (left, right):
+            if side.kind == values.SPEED and side.unit:
+                return side.unit
+        if left.kind == values.DISTANCE and left.unit:
+            return "mph" if left.unit == "mi" else f"{left.unit}/h"
+    return ""
 
 
 def _apply(left: float, op: str, right: float) -> float:

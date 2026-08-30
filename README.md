@@ -967,6 +967,12 @@ box is at the top of the ☰ list. Typing "A23" finds the thread where that only
 ever appeared in a reply; typing "Brighton" also turns up the trip a routine
 wrote down. Escape or the ✕ clears it.
 
+A record is searched on what it *said* as well as on what it says now.
+Standardising turned "54 miles" into "54 mi" and "1 hour 12 minutes" into
+"1h 12m", so searching for the words you remember writing found nothing —
+tidying the log had quietly made half of it unfindable, which is worse than
+the untidiness was. Both readings match.
+
 > ⚠️ **Anything stored here is readable by anyone who can reach the app.** Until
 > now there was nothing to steal; with history on, your past conversations are
 > on disk and served to whoever asks. If you keep history, turn Basic Auth on:
@@ -1306,13 +1312,39 @@ A declared kind also beats the column vote. Inference is a good guess across a
 column and a good guess is still a guess; it also cannot work on the *first*
 row of a new routine, where there is no column to look at yet.
 
-Two things it will not do, for the same reason the standardiser will not:
+**You do not have to declare the kinds to get the sums.** Writing the obvious
+thing —
+
+```
+Start odometer
+End odometer
+Miles = End odometer - Start odometer
+```
+
+— works. The arithmetic asks storage what kind the column holds, which is the
+same question storage asks when it files the value away, so the two cannot
+disagree about what `102,072 mi` means. Declaring the kinds is still worth
+doing: it settles the first row of a new routine, where there is no column yet,
+and it settles a genuinely ambiguous value like `20:06`, which is a clock time
+in one column and twenty hours in another.
+
+**The answer comes out in the units that went in.** A routine keeping
+kilometres gets kilometres, and a fare in pounds totals in pounds — including
+through a chain, where a second sum built on the first stays in the first's
+units.
+
+Three things it will not do, for the same reason the standardiser will not:
 
 - **Invent a figure.** Missing input, or a divide by zero, gives an empty cell
   and a note saying which input was missing — never a number.
 - **Force a value into its declared kind.** A `Total earnings` that reads
   `unknown` is reported and *left as it is*. Overwriting it with a blank would
   throw away the one thing it told you, and leave a log that looks complete.
+- **Add unlike things.** Two units of the same kind that are not the same unit
+  — miles and kilometres, pounds and dollars — are refused with a note naming
+  both, never converted: there is no exchange rate in this app and it should
+  not invent one. A sum with no meaning at all, money plus a distance, is
+  refused outright rather than answered as a bare number.
 
 Everything written before this still works: a list of bare names is a list of
 untyped read fields, which is exactly what it always meant. The shipped

@@ -300,6 +300,59 @@ class TestRoutinesDeclareWhatTheyKeep:
 # Getting them back out
 # --------------------------------------------------------------------------
 
+class TestArithmeticDoesNotNeedTheKindsSpelledOut:
+    """A column's kind is what says a bare "93" is ninety-three miles, and it
+    can be seen without being told. Before this the sums read *only* declared
+    kinds, so the obvious way to write a routine —
+
+        Start odometer
+        End odometer
+        Miles = End odometer - Start odometer
+
+    — logged a blank every run and reported "nothing recorded for End odometer
+    or Start odometer" while both sat in the row reading "102,072 mi"."""
+
+    UNTYPED = ["Start odometer", "End odometer",
+               "Miles = End odometer - Start odometer"]
+
+    def run(self, client, replies, said):
+        replies["text"] = json.dumps(said)
+        return client.post("/api/records", json={
+            "answer": "a", "fields": self.UNTYPED, "routine_name": "🚗 Trip"},
+        ).get_json()
+
+    def test_it_works_the_sum_out_from_what_the_values_say(self, client, replies):
+        out = self.run(client, replies, {"Start odometer": "102,018 mi",
+                                         "End odometer": "102,072 mi"})
+        assert out["record"]["fields"]["Miles"] == "54 mi"
+        assert out["gaps"] == []
+
+    def test_a_bare_number_is_read_as_the_column_it_is_in(self, client, replies):
+        """The second run has the first to go on, so "102,140" with no unit on
+        it is still miles — which is how a real log is actually written."""
+        self.run(client, replies, {"Start odometer": "102,018 mi",
+                                   "End odometer": "102,072 mi"})
+        out = self.run(client, replies, {"Start odometer": "102,072",
+                                         "End odometer": "102,140"})
+        assert out["record"]["fields"]["Miles"] == "68 mi"
+
+    def test_the_sum_and_the_stored_value_read_it_the_same_way(self, client, replies):
+        """Storage and arithmetic ask the same question of the same column, so
+        they cannot disagree about what the value in it means."""
+        out = self.run(client, replies, {"Start odometer": "102,018 miles",
+                                         "End odometer": "102,072 miles"})
+        fields_ = out["record"]["fields"]
+        assert fields_["Start odometer"] == "102018 mi"
+        assert fields_["Miles"] == "54 mi"
+
+    def test_a_declaration_still_wins_where_there_is_one(self, client, replies):
+        replies["text"] = json.dumps({"Code": "100", "Also": "200"})
+        out = client.post("/api/records", json={
+            "answer": "a", "fields": ["Code: text", "Also: text"],
+            "routine_name": "T"}).get_json()
+        assert out["record"]["fields"]["Code"] == "100"
+
+
 class TestTheRoutes:
     def test_a_fresh_install_has_none(self, client):
         assert client.get("/api/records").get_json() == {"records": [], "columns": []}

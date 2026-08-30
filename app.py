@@ -637,7 +637,24 @@ def api_record_create() -> Any:
     photos = body.get("photos")
     taken = fields.from_photos(declared, photos if isinstance(photos, list) else None)
     read = {**extracted, **{k: v for k, v in taken.items() if v}}
-    computed, gaps = fields.compute(declared, read) if read else ({}, [])
+    # The kinds the columns actually hold, not only the ones written down.
+    # Without this, arithmetic worked *only* on a routine whose every input
+    # carried an explicit "name: kind" — write the obvious
+    #
+    #     Start odometer
+    #     End odometer
+    #     Miles = End odometer - Start odometer
+    #
+    # and Miles came out blank on every run, reporting "nothing recorded for
+    # End odometer or Start odometer" while both sat in the row reading
+    # "102,072 mi". Asking storage means the sum reads a value exactly as the
+    # column that files it does, so the two can never disagree.
+    if read:
+        known = store.column_kinds(str(body.get("routine_name") or "Routine"), read,
+                                   fields.kinds(declared))
+        computed, gaps = fields.compute(declared, read, known)
+    else:
+        computed, gaps = {}, []
     # Declared order, so the table reads the way the routine was written.
     row = {f.name: computed.get(f.name, read.get(f.name, ""))
            for f in declared}

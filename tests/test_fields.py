@@ -150,10 +150,32 @@ class TestWorkingItOut:
         (values.MONEY, "/", values.DURATION, values.MONEY),
         (values.DISTANCE, "/", values.DURATION, values.SPEED),
         (values.MONEY, "-", values.MONEY, values.MONEY),
-        (values.SPEED, "*", values.MONEY, values.NUMBER),   # nothing sensible
+        (values.DISTANCE, "*", values.NUMBER, values.DISTANCE),
+        (values.SPEED, "*", values.DURATION, values.DISTANCE),
+        (values.MONEY, "/", values.MONEY, values.NUMBER),
+        (values.NUMBER, "/", values.NUMBER, values.NUMBER),
     ])
     def test_the_result_knows_what_it_is(self, left, op, right, expected):
         assert fields.result_kind(left, op, right) == expected
+
+    @pytest.mark.parametrize("left, op, right", [
+        (values.SPEED, "*", values.MONEY),
+        (values.MONEY, "+", values.DISTANCE),
+        (values.DISTANCE, "+", values.DURATION),
+        (values.TIMESTAMP, "+", values.TIMESTAMP),
+    ])
+    def test_a_sum_with_no_meaning_has_no_answer(self, left, op, right):
+        """It used to fall through to "a number", which is how "$5" added to
+        "3 mi" was written into the log as "8". A figure in a record is read
+        as a fact, so there must not be one where there is no sum."""
+        assert fields.result_kind(left, op, right) == ""
+
+    def test_and_it_is_refused_in_words_rather_than_left_blank(self):
+        parsed = fields.parse(["Fare: money", "Distance: distance",
+                               "Nonsense = Fare + Distance"])
+        got, notes = fields.compute(parsed, {"Fare": "$5", "Distance": "3 mi"})
+        assert got["Nonsense"] == ""
+        assert notes and "no such sum" in notes[0]
 
     def test_a_computed_value_is_rendered_as_its_kind(self):
         assert values.render(values.MONEY, 26.2506) == "$26.25"
@@ -161,11 +183,89 @@ class TestWorkingItOut:
         assert values.render(values.DURATION, 4.41667) == "4h 25m"
         assert values.render(values.DISTANCE, 93.0) == "93 mi"
 
+    def test_a_result_is_written_in_the_unit_it_was_worked_out_in(self):
+        """Without the unit this wrote every distance as miles, so a routine
+        keeping kilometres had "13 km" less "5 km" logged as "8 mi" — the
+        arithmetic right and the label a plain untruth."""
+        assert values.render(values.DISTANCE, 8.0, unit="km") == "8 km"
+        assert values.render(values.SPEED, 21.056, unit="km/h") == "21.1 km/h"
+        assert values.render(values.MONEY, 12.0, "£") == "£12.00"
+
     def test_a_negative_result_keeps_its_sign(self):
         assert values.render(values.MONEY, -12.5) == "-$12.50"
 
     def test_nothing_at_all_renders_as_nothing(self):
         assert values.render(values.MONEY, float("nan")) == ""
+
+
+class TestTheAnswerIsInTheUnitsTheQuestionWasAsked:
+    """A number is only half of a value. This subsystem exists so that the
+    figures in the log are true, and a total labelled in the wrong unit is not
+    a formatting slip — it is a false statement about how far somebody drove."""
+
+    KM = fields.parse(["Start: distance", "End: distance", "Run = End - Start"])
+
+    def test_kilometres_in_kilometres_out(self):
+        got, notes = fields.compute(self.KM, {"Start": "5 km", "End": "13 km"})
+        assert got["Run"] == "8 km" and not notes
+
+    def test_miles_in_miles_out(self):
+        got, _ = fields.compute(self.KM, {"Start": "5 mi", "End": "13 mi"})
+        assert got["Run"] == "8 mi"
+
+    def test_a_speed_is_per_hour_of_whatever_the_distance_was(self):
+        parsed = fields.parse(["D: distance", "T: duration", "Pace = D / T"])
+        assert fields.compute(parsed, {"D": "10 km", "T": "2h"})[0]["Pace"] == "5 km/h"
+        assert fields.compute(parsed, {"D": "10 mi", "T": "2h"})[0]["Pace"] == "5 mph"
+
+    def test_the_currency_is_whichever_one_was_recorded(self):
+        parsed = fields.parse(["Fare: money", "Tip: money", "Total = Fare + Tip"])
+        got, _ = fields.compute(parsed, {"Fare": "£10.00", "Tip": "£2.00"})
+        assert got["Total"] == "£12.00"
+
+    def test_a_sum_built_on_a_sum_stays_in_the_same_unit(self):
+        """The first result used to go back into the pot with no unit on it,
+        so the second sum treated a kilometre total as miles."""
+        parsed = fields.parse(["Start: distance", "End: distance", "Two: number",
+                               "Run = End - Start", "Half = Run / Two"])
+        got, _ = fields.compute(parsed, {"Start": "5 km", "End": "13 km", "Two": "2"})
+        assert got["Run"] == "8 km" and got["Half"] == "4 km"
+
+
+class TestTwoUnitsAreNotOneUnit:
+    """Refused, never converted. There is no exchange rate in this app and it
+    must not invent one; a mile is not a kilometre however confidently a total
+    is written down."""
+
+    def test_miles_taken_from_kilometres_is_not_a_distance(self):
+        parsed = fields.parse(["Start: distance", "End: distance",
+                               "Run = End - Start"])
+        got, notes = fields.compute(parsed, {"Start": "5 mi", "End": "13 km"})
+        assert got["Run"] == ""
+        assert notes and "km" in notes[0] and "mi" in notes[0]
+
+    def test_pounds_plus_dollars_is_not_an_amount(self):
+        parsed = fields.parse(["Fare: money", "Tip: money", "Total = Fare + Tip"])
+        got, notes = fields.compute(parsed, {"Fare": "£10.00", "Tip": "$2.00"})
+        assert got["Total"] == ""
+        assert notes and "£" in notes[0] and "$" in notes[0]
+
+    def test_but_dividing_across_units_is_ordinary(self):
+        """The rule is about adding unlike things, not about all arithmetic:
+        money over an elapsed time is the rate this whole feature was for."""
+        parsed = fields.parse(["Fare: money", "Hours: duration",
+                               "Rate = Fare / Hours"])
+        got, notes = fields.compute(parsed, {"Fare": "$23.19", "Hours": "1h 30m"})
+        assert got["Rate"] == "$15.46" and not notes
+
+    def test_a_timestamp_subtracts_across_zones(self):
+        """A timestamp's "unit" is its offset, and the two differing is exactly
+        when subtracting them is worth doing."""
+        parsed = fields.parse(["Start: timestamp", "End: timestamp",
+                               "Took = End - Start"])
+        got, _ = fields.compute(parsed, {"Start": "2026-01-01 19:54 UTC-04:00",
+                                         "End": "2026-01-01 21:06 UTC-05:00"})
+        assert got["Took"] == "2h 12m"
 
 
 class TestADeclarationBeatsAGuess:
