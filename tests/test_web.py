@@ -66,8 +66,48 @@ class TestAddressGuard:
         with pytest.raises(web.WebError, match="http"):
             web.check_url(url)
 
+    @pytest.mark.parametrize("what, addr", [
+        # Python's is_global unwraps three of these and refuses them; it has no
+        # opinion on the rest and called every one of them global, so each was
+        # a spelling of a LAN address that walked straight through the guard.
+        ("NAT64, well-known prefix", "64:ff9b::a00:1"),
+        ("NAT64, loopback", "64:ff9b::7f00:1"),
+        ("NAT64, local-use prefix", "64:ff9b:1::a00:1"),
+        ("IPv4-compatible", "::10.0.0.1"),
+        ("IPv4-compatible, loopback", "::127.0.0.1"),
+        ("IPv4-translated (SIIT)", "::ffff:0:10.0.0.1"),
+        ("IPv4-mapped", "::ffff:10.0.0.1"),
+        ("6to4", "2002:a00:1::"),
+    ])
+    def test_an_ipv6_address_is_only_as_public_as_the_ipv4_inside_it(self, what, addr):
+        """NAT64 is the one that matters: 64:ff9b::/96 is the standard prefix,
+        and on any IPv6-only network with a translator — a mobile carrier, a
+        cloud VPC — it reaches the embedded address for real. This app already
+        refuses Tailscale's 100.64/10, so another spelling of 10.0.0.1 is the
+        same hole."""
+        with pytest.raises(web.WebError, match="private or local"):
+            web.check_url(f"http://[{addr}]/")
+
+    def test_the_socket_guard_refuses_them_too(self):
+        """It is the half that catches DNS rebinding, and it shared the rule."""
+        for addr in ("64:ff9b::a00:1", "::10.0.0.1", "::ffff:0:10.0.0.1"):
+            assert web._peer_check(addr) == "private", addr
+
+    def test_but_a_wrapper_around_a_public_address_is_public(self):
+        """The rule is what is inside, not the wrapper — refusing all NAT64
+        would break every IPv6-only network this could run on."""
+        assert web._peer_check("64:ff9b::808:808") == "public"   # 8.8.8.8
+        assert web.check_url("http://[64:ff9b::808:808]/")
+
     def test_public_address_passes(self):
         assert web.check_url("http://8.8.8.8/") == "http://8.8.8.8/"
+
+    @pytest.mark.parametrize("url", [
+        "http://[2606:4700:4700::1111]/",     # Cloudflare, ordinary IPv6
+        "http://[2001:4860:4860::8888]/",     # Google, ordinary IPv6
+    ])
+    def test_and_so_does_ordinary_ipv6(self, url):
+        assert web.check_url(url) == url
 
     def test_unresolvable_host_is_refused(self):
         with pytest.raises(web.WebError):

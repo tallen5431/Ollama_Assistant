@@ -253,20 +253,60 @@ def _address_check(host: str) -> str:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             return "private"      # unreadable is not something to dial either
-        if not ip.is_global:
+        if not _is_public(ip):
             return "private"
     return "public"
+
+
+# IPv6 prefixes that carry an IPv4 address in their last 32 bits. Python's
+# is_global already sees through three of these wrappers — ::ffff:0:0/96
+# (IPv4-mapped), 2002::/16 (6to4) and Teredo — and correctly calls
+# "::ffff:10.0.0.1" private. It has no opinion on the three below and called
+# every one of them global, so each was a way of writing a LAN address that the
+# guard waved through:
+#
+#   http://[64:ff9b::a00:1]/      -> 10.0.0.1, via any NAT64 translator
+#   http://[::10.0.0.1]/          -> 10.0.0.1, IPv4-compatible
+#   http://[::ffff:0:10.0.0.1]/   -> 10.0.0.1, IPv4-translated
+#
+# NAT64 is the one that matters: 64:ff9b::/96 is the standard well-known
+# prefix, and on any IPv6-only network with a translator — a mobile carrier, a
+# cloud VPC, plenty of corporate networks — it reaches the embedded address for
+# real. This app already takes the trouble to refuse Tailscale's 100.64/10, so
+# a spelling of 10.0.0.1 that walks straight through is the same hole.
+_IPV4_INSIDE = (
+    ipaddress.ip_network("64:ff9b::/96"),       # NAT64, well-known prefix
+    ipaddress.ip_network("64:ff9b:1::/48"),     # NAT64, local-use prefix
+    ipaddress.ip_network("::/96"),              # IPv4-compatible (deprecated)
+    ipaddress.ip_network("::ffff:0:0:0/96"),    # IPv4-translated (SIIT)
+)
+
+
+def _is_public(ip: "ipaddress._BaseAddress") -> bool:
+    """Whether an address is one this app may dial.
+
+    is_global, plus the wrappers it does not unwrap: an IPv6 address that
+    embeds an IPv4 one is only as public as the address it embeds.
+    """
+    if not ip.is_global:
+        return False
+    if ip.version == 6:
+        for net in _IPV4_INSIDE:
+            if ip in net:
+                inside = ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
+                return bool(inside.is_global)
+    return True
 
 
 def _peer_check(ip: str) -> str:
     """``"public"`` or ``"private"`` for an address already resolved.
 
-    The same is_global rule as _address_check, without the lookup — there is
-    nothing left to look up — and separate from it so that a test can allow a
-    loopback stand-in at one and still meet the real rule at the other.
+    The same rule as _address_check, without the lookup — there is nothing left
+    to look up — and separate from it so that a test can allow a loopback
+    stand-in at one and still meet the real rule at the other.
     """
     try:
-        return "public" if ipaddress.ip_address(ip).is_global else "private"
+        return "public" if _is_public(ipaddress.ip_address(ip)) else "private"
     except ValueError:
         return "private"
 

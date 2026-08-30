@@ -360,6 +360,13 @@ reads it twice.
 
 ## Web access
 
+> ⚠️ **Address guard.** Every URL — pasted, or picked by a model out of a page
+> — is resolved and checked before it is fetched, and again on the connected
+> socket so a name that answers differently the second time cannot slip past.
+> An IPv6 address is judged by the IPv4 address it embeds, if it embeds one:
+> `64:ff9b::a00:1` is 10.0.0.1 wearing a NAT64 prefix, and on an IPv6-only
+> network with a translator it reaches it for real.
+>
 🌐 **Web access** (off by default) lets the app read the web on the model's
 behalf. The model itself never gets a network connection — the app does the
 fetching and hands over text.
