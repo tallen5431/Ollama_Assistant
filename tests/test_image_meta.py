@@ -454,13 +454,25 @@ class TestRenderingTheFacts:
 # --------------------------------------------------------------------------
 
 class TestFindingItInAThread:
+    """Aligned to the images the model will actually be sent.
+
+    These used to cover conversation_image_meta, which read one turn. That is
+    the wrong unit: the block it feeds labels its lines "Image 1", "Image 2",
+    and with CHAT_IMAGE_TURNS above 1 the model is sent images from several
+    turns — so the numbering has to count what is being sent, not what was
+    attached last.
+    """
+
+    def sent(self, messages, keep=1):
+        return web.sent_image_meta(web.keep_recent_images(messages, keep_turns=keep))
+
     def test_it_comes_from_the_turn_the_images_came_from(self):
         messages = [
             {"role": "user", "content": "look", "images": ["a"], "image_meta": [FULL]},
             {"role": "assistant", "content": "ok"},
             {"role": "user", "content": "and again?"},
         ]
-        assert web.conversation_image_meta(messages) == [FULL]
+        assert self.sent(messages) == [FULL]
 
     def test_a_newer_photo_without_metadata_hides_an_older_one(self):
         """Entry n must describe photo n — never a previous turn's photo."""
@@ -469,22 +481,38 @@ class TestFindingItInAThread:
             {"role": "assistant", "content": "ok"},
             {"role": "user", "content": "two", "images": ["b"]},
         ]
-        assert web.conversation_image_meta(messages) == []
+        assert self.sent(messages) == []
 
     def test_it_lines_up_with_the_images_positionally(self):
         messages = [{"role": "user", "content": "x", "images": ["a", "b"],
                      "image_meta": [None, FULL]}]
-        assert web.conversation_image_meta(messages) == [None, FULL]
+        assert self.sent(messages) == [None, FULL]
+
+    def test_a_photo_with_no_record_still_holds_its_place(self):
+        """Otherwise every photo after it shifts up a number, and every time in
+        the answer belongs to a different picture."""
+        messages = [{"role": "user", "content": "x", "images": ["a", "b", "c"],
+                     "image_meta": [None, FULL, None]}]
+        assert self.sent(messages) == [None, FULL, None]
+
+    def test_it_counts_every_turn_still_carrying_images(self):
+        messages = [
+            {"role": "user", "content": "one", "images": ["a"], "image_meta": [FULL]},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "two", "images": ["b"], "image_meta": [FULL]},
+        ]
+        assert len(self.sent(messages, keep=3)) == 2, \
+            "the model sees two photos; the block must describe two"
 
     @pytest.mark.parametrize("meta", ["nonsense", 7, {"lat": 1}, [1, 2], [[]]])
     def test_a_malformed_payload_is_ignored_rather_than_trusted(self, meta):
         messages = [{"role": "user", "content": "x", "images": ["a"], "image_meta": meta}]
-        assert web.conversation_image_meta(messages) == []
+        assert self.sent(messages) == []
 
     def test_a_thread_with_no_images_has_nothing_to_find(self):
-        assert web.conversation_image_meta([{"role": "user", "content": "hi"}]) == []
-        assert web.conversation_image_meta([]) == []
-        assert web.conversation_image_meta(None) == []
+        assert self.sent([{"role": "user", "content": "hi"}]) == []
+        assert self.sent([]) == []
+        assert web.sent_image_meta(None) == []
 
     def test_stripping_leaves_the_rest_of_the_message_alone(self):
         messages = [{"role": "user", "content": "x", "images": ["a"], "image_meta": [FULL]}]

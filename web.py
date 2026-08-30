@@ -2724,29 +2724,6 @@ def conversation_images(messages: List[Dict[str, Any]]) -> List[str]:
     return []
 
 
-def conversation_image_meta(messages: List[Dict[str, Any]]) -> List[Optional[Dict[str, Any]]]:
-    """EXIF facts from the same turn ``conversation_images`` picked.
-
-    Read positionally against that turn's ``images``, so entry *n* describes
-    photo *n*. A turn whose photos carried nothing readable gives back an empty
-    list rather than a list of ``None``, which saves the caller a scan.
-    """
-    for msg in reversed(messages or []):
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            continue
-        images = msg.get("images")
-        if not isinstance(images, list) or not any(isinstance(i, str) for i in images):
-            continue
-        meta = msg.get("image_meta")
-        if not isinstance(meta, list):
-            return []
-        # A dict per photo; anything else in the slot means "nothing known",
-        # which is what a screenshot or a stripped-down export looks like.
-        entries = [m if isinstance(m, dict) and m else None for m in meta]
-        return entries if any(entries) else []
-    return []
-
-
 def sent_image_meta(messages: List[Dict[str, Any]]) -> List[Optional[Dict[str, Any]]]:
     """EXIF for every photo still attached to what is about to be sent, in order.
 
@@ -2755,10 +2732,11 @@ def sent_image_meta(messages: List[Dict[str, Any]]) -> List[Optional[Dict[str, A
     the metadata block labels its lines "Image 1", "Image 2" and nothing in the
     image data itself says which is which.
 
-    ``conversation_image_meta`` describes one turn, and that was the bug: with
-    CHAT_IMAGE_TURNS above 1 the model is sent images from several turns while
-    the block described only the newest. "Image 1" then pointed at the third
-    photo the model could see, and every time in the answer was somebody else's.
+    This used to read one turn — the newest that carried photos — and that was
+    the bug: with CHAT_IMAGE_TURNS above 1 the model is sent images from several
+    turns while the block described only the newest. "Image 1" then pointed at
+    the third photo the model could see, and every time in the answer was
+    somebody else's.
     """
     out: List[Optional[Dict[str, Any]]] = []
     for msg in messages or []:
