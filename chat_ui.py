@@ -3600,7 +3600,13 @@ _PAGE = r"""<!doctype html>
             messages.push({ role: "assistant", content: msg.content });
           }
         }
-        if (convo.model && modelEl.querySelector('option[value="' + convo.model + '"]')) {
+        // Compared, not interpolated into a selector. A model name is whatever
+        // `ollama create` was given, and one containing a double quote made
+        // querySelector throw — which happens here, part-way through opening a
+        // thread, so the whole conversation stopped replaying and the failure
+        // looked like the thread being gone rather than a name with a quote in.
+        if (convo.model && Array.prototype.some.call(
+              modelEl.options, o => o.value === convo.model)) {
           modelEl.value = convo.model;
         }
         setChatTitle(convo.title);

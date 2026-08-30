@@ -3032,3 +3032,24 @@ class TestAnInvisibleCharacterCannotHideAForgedMarker:
     def test_but_a_blank_that_had_width_becomes_a_space(self):
         assert web._defence("a b") == "a b"
         assert web._defence("a　b") == "a b"
+
+
+class TestTheTitleIsWhateverTheTitleSays:
+    """Pinned because it looks wrong and is not. <title> is RCDATA: HTMLParser
+    hands its whole contents over as one run of text and never reports a tag
+    inside it, so "<title>ok<script>x</script></title>" really does have that
+    whole string as its title — which is also what a browser puts in the tab.
+    It is defended and fenced like any other retrieved text before a model sees
+    it, so faithfulness is the right behaviour rather than a leak."""
+
+    def test_markup_inside_a_title_is_text_not_a_tag(self):
+        parsed = web.html_to_text("<title>ok<script>alert(1)</script></title><p>b</p>")
+        assert parsed["title"] == "ok<script>alert(1)</script>"
+        assert parsed["text"] == "b", "the script did not leak into the body"
+
+    def test_an_ordinary_title_is_unaffected(self):
+        assert web.html_to_text("<title>Widget 5 released</title>")["title"] == \
+            "Widget 5 released"
+
+    def test_and_entities_still_resolve(self):
+        assert web.html_to_text("<title>A &amp; B</title>")["title"] == "A & B"
