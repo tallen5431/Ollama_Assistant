@@ -13,6 +13,8 @@ import importlib
 import io
 import json
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -345,6 +347,18 @@ class TestArithmeticDoesNotNeedTheKindsSpelledOut:
         assert fields_["Start odometer"] == "102018 mi"
         assert fields_["Miles"] == "54 mi"
 
+    def test_a_refusal_reaches_the_browser_as_a_reason(self, client, replies):
+        """End to end: the sum is refused, the cell is empty, and the response
+        carries why — which is what the line under the reply shows."""
+        replies["text"] = json.dumps({"Fare": "£10.00", "Tip": "$2.00"})
+        out = client.post("/api/records", json={
+            "answer": "a", "routine_name": "T",
+            "fields": ["Fare: money", "Tip: money", "Total = Fare + Tip"]},
+        ).get_json()
+        assert out["record"]["fields"]["Total"] == ""
+        assert len(out["gaps"]) == 1
+        assert "£" in out["gaps"][0] and "$" in out["gaps"][0]
+
     def test_a_declaration_still_wins_where_there_is_one(self, client, replies):
         replies["text"] = json.dumps({"Code": "100", "Also": "200"})
         out = client.post("/api/records", json={
@@ -484,8 +498,25 @@ class TestThePage:
     def test_the_kept_line_follows_the_declared_order(self):
         """jsonify sorts keys, so the wire order is alphabetical."""
         page = self.page()
-        assert "showKept(view, data.record, routine.record)" in page
+        assert "showKept(view, data.record, routine.record," in page
         assert "order && order.length ? order : Object.keys" in page
+
+    def test_why_a_column_came_out_empty_is_said_where_it_happened(self):
+        """The route has always returned the reasons and the page threw them
+        away, so a fare in pounds added to a tip in dollars showed a missing
+        column and nothing else. An empty cell in a log is the last thing
+        anybody thinks to hover over."""
+        page = self.page()
+        assert "(data.gaps || []).concat(data.mismatched || [])" in page
+        at = page.index("function showKept")
+        body = page[at:at + 1600]
+        assert 'note.className = "kept-gap"' in body
+        assert "note.textContent" in body and "note.title = gaps.join" in body
+
+    def test_the_notes_line_is_omitted_when_there_is_nothing_to_note(self):
+        page = self.page()
+        at = page.index("function showKept")
+        assert "if (!gaps || !gaps.length) return;" in page[at:at + 1600]
 
     def test_stored_text_never_becomes_markup(self):
         """A routine name and a field value are both stored text."""
@@ -856,3 +887,61 @@ class TestYouAreToldWhatIsWrongWithADeclaration:
         save = save[:save.index("savingRoutine = true;")]
         assert 'routineWarnEl.textContent = "";' in save, \
             "the warning is not cleared before a fresh attempt"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+class TestTheKeptLineUnderTheReply:
+    """The shipped showKept, run against a stand-in DOM. What matters here is
+    what actually reaches the screen: a routine can produce a perfectly valid
+    row with one column silently missing, and the only place that is visible
+    at the time is this line."""
+
+    def drive(self, record, order, gaps):
+        page = page_script(chat_ui.render_page("t"))
+        at = page.index("      function showKept")
+        body = page[at:page.index("\n      // Which routine's records", at)]
+        harness = """
+        const made = [];
+        const document = { createElement: (tag) => {
+          const el = { tag, className: "", textContent: "", title: "",
+                       addEventListener() {} };
+          made.push(el); return el; } };
+        function openDrawer() {}
+        const view = { root: { appendChild() {} } };
+        """
+        call = ("showKept(view, %s, %s, %s);\nconsole.log(JSON.stringify(made));"
+                % (json.dumps(record), json.dumps(order), json.dumps(gaps)))
+        out = subprocess.run(["node", "-e", "\n".join([harness, body, call])],
+                             capture_output=True, text=True, check=True, timeout=30)
+        return json.loads(out.stdout)
+
+    RECORD = {"fields": {"Fare": "$20.00", "Tip": "", "Total": ""}}
+    ORDER = ["Fare: money", "Tip: money", "Total = Fare + Tip"]
+
+    def test_a_clean_run_says_only_what_it_kept(self):
+        made = self.drive(self.RECORD, ["Fare"], [])
+        assert [e["className"] for e in made] == ["kept"]
+        assert made[0]["textContent"] == "🗒 Kept: Fare $20.00"
+
+    def test_one_reason_is_given_in_full(self):
+        gap = 'Total: "Fare" is in £ and "Tip" is in $ — the same unit for both'
+        made = self.drive(self.RECORD, ["Fare"], [gap])
+        assert [e["className"] for e in made] == ["kept", "kept-gap"]
+        assert made[1]["textContent"] == "⚠ " + gap
+
+    def test_two_reasons_are_still_read_at_a_glance(self):
+        made = self.drive(self.RECORD, ["Fare"], ["a: one", "b: two"])
+        assert made[1]["textContent"] == "⚠ a: one · b: two"
+
+    def test_more_than_two_are_counted_and_kept_on_hover(self):
+        """Otherwise the line under a reply becomes a paragraph."""
+        gaps = ["a: one", "b: two", "c: three"]
+        made = self.drive(self.RECORD, ["Fare"], gaps)
+        assert made[1]["textContent"] == "⚠ 3 fields not worked out"
+        assert made[1]["title"] == "a: one\nb: two\nc: three"
+
+    def test_a_reason_goes_in_as_text_whatever_it_says(self):
+        """It quotes field names, which are stored text like any other."""
+        made = self.drive(self.RECORD, ["Fare"], ["<img onerror=x>: nope"])
+        assert made[1]["textContent"] == "⚠ <img onerror=x>: nope"
+        assert "innerHTML" not in str(made[1])

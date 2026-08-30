@@ -642,6 +642,13 @@ _PAGE = r"""<!doctype html>
       .kept { font-size:var(--fs-xs); color:var(--muted); margin:0.3rem 0 0 0.3rem;
               cursor:pointer; }
       .kept:hover { color:var(--text); }
+      /* Why a column came out empty, said at the moment it happened — which is
+         the moment it can still be fixed, with the photos on screen and the
+         routine one tap away. Not a hover: an empty cell in a log is exactly
+         the thing nobody thinks to hover over. */
+      .kept-gap { font-size:var(--fs-xs); color:var(--muted); cursor:pointer;
+                  margin:0.15rem 0 0 0.3rem; }
+      .kept-gap:hover { color:var(--text); }
       #recordList { overflow:auto; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
@@ -3865,13 +3872,20 @@ _PAGE = r"""<!doctype html>
               photos: lastPhotoMeta() }) });
           if (!resp.ok) return;
           const data = await resp.json();
-          if (data.record && view) showKept(view, data.record, routine.record);
+          // The gaps travel with the record. A blank column is only reassuring
+          // once you know it is blank because no elapsed time was recorded —
+          // or because a fare in pounds was added to a tip in dollars — rather
+          // than because something broke.
+          if (data.record && view) {
+            showKept(view, data.record, routine.record,
+                     (data.gaps || []).concat(data.mismatched || []));
+          }
         } catch (e) { /* the answer is what matters; this is the extra */ }
       }
 
       // A line under the reply, so a record being kept is visible at the moment
       // it happens rather than discovered later in a drawer.
-      function showKept(view, record, order) {
+      function showKept(view, record, order, gaps) {
         const line = document.createElement("div");
         line.className = "kept";
         // Ordered by what the routine declared, not by the object's keys:
@@ -3884,6 +3898,16 @@ _PAGE = r"""<!doctype html>
         line.title = "Saved to Records. Tap to open them.";
         line.addEventListener("click", () => openDrawer("records"));
         view.root.appendChild(line);
+        if (!gaps || !gaps.length) return;
+        // One or two are worth reading in full. More than that and the line
+        // becomes a paragraph, so it says how many and keeps the rest on hover.
+        const note = document.createElement("div");
+        note.className = "kept-gap";
+        note.textContent = "⚠ " + (gaps.length <= 2 ? gaps.join(" · ")
+                                   : gaps.length + " fields not worked out");
+        note.title = gaps.join("\n");
+        note.addEventListener("click", () => openDrawer("records"));
+        view.root.appendChild(note);
       }
 
       // Which routine's records are on screen. "" is all of them, which is also
