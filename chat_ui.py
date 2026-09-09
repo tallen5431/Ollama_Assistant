@@ -642,9 +642,29 @@ _PAGE = r"""<!doctype html>
       .kept { font-size:var(--fs-xs); color:var(--muted); margin:0.3rem 0 0 0.3rem;
               cursor:pointer; }
       .kept:hover { color:var(--text); }
+      /* Why a column came out empty, said at the moment it happened — which is
+         the moment it can still be fixed, with the photos on screen and the
+         routine one tap away. Not a hover: an empty cell in a log is exactly
+         the thing nobody thinks to hover over. */
+      .kept-gap { font-size:var(--fs-xs); color:var(--muted); cursor:pointer;
+                  margin:0.15rem 0 0 0.3rem; }
+      .kept-gap:hover { color:var(--text); }
       #recordList { overflow:auto; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
+      /* A value that was standardised on the way in. Quiet on purpose — this
+         is almost every cell in a healthy log, so anything louder would read
+         as a column of warnings. Hover (or long-press) says what it was. */
+      #recordList .tidied { border-bottom:1px dotted var(--faint); }
+      /* Worked out here rather than read off the answer. Marked because an
+         empty one is information — it means nothing was recorded to work it
+         out from — and an unmarked blank just looks like a failure. */
+      #recordList .derived { color:var(--muted); font-style:italic; }
+      #recordList .derived:empty::after { content:"—"; opacity:0.5; }
+      /* The declaration box is prose-ish, so it gets prose-ish room. */
+      #rRecord { min-height:4.5rem; resize:vertical; font-family:inherit; }
+      .rechint code { font-size:0.9em; background:var(--surface2);
+                      padding:0.05rem 0.25rem; border-radius:0.2rem; }
       #recordList a.drawer-new { text-align:center; text-decoration:none;
                                  padding:0.45rem; color:var(--on-accent);
                                  display:flex; align-items:center;
@@ -723,6 +743,11 @@ _PAGE = r"""<!doctype html>
       <symbol id="i-shot" viewBox="0 0 24 24"><path d="M9 3H5a2 2 0 0 0-2 2v4M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4M15 21h4a2 2 0 0 0 2-2v-4"/></symbol>
       <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+      <!-- Two sheets, the usual "copy" shorthand. On a phone this button opens
+           the share sheet rather than the clipboard, but the meaning people
+           read off the icon — "take this text away with me" — is the same. -->
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
+      <symbol id="i-eraser" viewBox="0 0 24 24"><path d="M4 16l8-8 6 6-5 5H7z"/><path d="M9 21h11"/></symbol>
       <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
       <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></symbol>
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14.4A8.6 8.6 0 0 1 9.6 3.5a8.6 8.6 0 1 0 10.9 10.9z"/></symbol>
@@ -795,7 +820,17 @@ _PAGE = r"""<!doctype html>
             <option value="0">Turn off for this routine</option>
           </select>
           <label for="rRecord">Keep a record of each run</label>
-          <input id="rRecord" placeholder="distance, elapsed, average speed">
+          <!-- A box rather than a line, because a field can now say what it
+               holds and how it is worked out, and those do not fit on one
+               line three at a time. A bare list of names still works and
+               still means what it always did. -->
+          <textarea id="rRecord" rows="3" placeholder="distance, elapsed, average speed
+&#10;or, one per line:&#10;Total earnings: money&#10;Distance traveled: distance&#10;Earnings per mile = Total earnings / Distance traveled"></textarea>
+          <p class="hint rechint">A name on its own is read from the answer.
+            <code>name: kind</code> says what it holds — money, distance, speed,
+            duration, timestamp, number.
+            <code>name = a / b</code> is worked out here rather than by the
+            model, and is left empty when there is nothing to work it out from.</p>
           <p class="convo-empty">Field names, comma separated.
             After every run the model restates its own answer as these, and the
             row lands in Records. Leave empty to keep nothing.</p>
@@ -923,6 +958,14 @@ _PAGE = r"""<!doctype html>
               <button id="camera" class="iconbtn" type="button" title="Take a photo" hidden><svg class="i" aria-hidden="true"><use href="#i-camera"></use></svg></button>
               <button id="shot" class="iconbtn" type="button" title="Capture a screenshot to analyse" hidden><svg class="i" aria-hidden="true"><use href="#i-shot"></use></svg></button>
               <button id="mic" class="iconbtn" type="button" title="Speak (offline transcription)" hidden><svg class="i i-mic" aria-hidden="true"><use href="#i-mic"></use></svg><svg class="i i-stop" aria-hidden="true"><use href="#i-stop"></use></svg></button>
+              <!-- Take the text somewhere else instead of sending it here.
+                   Dictating a message for an app with no voice input is a
+                   whole use of this page on its own, and before these two the
+                   only ways out of the box were the Send button and selecting
+                   the text by hand on a phone keyboard. Both appear only with
+                   something in the box, so an empty composer is unchanged. -->
+              <button id="copyOut" class="iconbtn" type="button" hidden title="Copy this text — or share it straight to another app"><svg class="i" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+              <button id="clearOut" class="iconbtn" type="button" hidden title="Empty the box"><svg class="i" aria-hidden="true"><use href="#i-eraser"></use></svg></button>
               <button class="primary" id="send" type="button">Send</button>
               <button class="danger" id="stop" type="button" hidden>Stop</button>
             </div>
@@ -941,6 +984,8 @@ _PAGE = r"""<!doctype html>
       const stopBtn  = document.getElementById("stop");
       const newBtn   = document.getElementById("newChat");
       const micBtn   = document.getElementById("mic");
+      const copyOutBtn  = document.getElementById("copyOut");
+      const clearOutBtn = document.getElementById("clearOut");
       const voiceBar = document.getElementById("voicebar");
       const voiceSel = document.getElementById("voiceModel");
       const headsetEl = document.getElementById("headset");
@@ -1019,6 +1064,19 @@ _PAGE = r"""<!doctype html>
       function autosize() {
         inputEl.style.height = "auto";
         inputEl.style.height = Math.min(inputEl.scrollHeight, window.innerHeight * 0.4) + "px";
+        syncComposerTools();
+      }
+
+      // Copy and clear are only meaningful with something to act on, and an
+      // empty composer is the state this page spends most of its life in — so
+      // they appear with the first character and go again when the box empties.
+      // Hung off autosize() rather than the input event because dictation sets
+      // .value directly, which fires no input event: the button would not have
+      // appeared for the one case it was built for.
+      function syncComposerTools() {
+        const has = !!inputEl.value.trim();
+        if (copyOutBtn) copyOutBtn.hidden = !has;
+        if (clearOutBtn) clearOutBtn.hidden = !has;
       }
       // Coalesce to one layout per frame. Writing the bubble then reading
       // scrollHeight on every token forces a synchronous re-wrap of the whole
@@ -1378,6 +1436,14 @@ _PAGE = r"""<!doctype html>
       // Telling someone to press Ctrl+C is only useful if the text is selected.
       function selectText(node) {
         try {
+          // A form field keeps its text in .value, not in child nodes, so a
+          // Range over its contents selects nothing at all — and "Press Ctrl+C"
+          // would then copy an empty selection while looking like it worked.
+          if (node && typeof node.select === "function") {
+            node.focus();
+            node.select();
+            return;
+          }
           const range = document.createRange();
           range.selectNodeContents(node);
           const sel = window.getSelection();
@@ -2115,6 +2181,49 @@ _PAGE = r"""<!doctype html>
         return view;
       }
 
+      // Getting text out of this page and into something else. Three routes,
+      // because no single one works everywhere:
+      //
+      //   1. The share sheet, on a touch device. This is the good one: it
+      //      reaches WhatsApp, Signal, Messages — the apps you would actually
+      //      paste into — without a clipboard round trip, and it works on a
+      //      plain-HTTP page where navigator.clipboard does not exist at all.
+      //   2. The clipboard, on a desktop or where sharing is unavailable.
+      //   3. Selecting the text and saying which keys to press, when the page
+      //      is not a secure context. Nothing else is possible there, and an
+      //      inert button that looks like it worked is worse than a hint.
+      //
+      // `onDone` is told which one happened so the caller can say so. Silence
+      // is the enemy here: a copy that did nothing looks exactly like a copy
+      // that worked, and the user finds out in the other app.
+      async function shareOrCopy(text, selectable, onDone) {
+        if (!text) return false;
+        if (navigator.share && window.matchMedia &&
+            window.matchMedia("(pointer: coarse)").matches) {
+          try { await navigator.share({ text: text }); onDone("shared"); return true; }
+          catch (e) {
+            // Dismissing the share sheet rejects too. That is not a failure to
+            // report — falling through to "select and copy" made cancel look
+            // like an error.
+            if (e && e.name === "AbortError") { onDone("cancelled"); return false; }
+          }
+        }
+        if (!navigator.clipboard) {
+          if (selectable) selectText(selectable);
+          onDone("manual");
+          return false;
+        }
+        try {
+          await navigator.clipboard.writeText(text);
+          onDone("copied");
+          return true;
+        } catch (e) {
+          if (selectable) selectText(selectable);
+          onDone("manual");
+          return false;
+        }
+      }
+
       // Copying a whole reply had no affordance at all — only individual code
       // blocks did. The raw markdown, not the rendered text, because that is
       // what pastes usefully into notes or an editor.
@@ -2133,23 +2242,10 @@ _PAGE = r"""<!doctype html>
         btn.addEventListener("click", async () => {
           const text = view.raw || view.bubble.textContent || "";
           if (!text) return;
-          // Share beats clipboard on a phone: it reaches the apps you would
-          // actually paste into, and works without a secure-context clipboard.
-          if (navigator.share && window.matchMedia &&
-              window.matchMedia("(pointer: coarse)").matches) {
-            try { await navigator.share({ text: text }); return; }
-            catch (e) {
-              // Dismissing the share sheet rejects too. That is not a failure
-              // to report — falling through to "select and copy" made cancel
-              // look like an error.
-              if (e && e.name === "AbortError") return;
-            }
-          }
-          if (!navigator.clipboard) { selectText(view.bubble); flash("Press Ctrl+C"); return; }
-          try {
-            await navigator.clipboard.writeText(text);
-            flash("Copied");
-          } catch (e) { selectText(view.bubble); flash("Press Ctrl+C"); }
+          await shareOrCopy(text, view.bubble, (how) => {
+            if (how === "copied") flash("Copied");
+            else if (how === "manual") flash("Press Ctrl+C");
+          });
         });
         view.meta.parentElement.insertBefore(btn, view.meta.nextSibling);
         view.copyBtn = btn;
@@ -3511,7 +3607,13 @@ _PAGE = r"""<!doctype html>
             messages.push({ role: "assistant", content: msg.content });
           }
         }
-        if (convo.model && modelEl.querySelector('option[value="' + convo.model + '"]')) {
+        // Compared, not interpolated into a selector. A model name is whatever
+        // `ollama create` was given, and one containing a double quote made
+        // querySelector throw — which happens here, part-way through opening a
+        // thread, so the whole conversation stopped replaying and the failure
+        // looked like the thread being gone rather than a name with a quote in.
+        if (convo.model && Array.prototype.some.call(
+              modelEl.options, o => o.value === convo.model)) {
           modelEl.value = convo.model;
         }
         setChatTitle(convo.title);
@@ -3740,6 +3842,19 @@ _PAGE = r"""<!doctype html>
       // streaming path is delicate and a record is worth less than the answer
       // already on screen. A failure here is silent by design — the reply
       // stands on its own.
+      // The EXIF of the most recent turn that carried any. Held on the message
+      // itself, so it is still here after the reply — and absent entirely when
+      // the photo-details toggle is off, which is the honest answer then.
+      function lastPhotoMeta() {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          if (msg && msg.role === "user" && msg.image_meta && msg.image_meta.length) {
+            return msg.image_meta;
+          }
+        }
+        return null;
+      }
+
       async function keepRecord(routine, answer, view) {
         if (!historyOn || !routine || !routine.record || !routine.record.length) return;
         if (!answer || !answer.trim()) return;
@@ -3749,16 +3864,28 @@ _PAGE = r"""<!doctype html>
             body: JSON.stringify({
               answer: answer, fields: routine.record,
               routine_id: routine.id, routine_name: routine.name,
-              conversation_id: currentConvoId, model: modelEl.value || null }) });
+              conversation_id: currentConvoId, model: modelEl.value || null,
+              // What the camera recorded, straight from the file. A field
+              // declared "= earliest photo taken" is filled from this and the
+              // model is never asked for it — it has no labels on the pictures
+              // to match a time to, which is why it got them wrong.
+              photos: lastPhotoMeta() }) });
           if (!resp.ok) return;
           const data = await resp.json();
-          if (data.record && view) showKept(view, data.record, routine.record);
+          // The gaps travel with the record. A blank column is only reassuring
+          // once you know it is blank because no elapsed time was recorded —
+          // or because a fare in pounds was added to a tip in dollars — rather
+          // than because something broke.
+          if (data.record && view) {
+            showKept(view, data.record, routine.record,
+                     (data.gaps || []).concat(data.mismatched || []));
+          }
         } catch (e) { /* the answer is what matters; this is the extra */ }
       }
 
       // A line under the reply, so a record being kept is visible at the moment
       // it happens rather than discovered later in a drawer.
-      function showKept(view, record, order) {
+      function showKept(view, record, order, gaps) {
         const line = document.createElement("div");
         line.className = "kept";
         // Ordered by what the routine declared, not by the object's keys:
@@ -3771,6 +3898,16 @@ _PAGE = r"""<!doctype html>
         line.title = "Saved to Records. Tap to open them.";
         line.addEventListener("click", () => openDrawer("records"));
         view.root.appendChild(line);
+        if (!gaps || !gaps.length) return;
+        // One or two are worth reading in full. More than that and the line
+        // becomes a paragraph, so it says how many and keeps the rest on hover.
+        const note = document.createElement("div");
+        note.className = "kept-gap";
+        note.textContent = "⚠ " + (gaps.length <= 2 ? gaps.join(" · ")
+                                   : gaps.length + " fields not worked out");
+        note.title = gaps.join("\n");
+        note.addEventListener("click", () => openDrawer("records"));
+        view.root.appendChild(note);
       }
 
       // Which routine's records are on screen. "" is all of them, which is also
@@ -3780,7 +3917,29 @@ _PAGE = r"""<!doctype html>
       // question you usually have anyway ("how far have I driven this month").
       let recordFilter = "";
 
+      // Which of a routine's columns are worked out rather than read, and from
+      // what. Taken from the routine's own declarations, which is where the
+      // formula is written — so a blank hourly rate can say that it is blank
+      // because no elapsed time was recorded, rather than looking like a bug.
+      const derivedCache = {};
+      function derivedIn(routineName) {
+        if (derivedCache[routineName]) return derivedCache[routineName];
+        const routine = routines.filter(r => r.name === routineName)[0];
+        const out = {};
+        for (const line of (routine && routine.record) || []) {
+          const at = String(line).indexOf("=");
+          if (at > 0) {
+            out[String(line).slice(0, at).trim()] = String(line).slice(at + 1).trim();
+          }
+        }
+        derivedCache[routineName] = out;
+        return out;
+      }
+
       function renderRecords() {
+        // Routines can be edited while the table is open, and a stale formula
+        // would explain a cell by a rule that no longer applies.
+        for (const key of Object.keys(derivedCache)) delete derivedCache[key];
         recordListEl.innerHTML = "";
         if (!records.length) {
           const note = document.createElement("p");
@@ -3858,10 +4017,27 @@ _PAGE = r"""<!doctype html>
           if (!recordFilter) cell("Routine", record.routine_name);
           for (const name of columns) {
             const td = cell(name, record.fields[name] || "");
+            // Values are standardised on the way in, and the wording they
+            // replaced is kept. Show it: a tidy-up you cannot see the before
+            // of is one you have to take on faith, and the whole reason the
+            // original is stored is so that you do not have to.
             // Editable, because the fields were pulled out of prose by a model
             // and a log you cannot correct is one you stop trusting.
             td.contentEditable = "true";
             td.className = "editable";
+            // After className, not before: assigning it wholesale drops any
+            // class added first, which is how the marker below silently never
+            // appeared the first time this was written.
+            const was = (record.raw || {})[name];
+            const formula = derivedIn(record.routine_name)[name];
+            if (was) {
+              td.title = "As it was recorded: " + was;
+              td.classList.add("tidied");
+            } else if (formula) {
+              td.classList.add("derived");
+              td.title = (record.fields[name] ? "Worked out as " : "Nothing to work it "
+                          + "out from — needs ") + formula;
+            }
             td.addEventListener("blur", () => {
               const value = td.textContent.trim();
               if (value === (record.fields[name] || "")) return;
@@ -4002,7 +4178,7 @@ _PAGE = r"""<!doctype html>
         rNameEl.value = routine ? routine.name : "";
         rBodyEl.value = routine ? routine.body : "";
         rPhotosEl.value = String(routine ? routine.photos : 0);
-        rRecordEl.value = routine && routine.record ? routine.record.join(", ") : "";
+        rRecordEl.value = routine && routine.record ? routine.record.join("\n") : "";
         rMetaEl.value = routine && routine.photo_meta !== null ? (routine.photo_meta ? "1" : "0") : "";
         rWebEl.value = routine && routine.web !== null ? (routine.web ? "1" : "0") : "";
         rDeleteBtn.hidden = !routine;
@@ -4045,8 +4221,12 @@ _PAGE = r"""<!doctype html>
         const payload = { name: name, body: body,
                           photos: Number(rPhotosEl.value) || 0,
                           web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value),
-                          record: rRecordEl.value.split(",")
+                          record: rRecordEl.value.split("\n")
                             .map(f => f.trim()).filter(Boolean) };
+        // Cleared before each attempt, not after a failed one. Fixing what a
+        // warning complained about and saving again left the old text sitting
+        // there, so a routine that was now fine still read as broken.
+        routineWarnEl.textContent = "";
         savingRoutine = true;
         rSaveBtn.disabled = true;
         try {
@@ -4069,6 +4249,14 @@ _PAGE = r"""<!doctype html>
             rBodyEl.value = kept.body;
             routineWarnEl.textContent = "Saved, but the prompt was trimmed to " +
               kept.body.length + " characters.";
+            return;
+          }
+          // Saved either way, and said here rather than discovered later. A
+          // formula naming a field that does not exist is an error nowhere: it
+          // computes to nothing every run, and an empty column looks exactly
+          // like a run with no data. One typo, found in a month of records.
+          if (saved.problems && saved.problems.length) {
+            routineWarnEl.textContent = "Saved. " + saved.problems.join(" ");
             return;
           }
         } catch (e) {
@@ -4752,6 +4940,36 @@ _PAGE = r"""<!doctype html>
       stopBtn.addEventListener("click", stop);
       newBtn.addEventListener("click", newChat);
       micBtn.addEventListener("click", toggleMic);
+
+      // Dictate here, then take the words to an app that has no dictation of
+      // its own. On a phone the share sheet is the whole journey — tap, pick
+      // the messaging app, done — and the clipboard is the desktop's version
+      // of the same thing.
+      copyOutBtn.addEventListener("click", async () => {
+        const text = inputEl.value.trim();
+        if (!text) return;
+        // Cancelling the share sheet says nothing, because the user already
+        // knows they cancelled. Every other outcome is reported: a copy that
+        // silently did nothing is only discovered in the other app, with the
+        // words gone.
+        await shareOrCopy(text, inputEl, (how) => {
+          if (how === "copied") hintEl.textContent = "Copied — paste it wherever you like.";
+          else if (how === "shared") hintEl.textContent = "Shared.";
+          else if (how === "manual") hintEl.textContent = "Selected — press Ctrl+C to copy.";
+        });
+      });
+
+      // Its own button rather than clearing after a copy. Copying is not a
+      // decision to throw the text away — you might copy it *and* send it —
+      // and a composer that empties itself when you did not ask it to is the
+      // kind of surprise that costs a whole dictated paragraph.
+      clearOutBtn.addEventListener("click", () => {
+        inputEl.value = "";
+        autosize();
+        hintEl.textContent = "";
+        inputEl.focus();
+      });
+
       inputEl.addEventListener("input", autosize);
       inputEl.addEventListener("keydown", (e) => {
         // isComposing / keyCode 229: Enter is accepting an IME candidate, not

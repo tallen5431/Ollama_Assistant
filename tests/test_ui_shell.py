@@ -366,3 +366,15 @@ class TestItRespectsALessMotionSetting:
         assert "animation-duration:0.01ms !important" in window
         assert "transition-duration:0.01ms !important" in window
         assert "scroll-behavior:auto !important" in window
+
+
+class TestOpeningAThreadSurvivesItsModelName:
+    """A model name is whatever `ollama create` was given. One containing a
+    double quote made querySelector throw part-way through opening a thread, so
+    the conversation stopped replaying and looked like it had gone."""
+
+    def test_the_model_is_matched_not_interpolated(self):
+        js = page_script(page())
+        assert 'option[value="\' + convo.model' not in js, \
+            "a model name is being built into a CSS selector"
+        assert "o.value === convo.model" in js

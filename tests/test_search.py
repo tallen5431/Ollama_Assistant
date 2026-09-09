@@ -62,6 +62,23 @@ class TestWhereItLooks:
         store.add_record("🚗 Trip", {"distance": "54"})
         assert len(store.search("Trip")["records"]) == 1
 
+    def test_in_what_the_value_said_before_it_was_standardised(self):
+        """You search for what you remember writing, and standardising
+        rewrote it. "54 miles" is stored as "54 mi" and would be findable by
+        neither the words that went in nor the ones anybody would think to
+        type — so the original is searched alongside the tidy value."""
+        for miles in ("54 miles", "31 miles", "12 miles"):
+            store.add_record("🚗 Trip", {"Distance": miles})
+        assert store.list_records()[0]["fields"]["Distance"] == "12 mi"
+        found = store.search("54 miles")["records"]
+        assert [r["fields"]["Distance"] for r in found] == ["54 mi"]
+
+    def test_the_tidy_value_is_still_found_too(self):
+        """Searching the original must not cost searching the real one."""
+        for miles in ("54 miles", "31 miles", "12 miles"):
+            store.add_record("🚗 Trip", {"Distance": miles})
+        assert len(store.search("54 mi")["records"]) == 1
+
     def test_case_does_not_matter(self):
         thread("t", "The Brighton Road")
         assert len(store.search("brighton")["conversations"]) == 1

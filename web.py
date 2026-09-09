@@ -46,6 +46,9 @@ from urllib3.util import parse_url as _parse_url  # the parser requests dials wi
 from config import (
     get_planner_model,
     get_search_url,
+    get_web_follow_scope,
+    get_web_link_scope,
+    get_web_links_in_context,
     get_web_max_bytes,
     get_web_max_chars,
     get_web_timeout,
@@ -95,6 +98,41 @@ _MAX_READING_CHARS = 600
 _MAX_LINKS_KEPT = 120
 _MAX_LINKS_OFFERED = 40      # how many a model is asked to choose between
 _MAX_LINKS_IN_CONTEXT = 25   # how many are listed as "what else is here"
+
+# The list is trimmed to fit the context window, and used to be halved until it
+# fit: 25, 12, 6, 3, 1, 0. Halving overshoots — the step from 12 to 6 throws
+# away six links to save ~500 characters when 200 would have done — and the
+# bottom of that sequence is zero, so at a tight window the model was shown no
+# links at all. Which is the case that needs them most: a small model on a 2048
+# window is exactly the one that cannot hold a whole site in its head.
+_LINK_STEPS = (25, 18, 12, 8, 5, 3)
+
+# Below this the list stops being useful, so it is dropped rather than shrunk
+# further — but it is only dropped when the budget genuinely cannot pay for it,
+# and the three it keeps are the three the ranking put first.
+_MIN_LINKS_IN_CONTEXT = 3
+
+# Words that say nothing about what a page is about, so they must not be what
+# a link is ranked on. Kept short on purpose: this is a tiebreaker between
+# anchor texts, not a search engine.
+_STOPWORDS = frozenset("""
+about above after again against all also am an and any are aren as at be
+because been before being below between both but by can cant could couldnt did
+didnt do does doesnt doing dont down during each few for from further get got
+had hadnt has hasnt have havent having he her here hers herself him himself his
+how i if in into is isnt it its itself just like me more most my myself no nor
+not now of off on once only or other ought our ours ourselves out over own same
+she should shouldnt so some such than that the their theirs them themselves
+then there these they this those through to too under until up very was wasnt
+we were werent what when where which while who whom why with wont would
+wouldnt you your yours yourself yourselves
+""".split())
+
+# Words, for ranking. Splitting on non-alphanumerics also breaks a URL slug
+# apart ("four-bar-linkage" → four, bar, linkage), which is the point: the path
+# is often more honest about what a page covers than the words someone chose to
+# link it with.
+_WORD_RE = re.compile(r"[a-z0-9]+")
 
 # However tight the budget, every document keeps enough text to be worth
 # citing. A page reduced to nothing is worse than a short excerpt.
@@ -215,20 +253,60 @@ def _address_check(host: str) -> str:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             return "private"      # unreadable is not something to dial either
-        if not ip.is_global:
+        if not _is_public(ip):
             return "private"
     return "public"
+
+
+# IPv6 prefixes that carry an IPv4 address in their last 32 bits. Python's
+# is_global already sees through three of these wrappers — ::ffff:0:0/96
+# (IPv4-mapped), 2002::/16 (6to4) and Teredo — and correctly calls
+# "::ffff:10.0.0.1" private. It has no opinion on the three below and called
+# every one of them global, so each was a way of writing a LAN address that the
+# guard waved through:
+#
+#   http://[64:ff9b::a00:1]/      -> 10.0.0.1, via any NAT64 translator
+#   http://[::10.0.0.1]/          -> 10.0.0.1, IPv4-compatible
+#   http://[::ffff:0:10.0.0.1]/   -> 10.0.0.1, IPv4-translated
+#
+# NAT64 is the one that matters: 64:ff9b::/96 is the standard well-known
+# prefix, and on any IPv6-only network with a translator — a mobile carrier, a
+# cloud VPC, plenty of corporate networks — it reaches the embedded address for
+# real. This app already takes the trouble to refuse Tailscale's 100.64/10, so
+# a spelling of 10.0.0.1 that walks straight through is the same hole.
+_IPV4_INSIDE = (
+    ipaddress.ip_network("64:ff9b::/96"),       # NAT64, well-known prefix
+    ipaddress.ip_network("64:ff9b:1::/48"),     # NAT64, local-use prefix
+    ipaddress.ip_network("::/96"),              # IPv4-compatible (deprecated)
+    ipaddress.ip_network("::ffff:0:0:0/96"),    # IPv4-translated (SIIT)
+)
+
+
+def _is_public(ip: "ipaddress._BaseAddress") -> bool:
+    """Whether an address is one this app may dial.
+
+    is_global, plus the wrappers it does not unwrap: an IPv6 address that
+    embeds an IPv4 one is only as public as the address it embeds.
+    """
+    if not ip.is_global:
+        return False
+    if ip.version == 6:
+        for net in _IPV4_INSIDE:
+            if ip in net:
+                inside = ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
+                return bool(inside.is_global)
+    return True
 
 
 def _peer_check(ip: str) -> str:
     """``"public"`` or ``"private"`` for an address already resolved.
 
-    The same is_global rule as _address_check, without the lookup — there is
-    nothing left to look up — and separate from it so that a test can allow a
-    loopback stand-in at one and still meet the real rule at the other.
+    The same rule as _address_check, without the lookup — there is nothing left
+    to look up — and separate from it so that a test can allow a loopback
+    stand-in at one and still meet the real rule at the other.
     """
     try:
-        return "public" if ipaddress.ip_address(ip).is_global else "private"
+        return "public" if _is_public(ipaddress.ip_address(ip)) else "private"
     except ValueError:
         return "private"
 
@@ -425,7 +503,19 @@ class _Extractor(HTMLParser):
                 self._parts.append(" ")
 
     def handle_data(self, data):
-        if self._in_title:
+        # The skip depth is checked for the title too, not only for the body.
+        # <title> is not exclusive to <head>: SVG uses it for the accessible
+        # name of a graphic, so every icon on a page carries one. Checking
+        # _in_title first meant those won over the skip depth and were
+        # concatenated onto the real title, which is how a page came back as
+        #
+        #   NBC News - Breaking Headlines … | NBC NewsNBC News LogoSearch
+        #   SearchNBC News LogoToday Logo
+        #
+        # — the title, then the alt text of the logo, the two search buttons
+        # and the Today logo. That string is what a source is cited as and
+        # what the reader sees under the reply, so it is worth being exact.
+        if self._in_title and not self._skip:
             self.title += data
         elif not self._skip:
             self._parts.append(data)
@@ -501,6 +591,70 @@ def same_site(a: str, b: str) -> bool:
         name = (urlparse(url).hostname or "").lower()
         return name[4:] if name.startswith("www.") else name
     return bool(host(a)) and host(a) == host(b)
+
+
+def _words(text: str) -> List[str]:
+    """The meaning-bearing words of a phrase, lowercased."""
+    return [w for w in _WORD_RE.findall((text or "").lower())
+            if len(w) > 2 and w not in _STOPWORDS]
+
+
+def _slug_words(url: str) -> List[str]:
+    """The words in a URL's path and query, which often name the topic."""
+    try:
+        parsed = urlparse(url or "")
+    except ValueError:
+        return []
+    # Underscores are word separators in a path and not to _WORD_RE, which
+    # would otherwise read "four_bar_linkage" as one unmatchable token.
+    return _words(f"{parsed.path} {parsed.query}".replace("_", " "))
+
+
+def rank_links(
+    links: List[Dict[str, str]],
+    question: str,
+    here: str = "",
+) -> List[Dict[str, str]]:
+    """Order links by how likely they are to bear on ``question``, best first.
+
+    Lexical rather than a model call, because this runs on every retrieved page
+    of every web turn and a call per page would cost more than the retrieval it
+    is meant to improve.
+
+    The job is narrow: get the useful links to the top of a list that is about
+    to be cut short. A page has a hundred links and room for five, and taking
+    the first five *in document order* — which is what happened before — takes
+    the site's navigation furniture every single time, because that is what
+    sits at the top of a page. The one link that answered the question was
+    reliably somewhere in the ninety that were dropped.
+
+    Ties keep document order, so a page whose links say nothing either way is
+    still listed the way it was written.
+    """
+    wanted = set(_words(question))
+
+    def score(link: Dict[str, str]) -> int:
+        points = 0
+        if wanted:
+            text = set(_words(link.get("text", "")))
+            slug = set(_slug_words(link.get("url", "")))
+            # Anchor text counts for more than the slug: someone wrote the
+            # anchor to describe the target, whereas a path can carry a date,
+            # an id, or the site's whole section tree. The slug counts at all
+            # because plenty of anchors describe nothing — "read the
+            # specification" is useless next to a URL saying /spec/hinge.
+            points = 3 * len(wanted & text) + 2 * len(wanted & slug)
+        # At equal relevance prefer the site the reader is already on. It is
+        # the site the user chose, it is the only one following may open by
+        # default, and its pages are more likely to continue the same subject.
+        # Only a tiebreak: a plainly relevant outside link still outranks an
+        # irrelevant local one, which is the point of showing outside links.
+        if here and same_site(here, link.get("url", "")):
+            points += 1
+        return points
+
+    return [link for _, link in
+            sorted(enumerate(links or []), key=lambda pair: (-score(pair[1]), pair[0]))]
 
 
 # ---------------------------------------------------------------------------
@@ -1124,6 +1278,76 @@ _PREAMBLE = (
 )
 
 
+# Offered only while a hop remains, so the model is never invited to ask for
+# something that cannot be delivered — a request that is silently ignored costs
+# a whole generation and reads to the user as the model refusing to answer.
+_FETCH_OFFER = (
+    "\nIf what is here does not answer the question but one of the numbered "
+    "links plainly would, you may have that page read for you. To ask, reply "
+    "with exactly:\n"
+    "FETCH: [n.m]\n"
+    "using the number of the link, on its own, with nothing before or after "
+    "it — no explanation, no preamble. The page will be fetched and you will "
+    "be asked again with it in front of you. Ask only when a specific link is "
+    "clearly the missing piece; if you can answer from what is here, answer."
+)
+
+# Said only where it is true. A model told it may name "one of the numbered
+# links" will eventually name an external one, spend the hop, and be refused —
+# so where the follow scope forbids those it is cheaper to say so up front.
+_FETCH_OFFER_LOCAL_ONLY = (
+    " A link marked (external) cannot be opened — only pages of the sites "
+    "already listed above. Do not ask for one."
+)
+
+
+def _fetch_offer() -> str:
+    """The offer to read a numbered link, matching what may actually be read."""
+    if get_web_follow_scope() == "site":
+        return _FETCH_OFFER + _FETCH_OFFER_LOCAL_ONLY
+    return _FETCH_OFFER
+
+# A bare request, and only a bare request. Wrappers a small model adds around
+# it — a bullet, a bold, a code fence, a full stop — are tolerated, because the
+# alternative is spending a fetch-shaped reply on nothing and showing the user
+# the marker instead of an answer.
+_FETCH_RE = re.compile(
+    r"^[\s>*_`#-]*FETCH\s*[:\-—]?\s*\[?\s*(\d{1,2})\s*[.:]\s*(\d{1,2})\s*\]?[\s.`*_]*$",
+    re.I,
+)
+
+# The same shape, part-written: whether what has arrived so far could still
+# become one. A request has to be recognised *before* it is shown, or the user
+# reads "FETCH: [2.3]" and then watches a second answer appear underneath it.
+_FETCH_PARTIAL_RE = re.compile(
+    r"^[\s>*_`#-]*(F|FE|FET|FETC|FETCH[\s:\-—\[\]\d.]*)?$", re.I
+)
+
+# Longer than this and it is prose, whatever it starts with. A request is at
+# most "FETCH: [12.34]" — fourteen characters — and the slop is for the markup
+# a model wraps around it.
+_FETCH_MAX = 40
+
+
+def fetch_request(text: str) -> str:
+    """The link id a reply is asking for, or "" when the reply is an answer."""
+    match = _FETCH_RE.match(strip_thinking(text or "").strip())
+    return f"{match.group(1)}.{match.group(2)}" if match else ""
+
+
+def fetch_pending(text: str) -> bool:
+    """Whether the reply so far could still turn out to be a fetch request.
+
+    False the moment it cannot, which for ordinary prose is the first word —
+    so the answer streams as it always did and only a genuine request is ever
+    held back.
+    """
+    stripped = (text or "").strip()
+    if len(stripped) > _FETCH_MAX:
+        return False
+    return bool(_FETCH_PARTIAL_RE.match(stripped))
+
+
 _PLANNER = (
     "You write web search queries for someone else to run. You never answer the "
     "question yourself and you never invent facts.\n\n"
@@ -1403,17 +1627,41 @@ def plan_searches(
 
 _LINK_PICKER = (
     "You choose which linked pages are worth reading to answer a question.\n\n"
-    "You are given a question and a numbered list of links found on a page the "
-    "user is already reading. Reply with the numbers of the links most likely "
-    "to contain the answer, best first, one per line, each as 'N'. Reply with "
-    "NONE if the page the user is on already covers it, or if none of the links "
-    "are clearly about the question.\n\n"
+    "You are given a question and a numbered list of links found on pages that "
+    "have already been read. Each line is 'N. the words the link was written "
+    "as — where it goes'. The address is often the more honest of the two: an "
+    "anchor saying 'Learn more' on a path saying /hinge/spec is a page about "
+    "the hinge specification.\n\n"
+    "Reply with the numbers of the links most likely to contain the answer, "
+    "best first, one per line, each as 'N'. Reply with NONE if the pages "
+    "already read cover it, or if none of the links are clearly about the "
+    "question.\n\n"
     "Choose pages that go deeper on what was asked. Do not choose general "
     "index, category, disambiguation or 'list of' pages, and do not choose a "
     "link merely because its words appear in the question."
 )
 
 _PICK_RE = re.compile(r"^[^\S\n]*\[?(\d{1,2})\]?[.)]?[^\S\n]*$", re.M)
+
+# Enough of a URL to tell two links apart, short enough that forty of them do
+# not become the prompt. The query string is dropped: it is the least
+# informative part and the longest.
+_WHERE_MAX = 60
+
+
+def _where(url: str) -> str:
+    """A link's host and path, for a model choosing between links.
+
+    The picker used to be shown anchor text alone, which on a real page is
+    "Pricing", "Learn more" and "Documentation" — three labels that say nothing
+    about which one goes where. The path usually says what the anchor doesn't.
+    """
+    try:
+        parsed = urlparse(url or "")
+    except ValueError:
+        return ""
+    where = f"{parsed.hostname or ''}{parsed.path or ''}".rstrip("/")
+    return where[:_WHERE_MAX - 1] + "…" if len(where) > _WHERE_MAX else where
 
 
 def choose_links(
@@ -1435,9 +1683,13 @@ def choose_links(
     if not question or not links or not model or max_links < 1:
         return []
 
-    offered = links[:_MAX_LINKS_OFFERED]
+    # Ranked before it is cut: the cap used to take the first forty links in
+    # document order, which on a long article is the navigation and the
+    # references and none of the body.
+    offered = rank_links(links, question)[:_MAX_LINKS_OFFERED]
     listing = "\n".join(
-        f"{i}. {link['text']}" for i, link in enumerate(offered, 1)
+        f"{i}. {link['text']} — {_where(link.get('url', ''))}"
+        for i, link in enumerate(offered, 1)
     )
     try:
         reply = chat(
@@ -1486,16 +1738,61 @@ def _link_field(value: Any) -> str:
     return _DASH_RUN.sub(lambda m: "\u2011" * len(m.group(0)), _defence(flat))
 
 
-def link_map(document: Dict[str, Any], limit: int = _MAX_LINKS_IN_CONTEXT) -> str:
+def mapped_links(
+    document: Dict[str, Any],
+    limit: int = _MAX_LINKS_IN_CONTEXT,
+    question: str = "",
+) -> List[Dict[str, str]]:
+    """The links a document's map lists, ranked and cut to ``limit``.
+
+    Split out from the rendering so the numbers the model is shown and the
+    numbers a fetch request is resolved against are produced by one piece of
+    code. Two functions agreeing by inspection is how ``[2.3]`` ends up
+    fetching the fourth link.
+    """
+    links = (document or {}).get("links") or []
+    here = (document or {}).get("url", "")
+    if get_web_link_scope() == "site":
+        links = [l for l in links if same_site(here, l.get("url", ""))]
+    if limit < 1:
+        return []
+    return rank_links(links, question, here=here)[:limit]
+
+
+def followable(document: Dict[str, Any], link: Dict[str, str]) -> bool:
+    """Whether ``link`` may actually be opened, as opposed to merely listed.
+
+    Deliberately stricter than what the map shows. Everything reachable this
+    way was chosen by a model out of text written by a stranger, so by default
+    it may only reach another page of the site the user already landed on;
+    ``WEB_FOLLOW_SCOPE=any`` lifts that. The address guard in fetch() applies
+    either way and is not what this is for — this is about whose site a page
+    can talk the model into visiting, which the address guard has no view of.
+    """
+    if get_web_follow_scope() == "any":
+        return True
+    return same_site((document or {}).get("url", ""), (link or {}).get("url", ""))
+
+
+def link_map(
+    document: Dict[str, Any],
+    limit: int = _MAX_LINKS_IN_CONTEXT,
+    question: str = "",
+    number: int = 0,
+) -> str:
     """A short list of what else the page points at, as context.
 
     Answers the common case without fetching anything: asked something the page
     mentions only in passing, the model can say which page covers it instead of
     guessing or claiming the page does not discuss it.
+
+    ``number`` is the document's own [n] in the assembled block. Given one, the
+    links are numbered ``[n.m]`` so the model can name one exactly — both to
+    cite where something lives and, where the hop budget allows it, to ask for
+    it to be read.
     """
-    links = (document or {}).get("links") or []
-    here = document.get("url", "")
-    local = [l for l in links if same_site(here, l["url"])][:limit]
+    here = (document or {}).get("url", "")
+    local = mapped_links(document, limit, question)
     if not local:
         return ""
     # Defended like the page text it came from, and then some. All of this —
@@ -1509,12 +1806,25 @@ def link_map(document: Dict[str, Any], limit: int = _MAX_LINKS_IN_CONTEXT) -> st
     # generated list rather than prose, so a run of dashes anywhere in it can
     # simply be blunted — which also closes the same marker hidden mid-line
     # inside an href, where the line-anchored rule does not reach.
-    lines = "\n".join(f"- {_link_field(l.get('text'))} — {_link_field(l.get('url'))}"
-                      for l in local)
+    rows = []
+    for i, link in enumerate(local, 1):
+        # Where a link leaves the site, say so. The reader of this list has to
+        # weigh "another page of the site I am on" against "somebody else's
+        # site", and the URL alone does not make that obvious to a small model.
+        away = "" if same_site(here, link.get("url", "")) else " (external)"
+        label = f"[{number}.{i}]" if number else "-"
+        rows.append(f"{label} {_link_field(link.get('text'))}{away} "
+                    f"— {_link_field(link.get('url'))}")
     return (
-        "Other pages linked from this one, not fetched. Use them to say where "
-        "something is covered, never to describe what they contain — you have "
-        "not read them.\n" + lines
+        # The [n.m] numbering has to be explained here, not only in the fetch
+        # offer, because the offer is off by default and the numbers are not.
+        # Unexplained they collide with the citation rule in the preamble —
+        # "cite sources by their [n] number" — so a model reading [1.1] cites
+        # it like a source, which is precisely the page it has *not* read.
+        "Other pages linked from this one, not fetched — numbered "
+        "[page.link]. Use them to say where something is covered. Never "
+        "describe what they contain and never cite one as a source: you "
+        "have not read them.\n" + "\n".join(rows)
     )
 
 
@@ -1591,15 +1901,60 @@ def with_context(messages: List[Dict[str, str]], context: str) -> List[Dict[str,
 # -----" went through untouched, which is the same forgery with a bracket in
 # it. Matching the shape rather than the wording also covers markers added
 # later without anyone remembering to come back here.
-_FENCE_RE = re.compile(r"^\s*-{3,}\s*(BEGIN|END)\b[^\n]*?-{3,}\s*$", re.M | re.I)
+# `[^\w\n]*` rather than `\s*` at the front, and the same before the end of the
+# line. A leading *invisible* character is not \s, so it slipped a forged marker
+# past a rule anchored on whitespace — which is exactly the U+200B bypass the
+# list below was written for, and it recurred three times over because a list of
+# invisible characters is a list that falls behind Unicode.
+#
+# Confirmed reaching the model before this: U+00AD SOFT HYPHEN, U+061C ARABIC
+# LETTER MARK and the variation selectors U+FE00-FE0F all closed the fence
+# intact. Matching on "not a word character" needs no list: every invisible is
+# one, and so is every stray bullet or quote mark a page might lead with. It
+# cannot over-reach into prose, because a line of prose has letters in it and
+# letters are word characters.
+_FENCE_RE = re.compile(r"^[^\w\n]*-{3,}\s*(BEGIN|END)\b[^\n]*?-{3,}[^\w\n]*$",
+                       re.M | re.I)
 
 # Characters that render as nothing (or as a space) but are not \s, so an
 # anchored pattern skips right past them. A single leading U+200B was enough to
 # smuggle a forged end-marker through: invisible to the reader, invisible to
 # the regex, and read by the model as the real fence.
-_INVISIBLE_RE = re.compile(
-    "[  ᠎ -‏‪-  -⁤⁪-⁯"
-    "　﻿￹-￻]"
+# Two classes, because the right repair differs. A character that occupies
+# width becomes a plain space — it read as a gap and it still does. One that
+# occupies none is removed, because that is what a person already saw: putting
+# a space where a soft hyphen was turns "co\u00adoperate" into "co operate",
+# which is a defence quietly editing the text it is defending.
+_BLANK_RE = re.compile(
+    "["
+    "\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000"
+    # Blank by design and letters to Unicode, so neither \s nor the class below
+    # catches them: a run of these reads to a person as an empty line.
+    "\u115f\u1160\u3164\uffa0"
+    "]"
+)
+
+# Written as escapes, not as the characters themselves. The point of every
+# entry is that it is invisible, so a literal one is unreviewable — and the
+# three that were missing had been missing in plain sight for exactly that
+# reason. This is the whole format category (Cf) plus the variation selectors,
+# rather than the part that had caused trouble so far.
+#
+# What it costs to get wrong: a page could put one of these in front of a
+# forged "----- END WEB RESULTS -----" and close the fence, because the rule
+# that catches a forged marker was anchored on whitespace and none of these is
+# whitespace. Confirmed reaching the model before this fix: U+00AD SOFT HYPHEN,
+# U+061C ARABIC LETTER MARK, and the variation selectors U+FE00-FE0F.
+_ZERO_WIDTH_RE = re.compile(
+    "["
+    "\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2"
+    "\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f"
+    "\ufeff\ufff9-\ufffb"
+    "\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
+    "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
+    # Marks rather than format characters, and invisible all the same.
+    "\ufe00-\ufe0f\U000e0100-\U000e01ef"
+    "]"
 )
 
 
@@ -1632,24 +1987,62 @@ def _defence(text: str) -> str:
     # whether there was one; adding a character and counting the lines again
     # does, without a second list of terminators to keep in step with Python's.
     trailing = "\n" if lines and len((text + ".").splitlines()) > len(lines) else ""
-    text = _INVISIBLE_RE.sub(" ", "\n".join(lines) + trailing)
+    text = _ZERO_WIDTH_RE.sub("", _BLANK_RE.sub(" ", "\n".join(lines) + trailing))
     return _FENCE_RE.sub(lambda m: m.group(0).replace("-", "‑"), text)
 
 
-def _fit_maps(maps: List[str], documents: List[Dict[str, Any]], allowance: int) -> List[str]:
+def _link_steps(ceiling: int) -> tuple:
+    """The list lengths to try, largest first, ending at the useful minimum."""
+    return (ceiling,) + tuple(s for s in _LINK_STEPS if s < ceiling)
+
+
+def _fit_maps(
+    maps: List[str],
+    documents: List[Dict[str, Any]],
+    allowance: int,
+    question: str = "",
+) -> tuple:
     """Shrink the link maps until they fit ``allowance`` between them.
 
     Drops links, never pages: a page listed with half its links is still the
     page, and the list is a hint about where else to look rather than a source.
+
+    Returns ``(maps, limit)``. The limit matters as much as the maps: the
+    numbers in the rendered list are only meaningful if a fetch request can be
+    resolved against the same list, and rebuilding that list from a different
+    limit than it was rendered at sends the model to the wrong page.
+
+    The step sizes stop at _MIN_LINKS_IN_CONTEXT rather than walking to zero.
+    Halving used to take 12 links to 6 to save five hundred characters, and
+    then 3 to 1 to 0 — so the tighter the window, the more likely the model was
+    shown nothing at all. That is backwards: a model on a small context window
+    is precisely the one that cannot hold a site in its head and most needs
+    telling where the rest of it is. Three links cost about two hundred
+    characters, which is a quarter of one document's floor, and they are the
+    three the ranking put first.
     """
-    limit = _MAX_LINKS_IN_CONTEXT
-    while limit > 0 and sum(len(m) for m in maps) > allowance:
-        limit = limit // 2
-        maps = [link_map(doc, limit) if limit else "" for doc in documents]
-    return maps
+    steps = _link_steps(get_web_links_in_context())
+    for limit in steps:
+        # steps[0] is what the caller already rendered; re-rendering it would
+        # be one wasted pass over every link on every page of every web turn.
+        if limit != steps[0]:
+            maps = [link_map(doc, limit, question, i)
+                    for i, doc in enumerate(documents, 1)]
+        if sum(len(m) for m in maps) <= allowance:
+            return maps, limit
+    # Even the shortest list does not fit. The budget is owed to the pages
+    # first — a document trimmed to nothing is worse than not knowing where to
+    # look next — so the lists go rather than the block overrunning.
+    return [""] * len(documents), 0
 
 
-def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
+def build_context(
+    documents: List[Dict[str, str]],
+    char_budget: int = 0,
+    question: str = "",
+    link_ids: Optional[Dict[str, Dict[str, str]]] = None,
+    may_fetch: bool = False,
+) -> str:
     """Render fetched documents into one fenced block for a system message.
 
     ``char_budget`` caps the assembled block — the preamble and the per-document
@@ -1669,12 +2062,28 @@ def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
     runs at — with 85 characters to spare and the link lists dropped entirely;
     four at that window overrun by a quarter. Raising WEB_MAX_DOCS wants a
     larger num_ctx with it.
+
+    ``question`` ranks each page's link list, so the few links that survive the
+    budget are the few that bear on what was asked rather than the first few in
+    the markup. ``link_ids``, if given, is filled with the ``{"2.3": link}``
+    table the rendered numbering used — the caller needs it to resolve a fetch
+    request back to a URL, and building that table separately is how a request
+    for [2.3] ends up fetching something else. ``may_fetch`` adds the sentence
+    telling the model it can ask for one of those pages to be read.
     """
     parts = [_PREAMBLE.format(today=today()), "", "----- BEGIN WEB RESULTS -----"]
+    if may_fetch:
+        offer = _fetch_offer()
+        parts.insert(1, offer)
     # The link maps count against the budget too. Rendering them after the trim
     # and not counting them put the assembled context back at ~1.4x what the
     # budget asked for — which is the whole problem the budget exists to solve.
-    maps = [link_map(doc) for doc in documents]
+    # Not floored at 1: WEB_LINKS_IN_CONTEXT=0 means off, and a floor here made
+    # it mean "one link", which is the one setting value nobody would choose.
+    ceiling = get_web_links_in_context()
+    maps = [link_map(doc, ceiling, question, i)
+            for i, doc in enumerate(documents, 1)]
+    limit = ceiling
     if char_budget:
         # The maps are counted against the budget, but nothing stopped them
         # exceeding it on their own — and then every document still got its
@@ -1689,8 +2098,25 @@ def build_context(documents: List[Dict[str, str]], char_budget: int = 0) -> str:
         # and the lists go entirely rather than the block overrunning.
         floors = len(documents) * (_MIN_DOC_CHARS + len(_TRIM_NOTE))
         fixed = sum(len(p) for p in parts) + _HEADER_CHARS * len(documents)
-        maps = _fit_maps(maps, documents,
-                         min(char_budget // 3, char_budget - fixed - floors))
+        maps, limit = _fit_maps(
+            maps, documents,
+            min(char_budget // 3, char_budget - fixed - floors), question)
+    # An offer to read a numbered link, made when there are no numbered links,
+    # invites a request that can only be refused — and costs a whole generation
+    # to find that out. Withdrawn here rather than earlier because whether any
+    # list survives is not known until the budget has finished with them.
+    # Only ever removes text, so the budget arithmetic below stays honest.
+    if may_fetch and not any(maps):
+        parts.remove(offer)
+
+    if link_ids is not None:
+        # Rebuilt from the limit the maps were actually rendered at, which is
+        # why _fit_maps returns it. Numbering the model reads and numbering the
+        # app resolves have to be the same list or [2.3] fetches page four.
+        link_ids.clear()
+        for i, doc in enumerate(documents, 1):
+            for j, link in enumerate(mapped_links(doc, limit, question), 1):
+                link_ids[f"{i}.{j}"] = {**link, "source": doc.get("url", "")}
     # The preamble and the per-document headers are part of what has to fit,
     # so they come out of the same budget rather than riding along outside it.
     overhead = sum(len(p) for p in parts) + sum(len(m) for m in maps) \
@@ -2064,6 +2490,38 @@ _DESC_PREAMBLE = (
 )
 
 
+# For a model that *can* see. The other two preambles both say the answering
+# model cannot, which would be a lie here and an invitation to ignore the
+# pictures it was given.
+_PER_PHOTO_PREAMBLE = (
+    "Each photo in this message, read on its own and labelled. You can see the "
+    "photos yourself; these readings are here so that the labels are reliable. "
+    "[image 1] is the first photo attached, [image 2] the second, and they are "
+    "the same numbering the photo details use — so a capture time given for "
+    "\"Image 2\" belongs to the photo read below as [image 2]. Match them by "
+    "the number rather than by which looks like it should go with which. Where "
+    "a reading disagrees with what you can see in the photo, trust your own "
+    "eyes and say so."
+)
+
+
+def per_photo_context(transcript: Optional[str]) -> str:
+    """Labelled per-photo readings, for a model that can see them too.
+
+    The pictures carry no labels of their own, so a model asked to use "the
+    capture time of Image 2" has to align two lists across two messages by
+    position. That join has no anchor in the input, which is why it fails on
+    large models as readily as small ones. Reading each photo separately and
+    labelling the readings gives the join something to hold: text to text,
+    matched on a number, which is a thing models are reliably good at.
+    """
+    text = _defence((transcript or "").strip())
+    if not text:
+        return ""
+    return (f"{_PER_PHOTO_PREAMBLE}\n\n----- BEGIN PHOTO READINGS -----\n"
+            f"{text}\n----- END PHOTO READINGS -----")
+
+
 _META_PREAMBLE = (
     "Facts the camera recorded when the photo was taken, read from the file "
     "itself rather than from the picture. These are reliable where they are "
@@ -2363,27 +2821,33 @@ def conversation_images(messages: List[Dict[str, Any]]) -> List[str]:
     return []
 
 
-def conversation_image_meta(messages: List[Dict[str, Any]]) -> List[Optional[Dict[str, Any]]]:
-    """EXIF facts from the same turn ``conversation_images`` picked.
+def sent_image_meta(messages: List[Dict[str, Any]]) -> List[Optional[Dict[str, Any]]]:
+    """EXIF for every photo still attached to what is about to be sent, in order.
 
-    Read positionally against that turn's ``images``, so entry *n* describes
-    photo *n*. A turn whose photos carried nothing readable gives back an empty
-    list rather than a list of ``None``, which saves the caller a scan.
+    Aligned to the images the model will actually receive, across every turn
+    that still carries them — which is the only alignment worth having, because
+    the metadata block labels its lines "Image 1", "Image 2" and nothing in the
+    image data itself says which is which.
+
+    This used to read one turn — the newest that carried photos — and that was
+    the bug: with CHAT_IMAGE_TURNS above 1 the model is sent images from several
+    turns while the block described only the newest. "Image 1" then pointed at
+    the third photo the model could see, and every time in the answer was
+    somebody else's.
     """
-    for msg in reversed(messages or []):
-        if not isinstance(msg, dict) or msg.get("role") != "user":
+    out: List[Optional[Dict[str, Any]]] = []
+    for msg in messages or []:
+        if not isinstance(msg, dict):
             continue
-        images = msg.get("images")
-        if not isinstance(images, list) or not any(isinstance(i, str) for i in images):
+        images = [i for i in (msg.get("images") or []) if isinstance(i, str)]
+        if not images:
             continue
         meta = msg.get("image_meta")
-        if not isinstance(meta, list):
-            return []
-        # A dict per photo; anything else in the slot means "nothing known",
-        # which is what a screenshot or a stripped-down export looks like.
-        entries = [m if isinstance(m, dict) and m else None for m in meta]
-        return entries if any(entries) else []
-    return []
+        meta = meta if isinstance(meta, list) else []
+        for index in range(len(images)):
+            entry = meta[index] if index < len(meta) else None
+            out.append(entry if isinstance(entry, dict) and entry else None)
+    return out if any(out) else []
 
 
 def strip_image_meta(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

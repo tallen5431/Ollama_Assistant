@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from config import logger
 
@@ -146,7 +146,22 @@ def _objects(text: str) -> List[Dict[str, Any]]:
     return found
 
 
-def extract(answer: str, fields: List[str], model: str) -> Dict[str, str]:
+# What to call each kind when telling a model what a field should hold. Plain
+# words, not the internal names: "a money amount" steers a small model where
+# "money" reads as a topic.
+_ASK_AS = {
+    "money": "a money amount, with its currency symbol",
+    "distance": "a distance, with its unit",
+    "speed": "a speed, with its unit",
+    "duration": "a length of time",
+    "timestamp": "a date and time",
+    "number": "a number",
+    "text": "text",
+}
+
+
+def extract(answer: str, fields: List[str], model: str,
+            kinds: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Restate ``answer`` as ``fields``. Empty dict when it could not be done.
 
     Never raises: a failed extraction costs a record, and a record is worth
@@ -164,8 +179,15 @@ def extract(answer: str, fields: List[str], model: str) -> Dict[str, str]:
     if len(body) > _MAX_ANSWER_CHARS:
         body = body[-_MAX_ANSWER_CHARS:]
 
+    # Where a field says what it holds, say so. It costs a few words and it
+    # stops the commonest small-model mistake: writing the whole sentence the
+    # figure was in, rather than the figure.
+    listing = "\n".join(
+        f"- {name}" + (f" ({_ASK_AS[k]})" if (k := (kinds or {}).get(name, "")) in _ASK_AS
+                       else "")
+        for name in wanted)
     prompt = (
-        "Field names, in order:\n" + "\n".join(f"- {name}" for name in wanted) +
+        "Field names, in order:\n" + listing +
         "\n\n----- BEGIN ANSWER -----\n" + body + "\n----- END ANSWER -----"
     )
     try:

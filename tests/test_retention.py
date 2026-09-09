@@ -83,7 +83,7 @@ class TestWhatGoesAndWhatStays:
         store.add_record("🚗 Trip", {"Distance travelled": "68 miles"})
         photo_message(days_ago=60)
         store.forget_images(30)
-        assert store.list_records()[0]["fields"]["Distance travelled"] == "68 miles"
+        assert store.list_records()[0]["fields"]["Distance travelled"] == "68 mi"
 
     @pytest.mark.parametrize("days", [0, -1, None])
     def test_zero_means_keep_them_for_good(self, days):

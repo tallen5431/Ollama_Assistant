@@ -38,6 +38,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import authz
 import records
 import store
+import fields
+import values
 import voice
 import web
 from chat_ui import render_page
@@ -53,12 +55,16 @@ from config import (
     get_ollama_base,
     get_photo_keep_days,
     get_photo_meta_default,
+    get_photo_read_each,
     get_planner_model,
     get_search_url,
     get_server_threads,
     get_share_photo_location,
     get_vision_model,
+    get_web_fetch_hops,
     get_web_follow_links,
+    get_web_follow_on_search,
+    get_web_max_hops,
     get_web_max_docs,
     logger,
     web_enabled,
@@ -170,6 +176,16 @@ try:
         logger.info("Tidied LaTeX out of %d stored record(s)", _tidied)
 except Exception:  # noqa: BLE001 - a tidy-up must never stop the app starting
     logger.exception("Could not tidy stored records")
+
+# And the same for the shape of the values themselves: "102,072", "102,072 mi"
+# and "100,409 miles" are one column written three ways, none of which sorts
+# against the others. Records already kept are the ones that need this most,
+# since they are the whole log. Lossless — a value that changes has the model's
+# own wording written to `raw` first — and idempotent, so a tidy log is a no-op.
+try:
+    store.normalise_stored()
+except Exception:  # noqa: BLE001 - same rule: never stop the app starting
+    logger.exception("Could not standardise stored records")
 
 
 @app.route("/manifest.webmanifest", methods=["GET"])
@@ -498,11 +514,22 @@ def api_routine_create() -> Any:
     if not text:
         return jsonify({"error": "Missing 'body'"}), 400
     record = body.get("record")
-    return jsonify(store.create_routine(
+    saved = store.create_routine(
         name, text, _count(body.get("photos")),
         _tri(body.get("web")), _tri(body.get("photo_meta")),
         record if isinstance(record, list) else None,
-    ))
+    )
+    # Saved either way, and told what is wrong with it. A formula naming a
+    # field that does not exist is not an error anywhere downstream — it
+    # computes to nothing, every run, and an empty column looks exactly like a
+    # run with no data. Saying so here is the difference between a typo fixed
+    # in seconds and one found in a month of records.
+    return jsonify({**saved, "problems": _record_problems(saved.get("record"))})
+
+
+def _record_problems(record: Any) -> List[str]:
+    """What is wrong with a routine's field declarations, in words."""
+    return fields.problems(fields.parse(record), record) if record else []
 
 
 @app.route("/api/routines/starters", methods=["POST"])
@@ -526,26 +553,29 @@ def api_routine_update(routine_id: str) -> Any:
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         body = {}
-    fields: Dict[str, Any] = {}
+    # Not named `fields`: that is the module which reads the declarations, and
+    # shadowing it here would turn every call on it into a method on a dict.
+    changes: Dict[str, Any] = {}
     for field in _ROUTINE_FIELDS:
         if field not in body:
             continue
         if field in ("name", "body"):
-            fields[field] = str(body[field] or "").strip()
+            changes[field] = str(body[field] or "").strip()
         elif field == "photos":
-            fields[field] = _count(body[field])
+            changes[field] = _count(body[field])
         elif field == "record":
-            fields[field] = body[field] if isinstance(body[field], list) else []
+            changes[field] = body[field] if isinstance(body[field], list) else []
         else:
-            fields[field] = _tri(body[field])
-    if not fields:
+            changes[field] = _tri(body[field])
+    if not changes:
         return jsonify({"error": "Nothing to update"}), 400
-    if not fields.get("name", "x") or not fields.get("body", "x"):
+    if not changes.get("name", "x") or not changes.get("body", "x"):
         return jsonify({"error": "A routine needs a name and a prompt"}), 400
-    routine = store.update_routine(routine_id, fields)
+    routine = store.update_routine(routine_id, changes)
     if routine is None:
         return jsonify({"error": "No such routine"}), 404
-    return jsonify({"ok": True, "routine": routine})
+    return jsonify({"ok": True, "routine": routine,
+                    "problems": _record_problems(routine.get("record"))})
 
 
 @app.route("/api/routines/<routine_id>", methods=["DELETE"])
@@ -580,22 +610,71 @@ def api_record_create() -> Any:
     if not isinstance(body, dict):
         body = {}
     answer = str(body.get("answer") or "").strip()
-    fields = body.get("fields")
+    # Not named `fields`: that is the module that reads them, and shadowing it
+    # here made every call below a method on a list.
+    wanted = body.get("fields")
     if not answer:
         return jsonify({"error": "Missing 'answer'"}), 400
-    if not isinstance(fields, list) or not fields:
+    if not isinstance(wanted, list) or not wanted:
         return jsonify({"error": "Missing 'fields'"}), 400
 
     model = str(body.get("model") or "") or get_default_model()
-    extracted = records.extract(answer, [str(f) for f in fields], model)
+    declared = fields.parse(wanted)
+    # Only the fields nothing can derive are asked for. A rate is arithmetic
+    # over two other fields, and asking a language model to do arithmetic in
+    # prose is how one trip came to be logged at $26.23 an hour and, five
+    # minutes later, at $23.19 — the second time from a row with no elapsed
+    # time in it at all. What can be computed is computed, below, in Python.
+    asked = fields.to_ask(declared)
+    extracted = records.extract(
+        answer, [f.name for f in asked], model,
+        kinds={f.name: f.kind for f in asked if f.kind})
+    # Straight from the photos' own files, before anything is computed, so a
+    # field declared "= earliest photo taken" is exact and the elapsed time
+    # built on it is exact too. The model is not asked for these at all: it has
+    # no labels on the pictures to match a time against, which is precisely how
+    # it came to report somebody else's.
+    photos = body.get("photos")
+    taken = fields.from_photos(declared, photos if isinstance(photos, list) else None)
+    read = {**extracted, **{k: v for k, v in taken.items() if v}}
+    # The kinds the columns actually hold, not only the ones written down.
+    # Without this, arithmetic worked *only* on a routine whose every input
+    # carried an explicit "name: kind" — write the obvious
+    #
+    #     Start odometer
+    #     End odometer
+    #     Miles = End odometer - Start odometer
+    #
+    # and Miles came out blank on every run, reporting "nothing recorded for
+    # End odometer or Start odometer" while both sat in the row reading
+    # "102,072 mi". Asking storage means the sum reads a value exactly as the
+    # column that files it does, so the two can never disagree.
+    if read:
+        known = store.column_kinds(str(body.get("routine_name") or "Routine"), read,
+                                   fields.kinds(declared))
+        computed, gaps = fields.compute(declared, read, known)
+    else:
+        computed, gaps = {}, []
+    # Declared order, so the table reads the way the routine was written.
+    row = {f.name: computed.get(f.name, read.get(f.name, ""))
+           for f in declared}
+    wrong = fields.mismatches(declared, extracted)
+    if gaps or wrong:
+        logger.info("Record for %s: %s", body.get("routine_name"),
+                    "; ".join(gaps + [f"{k}: {v}" for k, v in wrong.items()]))
     kept = store.add_record(
-        str(body.get("routine_name") or "Routine"), extracted,
+        str(body.get("routine_name") or "Routine"), row,
         str(body.get("routine_id") or "") or None,
         str(body.get("conversation_id") or "") or None,
+        declared=fields.kinds(declared),
     )
     # 200 either way. "Nothing could be pulled out of that answer" is an
     # outcome, not an error, and the reply it came from is still on screen.
-    return jsonify({"record": kept})
+    # The gaps travel with it: a blank hourly rate is only reassuring once you
+    # know it is blank because no elapsed time was recorded, rather than
+    # because something broke.
+    return jsonify({"record": kept, "gaps": gaps,
+                    "mismatched": [f"{k}: {v}" for k, v in wrong.items()]})
 
 
 @app.route("/api/records/<record_id>", methods=["PATCH"])
@@ -653,13 +732,33 @@ def api_records_csv() -> Any:
     """
     rows = store.list_records(str(request.args.get("routine") or ""))
     columns = store.record_columns(rows)
+    # The unit moves to the header and the cell keeps the number alone. A cell
+    # reading "$115.94" or "93 mi" is text to a spreadsheet: it will not sum, it
+    # will not chart, and it sorts "100 mi" before "93 mi". Under a header
+    # saying "Total earnings (USD)" the bare 115.94 says exactly as much and is
+    # a number. Timestamps and prose are written out as they stand.
+    # Declared kinds first, inference only where nothing was declared — the
+    # same order the table and the record writer use. Without this a column
+    # declared "text" and stored as text was exported as a number.
+    declared: Dict[str, str] = {}
+    for routine in {r["routine_name"] for r in rows}:
+        for name, kind in store.declared_kinds(routine).items():
+            declared.setdefault(name, kind)
+    kinds, heads = {}, []
+    for name in columns:
+        seen = [r["fields"].get(name, "") for r in rows]
+        kinds[name] = declared.get(name) or values.column_kind(seen)
+        unit = values.unit_label(kinds[name], seen)
+        heads.append(f"{name} ({unit})" if unit else name)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["taken_at", "routine"] + columns)
+    writer.writerow(["taken_at", "routine"] + heads)
     for row in rows:
         stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
-        writer.writerow([stamp, _csv_safe(row["routine_name"])] +
-                        [_csv_safe(row["fields"].get(name, "")) for name in columns])
+        writer.writerow(
+            [stamp, _csv_safe(row["routine_name"])] +
+            [_csv_safe(values.number_of(row["fields"].get(name, ""), kinds[name]))
+             for name in columns])
     return Response(
         buffer.getvalue(),
         mimetype="text/csv",
@@ -735,7 +834,14 @@ def api_chat() -> Any:
             # Read it once and then take it off the messages, so that after this
             # point the facts travel as prose that was deliberately put
             # somewhere, rather than as a JSON field riding along everywhere.
-            photo_meta = web.conversation_image_meta(messages)
+            # Read off the messages *as they will be sent*, not off the whole
+            # thread. The block numbers its lines "Image 1", "Image 2", and the
+            # images carry no numbering of their own — so the numbering is only
+            # true if it counts the same photos the model is about to see.
+            # Trimming happens below for the real conversation; this runs it
+            # early, on a copy that still has the EXIF attached to it.
+            photo_meta = web.sent_image_meta(
+                web.keep_recent_images(messages, keep_turns=get_image_turns()))
             meta_context = web.image_metadata(photo_meta)
             carried = sum(1 for m in photo_meta if m)
             if not web.conversation_images(messages):
@@ -784,12 +890,51 @@ def api_chat() -> Any:
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
                     convo = web.with_context(web.strip_images(turns), context)
+            elif images and len(images) > 1 and get_photo_read_each():
+                # A model that *can* see, given each photo read on its own so
+                # that the labels are reliable. The pictures carry no labels,
+                # and the photo details beside them say "Image 1", "Image 2" —
+                # so using a capture time means aligning two lists across two
+                # messages by position, with nothing in the input to anchor it.
+                # That is where a two-odometer routine goes wrong, and it goes
+                # wrong on large models too. Read separately, the readings
+                # arrive already numbered and the join is text to text.
+                #
+                # The images stay: this is an anchor for them, not a substitute,
+                # and the preamble tells the model to trust its own eyes over a
+                # reading that disagrees.
+                yield _line({"status": f"Reading {len(images)} photos one at a time…"})
+                try:
+                    transcript = web.read_images(images, model, ocr=False,
+                                                 answering_model=model)
+                except web.ReadFailed as exc:
+                    # An enhancement. Losing it costs the labels, not the turn.
+                    logger.warning("Per-photo read via %s failed: %s", model, exc)
+                    yield _step("Read each photo", f"{model} failed: {exc}")
+                else:
+                    context = web.per_photo_context(transcript)
+                    if context:
+                        convo = web.with_context(convo, context)
+                    yield _step("Read each photo",
+                                f"{model}, {len(images)} photo(s) read separately "
+                                "so the numbering is reliable",
+                                text=transcript or "(nothing came back)")
 
             if meta_context:
                 convo = web.with_context(convo, meta_context)
 
+            # Where the numbered links point, and how many times the model may
+            # still ask for one. Both empty unless a web turn fills them in.
+            documents: List[Dict[str, str]] = []
+            link_ids: Dict[str, Dict[str, str]] = {}
+            hops = 0
+            # The conversation *without* the page context, kept so that a hop
+            # can rebuild rather than stack: inserting a second block would
+            # leave the model reading two overlapping copies of the same pages,
+            # numbered differently, which is worse than not hopping at all.
+            grounded = convo
+
             if use_web:
-                documents: List[Dict[str, str]] = []
                 outcome: Dict[str, bool] = {}
                 for line in _gather_web(model, turns, documents, transcript, outcome,
                                         photo_note=photo_note):
@@ -804,11 +949,10 @@ def api_chat() -> Any:
                     # Layer the page context on whatever the image already added,
                     # bounded so the pages cannot crowd the conversation out of
                     # the window — Ollama drops the oldest turns silently.
+                    grounded = convo
+                    hops = get_web_fetch_hops()
                     convo = web.with_context(
-                        convo,
-                        web.build_context(documents,
-                                          char_budget=web.context_budget(get_num_ctx())),
-                    )
+                        convo, _web_context(documents, turns, link_ids, hops))
                     kept_sources.extend(
                         {"url": d["url"], "title": d["title"]} for d in documents)
                     yield _line({"sources": list(kept_sources)})
@@ -818,11 +962,81 @@ def api_chat() -> Any:
                 f"characters of text, num_ctx {options.get('num_ctx')}",
                 system=[str(t.get("content") or "")[:2000]
                         for t in convo if t.get("role") == "system"])
-            for line in chat_stream(model, convo, options=options,
-                                    keep_alive=get_keep_alive() or None):
-                answer.append(_message_field(line, "content"))
-                thinking.append(_message_field(line, "thinking"))
-                yield line + "\n"
+
+            # The model may answer, or — while a hop is left and it was told it
+            # could — ask for one of the numbered links to be read first. A
+            # request is swallowed rather than shown: it is the machinery
+            # talking, not the reply, and the user gets the answer that comes
+            # back with the page in front of it.
+            for _ in range(hops + 1):
+                # The table only goes in while an offer actually stands. With
+                # the feature off the model was never told it could ask, so a
+                # reply that happens to look like a request is just a reply —
+                # and holding it back would swallow somebody's answer about
+                # this very feature.
+                wanted = yield from _stream_answer(
+                    model, convo, options, link_ids if hops else {},
+                    answer, thinking)
+                if not wanted:
+                    break
+                link = link_ids.get(wanted)
+                if not link:
+                    # A number that was never on the list. Nothing to fetch, so
+                    # ask again with the offer withdrawn rather than showing the
+                    # user a marker where their answer should be.
+                    logger.info("Model asked for link [%s], which is not on the "
+                                "list it was shown", wanted)
+                    yield _step("Asked to read a link",
+                                f"[{wanted}] is not one of the links offered; "
+                                "answering from what was already retrieved")
+                # The map *shows* more than may be opened: WEB_LINK_SCOPE is
+                # about what the model can see and WEB_FOLLOW_SCOPE about what
+                # it can talk us into visiting, and the second is the stricter
+                # of the two on purpose. Asking by number must not be the way
+                # round it — without this check the default settings list every
+                # outbound link and then open any of them on request, which is
+                # exactly the surface following was kept narrow to avoid.
+                elif not web.followable({"url": link.get("source", "")}, link):
+                    logger.info("Model asked for link [%s] (%s), which leaves the "
+                                "site it was found on", wanted, link.get("url"))
+                    yield _step("Asked to read a link",
+                                f"[{wanted}] leaves {_host_of(link.get('source', ''))} "
+                                "— only pages of a site already retrieved may be "
+                                "opened (WEB_FOLLOW_SCOPE)")
+                # Already read. A link stays on the map after it is followed, so
+                # with more than one hop the model can ask for the same page
+                # twice — which fetched it twice, listed it twice as a source,
+                # and spent the last hop learning nothing.
+                elif any(link["url"] in (d.get("url"), d.get("requested"))
+                         for d in documents):
+                    yield _step("Asked to read a link",
+                                f"[{wanted}] has already been read")
+                else:
+                    yield _line({"status": f"Opening {_host_of(link['url'])}…"})
+                    try:
+                        documents.append(web.fetch(link["url"]))
+                    # Not just WebError. Following a link is an enhancement, and
+                    # an enhancement that can take the whole turn down with it is
+                    # a worse bug than the one it fixes — the reply is already
+                    # paid for and the pages to answer from are already here.
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Fetching requested link %s failed: %s",
+                                       link["url"], exc)
+                        yield _line({"status": f"Could not read {_host_of(link['url'])}."})
+                        yield _step("Asked to read a link",
+                                    f"[{wanted}] {link['url']} — {exc}")
+                    else:
+                        yield _step("Asked to read a link",
+                                    f"the model asked for [{wanted}]",
+                                    urls=[documents[-1].get("url", "")])
+                        kept_sources.append({"url": documents[-1]["url"],
+                                             "title": documents[-1]["title"]})
+                        yield _line({"sources": list(kept_sources)})
+                # One offer per hop, and none once they are spent, so the model
+                # is never invited to ask for something it cannot be given.
+                hops = max(0, hops - 1)
+                convo = web.with_context(
+                    grounded, _web_context(documents, turns, link_ids, hops))
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
             message = str(exc) or exc.__class__.__name__
@@ -1056,6 +1270,87 @@ def _detached_stream(produce: Any, name: str) -> Response:
     return Response(stream_with_context(relay()), mimetype="application/x-ndjson")
 
 
+def _web_context(
+    documents: List[Dict[str, str]],
+    turns: List[Dict[str, str]],
+    link_ids: Dict[str, Dict[str, str]],
+    hops: int,
+) -> str:
+    """The fenced page block, with the link numbering it hands back recorded.
+
+    ``link_ids`` is emptied and refilled on every call, because the numbering
+    is only valid for the block it was rendered with: a hop adds a document,
+    every list below it shifts, and a table left over from the previous round
+    would resolve [3.2] against a page that is now [4.2].
+    """
+    return web.build_context(
+        documents,
+        char_budget=web.context_budget(get_num_ctx()),
+        question=web.last_user_text(turns),
+        link_ids=link_ids,
+        may_fetch=hops > 0,
+    )
+
+
+def _stream_answer(
+    model: str,
+    convo: List[Dict[str, str]],
+    options: Dict[str, Any],
+    link_ids: Dict[str, Dict[str, str]],
+    answer: List[str],
+    thinking: List[str],
+) -> Any:
+    """Stream one reply, unless it turns out to be a request to read a link.
+
+    Returns the link id asked for, or "" when this was an ordinary answer — in
+    which case every line has already been yielded and nothing was held back.
+
+    The holding is the awkward part and cannot be avoided: a request has to be
+    recognised before it is shown, or the user watches "FETCH: [2.3]" arrive,
+    sit there, and then be followed by a second answer with no explanation of
+    what the first line was. So content is buffered while it could still become
+    a request — which for ordinary prose is one token, since "The" cannot — and
+    released the moment it cannot. Reasoning is never held: it is not the reply,
+    the user is already watching it scroll, and a model that thinks for thirty
+    seconds before asking for a link would otherwise look frozen.
+    """
+    held: List[str] = []
+    holding = bool(link_ids)
+
+    def flush() -> Any:
+        for line in held:
+            answer.append(_message_field(line, "content"))
+            yield line + "\n"
+        held.clear()
+
+    for line in chat_stream(model, convo, options=options,
+                            keep_alive=get_keep_alive() or None):
+        thinking.append(_message_field(line, "thinking"))
+        if not holding:
+            answer.append(_message_field(line, "content"))
+            yield line + "\n"
+            continue
+        # Thinking-only lines go straight out; everything else waits, including
+        # the final empty one, or the reply would arrive after its own end.
+        if not _message_field(line, "content") and _message_field(line, "thinking"):
+            yield line + "\n"
+            continue
+        held.append(line)
+        if web.fetch_pending("".join(_message_field(l, "content") for l in held)):
+            continue
+        holding = False
+        yield from flush()
+
+    if held:
+        wanted = web.fetch_request("".join(_message_field(l, "content") for l in held))
+        if wanted:
+            return wanted
+        # Held to the end and not a request after all — an empty reply, or one
+        # short enough to still look like one. It is the answer; show it.
+        yield from flush()
+    return ""
+
+
 def _debug_of(line: str) -> Optional[Dict[str, Any]]:
     """The panel entry in a line, if it is one. Recorded where the lines are
     relayed rather than at each yield, so a step added later is kept without
@@ -1075,27 +1370,61 @@ def _host_of(url: str) -> str:
         return url
 
 
+# However the settings multiply out, retrieval never puts more than this many
+# documents in front of the model. WEB_MAX_DOCS × WEB_FOLLOW_LINKS × WEB_MAX_HOPS
+# reaches fifteen at the permitted maximums, and fifteen documents do not fit in
+# any window this app runs at — build_context would hand each one its 800-character
+# floor and overrun the budget by several times. A ceiling here is the one place
+# that cannot be got wrong by a combination of settings that each look reasonable.
+_DOC_CEILING = 8
+
+
+def _link_candidates(
+    question: str,
+    sources: List[Dict[str, Any]],
+    documents: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """Links worth offering the picker, best first, across every page given.
+
+    Pooled and ranked as one list rather than per page. A search turn retrieves
+    three pages from three sites; asking the picker about each in turn is three
+    model calls to answer one question, and it cannot see that the best link on
+    the whole turn was on page two.
+    """
+    seen = {d.get("url") for d in documents} | {d.get("requested") for d in documents}
+    pool: List[Dict[str, str]] = []
+    for source in sources:
+        for link in (source.get("links") or []):
+            url = link.get("url")
+            # followable(), not same_site(): what may be *opened* is a stricter
+            # question than what may be listed, and it has its own setting.
+            if not url or url in seen or not web.followable(source, link):
+                continue
+            seen.add(url)
+            pool.append(link)
+    # No `here`: these come from several pages at once, so a same-site bonus
+    # would mean "same site as whichever page this link happened to be on",
+    # which is every one of them and therefore nothing.
+    return web.rank_links(pool, question)
+
+
 def _follow_links(
     model: str,
     question: str,
-    source: Dict[str, Any],
+    sources: List[Dict[str, Any]],
     documents: List[Dict[str, str]],
     budget: int,
 ) -> Any:
-    """Open a couple of the pages ``source`` links to, if any look relevant.
+    """Open a couple of the pages ``sources`` link to, if any look relevant.
 
-    Same-site only, one hop, and every URL still goes through the address guard
-    in fetch() — a link is chosen by a model from content written by a stranger,
-    so it gets no more trust than a pasted URL does.
+    Every URL still goes through the address guard in fetch(), and by default
+    only same-site links are candidates at all — a link is chosen by a model
+    from content written by a stranger, so it gets no more trust than a pasted
+    URL does. Returns the documents it added, so the caller can hop from them.
     """
-    candidates = [
-        link for link in (source.get("links") or [])
-        if web.same_site(source.get("url", ""), link["url"])
-        and link["url"] not in {d.get("url") for d in documents}
-        and link["url"] not in {d.get("requested") for d in documents}
-    ]
+    candidates = _link_candidates(question, sources, documents)
     if not candidates:
-        return
+        return []
 
     picker = get_planner_model() or model
     try:
@@ -1103,15 +1432,50 @@ def _follow_links(
                                   answering_model=model)
     except Exception as exc:  # noqa: BLE001 - an enhancement, never a requirement
         logger.warning("Link picking failed: %s", exc)
-        return
+        return []
     if not chosen:
-        return
+        return []
 
     yield _line({"status": "Following: " + " · ".join(c["text"][:40] for c in chosen)})
     fetched, failures = _run_all(web.fetch, [c["url"] for c in chosen])
     documents.extend(fetched)
     if failures and not fetched:
         yield _line({"status": "Could not read the linked pages."})
+    yield _step("Followed links",
+                f"{len(chosen)} chosen, {len(fetched)} read"
+                + (f"; failures: {'; '.join(failures[:3])}" if failures else ""),
+                urls=[d.get("url", "") for d in fetched])
+    return fetched
+
+
+def _deepen(
+    model: str,
+    question: str,
+    documents: List[Dict[str, str]],
+) -> Any:
+    """Follow links outward from what has been retrieved, up to the hop limit.
+
+    Hop one is the case this started as: the page answers half the question and
+    points at the page with the other half. Hop two is the one that needed a
+    setting of its own — the specification linked from the release note linked
+    from the search result — and it is off by default because each hop is
+    another picker call and another round of fetches on hardware that is
+    usually running the answering model at the same time.
+    """
+    budget = get_web_follow_links()
+    hops = get_web_max_hops()
+    if budget < 1 or hops < 1:
+        return
+    frontier = list(documents)
+    for _ in range(hops):
+        room = _DOC_CEILING - len(documents)
+        if not frontier or room < 1:
+            return
+        fetched = yield from _follow_links(model, question, frontier, documents,
+                                           min(budget, room))
+        if not fetched:
+            return          # nothing chosen or nothing readable; no deeper to go
+        frontier = fetched
 
 
 def _gather_web(
@@ -1149,15 +1513,9 @@ def _gather_web(
         # A linked page is rarely self-contained: a wiki article answers half
         # the question and points at the page with the other half. Ask a small
         # model which of its links are worth opening, and follow a couple.
-        # Only from a page the *user* chose, and only within the same site —
-        # following a model's pick of an arbitrary outbound link is a much
-        # larger surface for very little gain.
-        budget = get_web_follow_links()
-        for source in list(documents):
-            if budget < 1:
-                break
-            yield from _follow_links(model, question, source, documents, budget)
-            budget = 0     # one hop, from the first page only
+        # Only within the same site by default — following a model's pick of an
+        # arbitrary outbound link is a much larger surface for very little gain.
+        yield from _deepen(model, question, documents)
         # Deliberately not distilled. A page reached by searching is one this
         # app chose, and cutting it down to the question it was chosen to
         # answer loses nothing. A page the *user* pasted is a deliberate act,
@@ -1288,6 +1646,15 @@ def _gather_web(
     yield _step("Pages read", f"{len(fetched)} of {len(urls)} tried"
                 + (f"; failures: {'; '.join(fetch_failures[:4])}" if fetch_failures else ""),
                 urls=[d.get("url", "") for d in fetched[:max_docs]])
+
+    # The same half-an-answer problem the pasted-URL path has, and for a long
+    # time the search path did not do this at all: a search lands on the
+    # overview and the specifics are one click away, exactly as they are on a
+    # page pasted by hand. Before the snippet documents are added, so the
+    # picker is only ever offered pages that were actually read — a snippet has
+    # no links, and its own URL is already a document.
+    if get_web_follow_on_search():
+        yield from _deepen(model, question, documents)
 
     # Paywalled, JS-only and dead pages are routine. Their search snippets are
     # already paid for, so use them to fill out the budget rather than throwing

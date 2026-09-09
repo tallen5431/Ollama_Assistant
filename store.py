@@ -28,6 +28,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+import fields
+import values
 from config import logger
 
 _SCHEMA = """
@@ -103,6 +105,12 @@ _ADDED_COLUMNS = (
     ("messages", "steps", "TEXT"),
     # What a routine records after each run: a JSON list of field names.
     ("routines", "record", "TEXT"),
+    # The value exactly as the model wrote it, for any field that normalising
+    # changed. Kept because normalising is a judgement about presentation and
+    # judgements can be wrong: "≈ 23.21 mph" becoming "23.21 mph" drops the
+    # model's own admission that it was estimating, and the only honest way to
+    # tidy a record is to still have what it said before.
+    ("records", "raw", "TEXT"),
 )
 
 _TITLE_MAX = 60
@@ -521,23 +529,37 @@ def _tri_column(value: Any) -> Optional[bool]:
 # fills in a form at the roadside.
 _RECORD_FIELDS_MAX = 12
 _RECORD_NAME_MAX = 32
+# A declaration carries up to three names and an operator, so it needs far
+# more room than the name at the front of it.
+_RECORD_DECL_MAX = 160
 
 
 def _record_fields(raw: Any) -> List[str]:
-    """The field-name list off a routine row, however it was stored."""
+    """A routine's field declarations, however they were stored.
+
+    Still a list of strings, and a list of bare names still means what it
+    always did — so every routine written before fields could carry a kind or
+    a formula reads back unchanged. What the strings may now also say is
+    ``name: kind`` and ``name = a - b``; fields.py is what understands them.
+    """
     if not raw:
         return []
     try:
-        names = json.loads(raw) if isinstance(raw, str) else raw
+        listed = json.loads(raw) if isinstance(raw, str) else raw
     except (TypeError, ValueError):
         return []
-    if not isinstance(names, list):
+    if not isinstance(listed, (list, str)):
         return []
     out = []
-    for name in names[:_RECORD_FIELDS_MAX]:
-        clean = " ".join(str(name or "").split())[:_RECORD_NAME_MAX].strip()
-        if clean and clean not in out:
-            out.append(clean)
+    for field in fields.parse(listed)[:_RECORD_FIELDS_MAX]:
+        # The name is capped as it always was; the declaration around it gets
+        # its own, larger allowance, because "Earnings per hour = Total
+        # earnings / Elapsed time" is three names long and was being cut in
+        # half by the name limit.
+        clean = field._replace(name=field.name[:_RECORD_NAME_MAX].strip())
+        text = clean.declaration()[:_RECORD_DECL_MAX].strip()
+        if text and text not in out:
+            out.append(text)
     return out
 
 
@@ -683,22 +705,32 @@ _STARTERS = (
         "kilometres, and if it does not say, say which you assumed.\n\n"
         "The photo details above label the two photos \"Image 1\" and \"Image 2\" "
         "in the order they were attached, and those are the same two photos as "
-        "\"[image 1]\" and \"[image 2]\" in any transcription above. Quote both "
-        "capture times back to me — I am asking for them, so the usual rule "
-        "about not reciting photo details does not apply here.\n\n"
-        "Then give me:\n"
-        "- Distance: the larger reading minus the smaller. Do not assume the "
-        "first photo is the start; the later capture time is the end of the trip.\n"
-        "- Elapsed time: the gap between the two capture times.\n"
-        "- Average speed over that elapsed time.\n\n"
-        "If either photo has no readable number, or has no capture time in the "
-        "photo details above, say exactly which photo is missing which thing and "
-        "stop there. Do not estimate either one, and do not answer from one photo "
-        "alone. If the photo with the later time shows the smaller reading, say "
-        "so plainly rather than reporting a negative distance.\n\n"
-        "Capture times carry no time zone. If this trip could have crossed one, "
-        "say the elapsed time may be off by whole hours.",
+        "\"[image 1]\" and \"[image 2]\" in any transcription above.\n\n"
+        "Say which of the two readings is the start and which is the end, using "
+        "the capture times in the photo details to decide — the later capture "
+        "is the end of the trip, whichever order they were attached in. Then "
+        "give me the distance: the end reading minus the start reading.\n\n"
+        "You do not need to work out the elapsed time or the average speed, and "
+        "you do not need to quote the capture times back. Those come from the "
+        "files themselves and are filled in for you.\n\n"
+        "If either photo has no readable number, say which one and stop there. "
+        "Do not estimate it, and do not answer from one photo alone. If the "
+        "photo with the later capture time shows the smaller reading, say so "
+        "plainly rather than reporting a negative distance.",
         2, False, True,
+        # The shipped example of a typed declaration, and the reason the syntax
+        # exists: five readings off two photos, and everything else worked out
+        # from them here rather than by a model doing arithmetic in prose.
+        # The times are not asked for at all: they are read off the photo
+        # files, which is where they were exact to begin with. The model is
+        # left with the one job only it can do — reading two odometers.
+        ("Start odometer: distance",
+         "End odometer: distance",
+         "Distance = End odometer - Start odometer",
+         "Start time = earliest photo taken",
+         "End time = latest photo taken",
+         "Elapsed time = End time - Start time",
+         "Average speed = Distance / Elapsed time"),
     ),
     (
         "📊 Before / after",
@@ -712,7 +744,7 @@ _STARTERS = (
         "them; I am asking for them, so report them. If a capture time is "
         "missing for either photo, say which one and do not estimate it.\n\n"
         "If the two photos are not of the same subject, say so and stop.",
-        2, None, True,
+        2, None, True, (),
     ),
     (
         "📄 Read this",
@@ -728,7 +760,7 @@ _STARTERS = (
         # Photo details forced off: a label or a receipt has no interesting time
         # or place, and this is the routine most likely to be pointed at
         # something in someone else's house.
-        1, None, False,
+        1, None, False, (),
     ),
     (
         "✍️ Plain words",
@@ -737,7 +769,7 @@ _STARTERS = (
         "Keep it under 200 words, define any term you have to use, and end with "
         "the one sentence that matters most. If it is ambiguous, say which part "
         "and why instead of picking one reading and running with it.",
-        0, None, None,
+        0, None, None, (),
     ),
 )
 
@@ -761,22 +793,26 @@ def create_starters() -> List[Dict[str, Any]]:
         position = conn.execute(
             "SELECT COALESCE(MAX(position), 0) AS top FROM routines"
         ).fetchone()["top"]
-        for name, body, photos, web, photo_meta in _STARTERS:
+        for name, body, photos, web, photo_meta, record in _STARTERS:
             if name in taken:
                 continue
             position += 1
             rid = uuid.uuid4().hex
             conn.execute(
                 "INSERT INTO routines"
-                " (id, name, body, photos, web, photo_meta, position, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " (id, name, body, photos, web, photo_meta, position, record,"
+                "  created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (rid, name, body, photos,
                  None if web is None else int(web),
                  None if photo_meta is None else int(photo_meta),
-                 position, now, now),
+                 position,
+                 json.dumps(_record_fields(list(record))) if record else None,
+                 now, now),
             )
             made.append({"id": rid, "name": name, "body": body, "photos": photos,
                          "web": web, "photo_meta": photo_meta, "position": position,
+                         "record": _record_fields(list(record)),
                          "created_at": now, "updated_at": now})
     return made
 
@@ -791,6 +827,10 @@ def create_starters() -> List[Dict[str, Any]]:
 # joined and why deleting a routine leaves its records alone.
 
 _RECORD_VALUE_MAX = 300       # a field, not an essay
+# How many of a routine's runs are consulted when deciding what kind of
+# value a column holds. A column does not change its mind often, and the
+# vote is only ever used to read the column it came from.
+_KIND_SAMPLE = 200
 
 
 def _record_row(row: sqlite3.Row) -> Dict[str, Any]:
@@ -798,14 +838,85 @@ def _record_row(row: sqlite3.Row) -> Dict[str, Any]:
         fields = json.loads(row["fields"])
     except (TypeError, ValueError):
         fields = {}
+    raw = _loads(row["raw"]) if "raw" in row.keys() else {}
     return {
         "id": row["id"],
         "routine_id": row["routine_id"],
         "routine_name": row["routine_name"],
         "conversation_id": row["conversation_id"],
         "fields": fields if isinstance(fields, dict) else {},
+        # Only the fields normalising actually changed, so an untouched record
+        # carries nothing extra.
+        "raw": raw if isinstance(raw, dict) else {},
         "created_at": row["created_at"],
     }
+
+
+def _declared_kinds(routine_name: str, routine_id: Optional[str],
+                    conn: sqlite3.Connection) -> Dict[str, str]:
+    """The kinds this routine's own declaration states, if it states any.
+
+    A declaration beats inference every time. Inference is a good guess across
+    a column, and a good guess is still a guess: when someone has written down
+    that a column holds money, that is the answer and there is nothing to vote
+    on.
+    """
+    row = None
+    if routine_id:
+        row = conn.execute("SELECT record FROM routines WHERE id = ?",
+                           (routine_id,)).fetchone()
+    if row is None and routine_name:
+        row = conn.execute("SELECT record FROM routines WHERE name = ?",
+                           (routine_name,)).fetchone()
+    if row is None or not row["record"]:
+        return {}
+    return fields.kinds(fields.parse(_record_fields(row["record"])))
+
+
+def _column_kinds(routine_name: str, extra: Dict[str, str],
+                  conn: Optional[sqlite3.Connection] = None,
+                  declared: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """What kind of value each of a routine's columns holds.
+
+    Decided across the column rather than per value, because per value it
+    cannot be decided at all: "102,072" is a bare number and "102,072 mi" is a
+    distance, and they are the same odometer written by the same routine a
+    minute apart. Neighbours are the only evidence there is.
+
+    ``extra`` is the record being written, which votes alongside the ones
+    already stored — for the first run of a new routine it is the only vote.
+    """
+    columns: Dict[str, List[str]] = {name: [text] for name, text in extra.items()}
+    rows = []
+    if routine_name:
+        query = ("SELECT fields FROM records WHERE routine_name = ?"
+                 " ORDER BY created_at DESC LIMIT ?")
+        if conn is not None:
+            rows = conn.execute(query, (routine_name, _KIND_SAMPLE)).fetchall()
+        else:
+            with _connect() as own:
+                rows = own.execute(query, (routine_name, _KIND_SAMPLE)).fetchall()
+    for row in rows:
+        stored = _loads(row["fields"])
+        if not isinstance(stored, dict):
+            continue
+        for name, text in stored.items():
+            columns.setdefault(name, []).append(str(text))
+    out = {name: values.column_kind(seen) for name, seen in columns.items()}
+    out.update({k: v for k, v in (declared or {}).items() if v})
+    return out
+
+
+def _normalised(fields: Dict[str, str], kinds: Dict[str, str]) -> tuple:
+    """``(fields, raw)`` — the standard shape, and whatever it replaced."""
+    out: Dict[str, str] = {}
+    raw: Dict[str, str] = {}
+    for name, text in fields.items():
+        tidy = values.canonical(text, kinds.get(name, ""))
+        out[name] = tidy
+        if tidy != text:
+            raw[name] = text
+    return out, raw
 
 
 def _clean_fields(fields: Any) -> Dict[str, str]:
@@ -827,11 +938,40 @@ def _clean_fields(fields: Any) -> Dict[str, str]:
     return out
 
 
+def declared_kinds(routine_name: str) -> Dict[str, str]:
+    """The kinds a routine's own declaration states, by column name.
+
+    Public because the CSV export needs the same answer the record writer uses:
+    a column declared "text" and stored as text was being exported as a number,
+    because the export re-inferred instead of asking.
+    """
+    with _connect() as conn:
+        return _declared_kinds(routine_name, None, conn)
+
+
+def column_kinds(routine_name: str, row: Dict[str, str],
+                 declared: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """What kind each column of this routine holds, this row included.
+
+    Public because arithmetic needs the same answer storage does. A column's
+    kind is what says a bare "93" is ninety-three miles, and the code that
+    works out a distance from two odometer readings has to read them the same
+    way the code that files them away will.
+
+    The name is tidied exactly as ``add_record`` tidies it, so the two look the
+    column up under the same name.
+    """
+    name = _routine_name(routine_name) or "Routine"
+    with _connect() as conn:
+        return _column_kinds(name, _clean_fields(row), conn, declared)
+
+
 def add_record(
     routine_name: str,
     fields: Dict[str, Any],
     routine_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
+    declared: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Keep one run. None when there was nothing worth keeping.
 
@@ -846,16 +986,27 @@ def add_record(
     rid = uuid.uuid4().hex
     name = _routine_name(routine_name) or "Routine"
     with _connect() as conn:
+        # Standardised on the way in, against what this routine's other runs
+        # look like. Doing it here rather than at extraction is deliberate:
+        # this is the only place that can see the column, and the column is
+        # what says whether a bare "93" is ninety-three miles or just 93.
+        # Handed in by the caller where it knows — the record route parses the
+        # declaration anyway — and looked up otherwise. Not only looked up: a
+        # routine that has not been saved, or has been renamed since, finds
+        # nothing, and then the very first record of a column falls back to
+        # inference and comes out unlike every one after it.
+        kinds = declared or _declared_kinds(name, routine_id, conn)
+        clean, raw = _normalised(clean, _column_kinds(name, clean, conn, kinds))
         conn.execute(
             "INSERT INTO records"
-            " (id, routine_id, routine_name, conversation_id, fields, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            " (id, routine_id, routine_name, conversation_id, fields, raw, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (rid, routine_id or None, name, conversation_id or None,
-             json.dumps(clean), now),
+             json.dumps(clean), json.dumps(raw) if raw else None, now),
         )
     return {"id": rid, "routine_id": routine_id or None, "routine_name": name,
             "conversation_id": conversation_id or None, "fields": clean,
-            "created_at": now}
+            "raw": raw, "created_at": now}
 
 
 def list_records(routine_name: str = "", limit: int = 500) -> List[Dict[str, Any]]:
@@ -889,12 +1040,71 @@ def update_record(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # Merged, not replaced. Correcting one cell from the table would
         # otherwise silently drop every column the edit did not mention, which
         # is a poor property for the thing you are keeping records in.
-        merged = dict(_record_row(row)["fields"])
+        current = _record_row(row)
+        merged = dict(current["fields"])
         merged.update(clean)
-        conn.execute("UPDATE records SET fields = ? WHERE id = ?",
-                     (json.dumps(_clean_fields(merged)), rid))
+        merged = _clean_fields(merged)
+        # A hand-typed correction is standardised like any other value, so the
+        # column stays consistent whoever wrote the cell. What it replaced is
+        # remembered only for the cells actually being edited: the originals
+        # already recorded for the untouched ones are still the originals.
+        kinds = _column_kinds(
+            current["routine_name"], merged, conn,
+            _declared_kinds(current["routine_name"], current["routine_id"], conn))
+        merged, changed = _normalised(merged, kinds)
+        raw = {k: v for k, v in current["raw"].items() if k not in clean}
+        raw.update({k: v for k, v in changed.items() if k in clean})
+        conn.execute("UPDATE records SET fields = ?, raw = ? WHERE id = ?",
+                     (json.dumps(merged), json.dumps(raw) if raw else None, rid))
         row = conn.execute("SELECT * FROM records WHERE id = ?", (rid,)).fetchone()
     return _record_row(row) if row else None
+
+
+def normalise_stored(limit: int = 5000) -> Dict[str, int]:
+    """Put every record already kept into the standard shape.
+
+    Records written before this existed are the ones that need it most — they
+    are the whole log. Nothing is lost: a value that changes has its original
+    written to ``raw`` first, and a value already in shape is not touched at
+    all, which makes this idempotent and a no-op on a tidy log.
+
+    Grouped by routine, because the kind of a column is decided across the
+    column: one record on its own cannot tell you that its bare "93" belongs in
+    a list of miles.
+    """
+    if not db_path().exists():
+        return {"records": 0, "values": 0}
+    touched = fixed = 0
+    by_routine: Dict[str, List[Dict[str, Any]]] = {}
+    for record in list_records(limit=limit):
+        by_routine.setdefault(record["routine_name"], []).append(record)
+
+    for routine, group in by_routine.items():
+        columns: Dict[str, List[str]] = {}
+        for record in group:
+            for name, text in record["fields"].items():
+                columns.setdefault(name, []).append(str(text))
+        kinds = {name: values.column_kind(seen) for name, seen in columns.items()}
+        with _connect() as conn:
+            kinds.update({k: v for k, v in
+                          _declared_kinds(routine, group[0].get("routine_id"), conn).items()
+                          if v})
+        for record in group:
+            tidy, changed = _normalised(record["fields"], kinds)
+            if tidy == record["fields"]:
+                continue
+            # The first original wins. Running this twice must not overwrite
+            # what the model wrote with what the first pass made of it.
+            raw = dict(changed)
+            raw.update(record["raw"])
+            with _connect() as conn:
+                conn.execute("UPDATE records SET fields = ?, raw = ? WHERE id = ?",
+                             (json.dumps(tidy), json.dumps(raw), record["id"]))
+            touched += 1
+            fixed += len(changed)
+    if touched:
+        logger.info("Standardised %d value(s) across %d record(s)", fixed, touched)
+    return {"records": touched, "values": fixed}
 
 
 def delete_record(rid: str) -> bool:
@@ -968,11 +1178,19 @@ def search(query: str, limit: int = _SEARCH_LIMIT) -> Dict[str, List[Dict[str, A
         ]
         # Records are searched on their values, which is where "Uber" or a
         # date actually lives; the routine name is searched too.
+        #
+        # And on `raw` — what the value said before it was standardised. You
+        # search for what you remember writing, and standardising turned "54
+        # miles" into "54 mi" and "1 hour 12 minutes" into "1h 12m". Without
+        # this, tidying the log quietly made half of it unfindable by the words
+        # that were actually in it, which is worse than the untidiness was.
         kept = [
             _record_row(r) for r in conn.execute(
                 "SELECT * FROM records"
                 " WHERE routine_name LIKE ? ESCAPE '\\' OR fields LIKE ? ESCAPE '\\'"
-                " ORDER BY created_at DESC LIMIT ?", (like, like, limit)).fetchall()
+                "    OR raw LIKE ? ESCAPE '\\'"
+                " ORDER BY created_at DESC LIMIT ?",
+                (like, like, like, limit)).fetchall()
         ]
     return {"conversations": found, "records": kept}
 

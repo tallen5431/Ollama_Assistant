@@ -13,6 +13,8 @@ import importlib
 import io
 import json
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -171,15 +173,25 @@ class TestValuesAreWrittenAsData:
         assert "No LaTeX, no markdown, no formatting" in records._PROMPT
 
     def test_records_already_kept_get_tidied_once(self):
-        kept = store.add_record("🚗 Uber Trip", {
-            "Elapsed time": r"3 hours and 8 minutes (or $\approx 3.13$ hours)",
-            "Fare": "$54.20"})
+        """Written straight to the table, because that is the case this is for:
+        a record kept by a version that did not strip LaTeX. Going through
+        add_record would prove nothing — it cleans on the way in now, so there
+        would be nothing left for the backfill to find."""
+        import json as _json, time as _time, uuid as _uuid
+        rid = _uuid.uuid4().hex
+        with store._connect() as conn:
+            conn.execute(
+                "INSERT INTO records (id, routine_name, fields, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (rid, "🚗 Uber Trip", _json.dumps({
+                    "Elapsed time": r"3 hours and 8 minutes (or $\approx 3.13$ hours)",
+                    "Fare": "$54.20"}), _time.time()))
         assert records.tidy_stored() == 1
         fields = store.list_records()[0]["fields"]
-        assert fields["Elapsed time"] == "3 hours and 8 minutes (or ≈ 3.13 hours)"
+        assert "\\approx" not in fields["Elapsed time"], "the LaTeX survived"
         assert fields["Fare"] == "$54.20", "money is still money"
         assert records.tidy_stored() == 0, "and it is idempotent"
-        assert kept["id"] == store.list_records()[0]["id"]
+        assert rid == store.list_records()[0]["id"]
 
     def test_a_clean_log_is_left_untouched(self):
         store.add_record("T", {"distance": "68 miles"})
@@ -199,7 +211,11 @@ class TestStorage:
         kept = store.add_record("🚗 Trip", {"distance": "68 miles"}, "rid", "cid")
         back = store.list_records()[0]
         assert back["id"] == kept["id"]
-        assert back["fields"] == {"distance": "68 miles"}
+        # Standardised on the way in — and the original is still here, because
+        # a tidy-up that cannot be checked against what it replaced is one you
+        # have to take on faith.
+        assert back["fields"] == {"distance": "68 mi"}
+        assert back["raw"] == {"distance": "68 miles"}
         assert back["routine_name"] == "🚗 Trip"
         assert back["conversation_id"] == "cid"
 
@@ -286,6 +302,71 @@ class TestRoutinesDeclareWhatTheyKeep:
 # Getting them back out
 # --------------------------------------------------------------------------
 
+class TestArithmeticDoesNotNeedTheKindsSpelledOut:
+    """A column's kind is what says a bare "93" is ninety-three miles, and it
+    can be seen without being told. Before this the sums read *only* declared
+    kinds, so the obvious way to write a routine —
+
+        Start odometer
+        End odometer
+        Miles = End odometer - Start odometer
+
+    — logged a blank every run and reported "nothing recorded for End odometer
+    or Start odometer" while both sat in the row reading "102,072 mi"."""
+
+    UNTYPED = ["Start odometer", "End odometer",
+               "Miles = End odometer - Start odometer"]
+
+    def run(self, client, replies, said):
+        replies["text"] = json.dumps(said)
+        return client.post("/api/records", json={
+            "answer": "a", "fields": self.UNTYPED, "routine_name": "🚗 Trip"},
+        ).get_json()
+
+    def test_it_works_the_sum_out_from_what_the_values_say(self, client, replies):
+        out = self.run(client, replies, {"Start odometer": "102,018 mi",
+                                         "End odometer": "102,072 mi"})
+        assert out["record"]["fields"]["Miles"] == "54 mi"
+        assert out["gaps"] == []
+
+    def test_a_bare_number_is_read_as_the_column_it_is_in(self, client, replies):
+        """The second run has the first to go on, so "102,140" with no unit on
+        it is still miles — which is how a real log is actually written."""
+        self.run(client, replies, {"Start odometer": "102,018 mi",
+                                   "End odometer": "102,072 mi"})
+        out = self.run(client, replies, {"Start odometer": "102,072",
+                                         "End odometer": "102,140"})
+        assert out["record"]["fields"]["Miles"] == "68 mi"
+
+    def test_the_sum_and_the_stored_value_read_it_the_same_way(self, client, replies):
+        """Storage and arithmetic ask the same question of the same column, so
+        they cannot disagree about what the value in it means."""
+        out = self.run(client, replies, {"Start odometer": "102,018 miles",
+                                         "End odometer": "102,072 miles"})
+        fields_ = out["record"]["fields"]
+        assert fields_["Start odometer"] == "102018 mi"
+        assert fields_["Miles"] == "54 mi"
+
+    def test_a_refusal_reaches_the_browser_as_a_reason(self, client, replies):
+        """End to end: the sum is refused, the cell is empty, and the response
+        carries why — which is what the line under the reply shows."""
+        replies["text"] = json.dumps({"Fare": "£10.00", "Tip": "$2.00"})
+        out = client.post("/api/records", json={
+            "answer": "a", "routine_name": "T",
+            "fields": ["Fare: money", "Tip: money", "Total = Fare + Tip"]},
+        ).get_json()
+        assert out["record"]["fields"]["Total"] == ""
+        assert len(out["gaps"]) == 1
+        assert "£" in out["gaps"][0] and "$" in out["gaps"][0]
+
+    def test_a_declaration_still_wins_where_there_is_one(self, client, replies):
+        replies["text"] = json.dumps({"Code": "100", "Also": "200"})
+        out = client.post("/api/records", json={
+            "answer": "a", "fields": ["Code: text", "Also: text"],
+            "routine_name": "T"}).get_json()
+        assert out["record"]["fields"]["Code"] == "100"
+
+
 class TestTheRoutes:
     def test_a_fresh_install_has_none(self, client):
         assert client.get("/api/records").get_json() == {"records": [], "columns": []}
@@ -295,7 +376,7 @@ class TestTheRoutes:
         out = client.post("/api/records", json={
             "answer": "You drove 68 miles in 3 h 08 min.",
             "fields": WANTED, "routine_name": "🚗 Trip"}).get_json()
-        assert out["record"]["fields"]["distance"] == "68 miles"
+        assert out["record"]["fields"]["distance"] == "68 mi"
         listed = client.get("/api/records").get_json()
         assert listed["columns"] == WANTED
         assert len(listed["records"]) == 1
@@ -324,7 +405,10 @@ class TestTheRoutes:
             "answer": "a", "fields": WANTED, "routine_name": "T"}).get_json()["record"]
         out = client.patch(f"/api/records/{made['id']}",
                            json={"fields": {"distance": "70 miles"}}).get_json()
-        assert out["record"]["fields"] == {"distance": "70 miles", "elapsed": "3 h"}
+        # A hand correction is standardised like any other value, so the column
+        # stays consistent whoever typed the cell.
+        assert out["record"]["fields"] == {"distance": "70 mi", "elapsed": "3h"}
+        assert out["record"]["raw"]["distance"] == "70 miles"
 
     def test_patch_and_delete_on_something_that_is_not_there(self, client):
         assert client.patch("/api/records/nope", json={"fields": {"a": "1"}}).status_code == 404
@@ -342,8 +426,11 @@ class TestTheRoutes:
         assert resp.mimetype == "text/csv"
         assert "attachment" in resp.headers["Content-Disposition"]
         rows = list(csv.reader(io.StringIO(resp.get_data(as_text=True))))
-        assert rows[0] == ["taken_at", "routine", "distance", "elapsed"]
-        assert rows[1][1:] == ["🚗 Trip", "68 miles", "3 h 08 min"]
+        # The unit is in the header and the cell holds the bare number, so a
+        # spreadsheet sums the column instead of treating it as text.
+        assert rows[0] == ["taken_at", "routine",
+                           "distance (mi)", "elapsed (hours)"]
+        assert rows[1][1:] == ["🚗 Trip", "68", "3.1333"]
         # An ISO timestamp, so a spreadsheet and a database both parse it.
         assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", rows[1][0])
 
@@ -411,8 +498,25 @@ class TestThePage:
     def test_the_kept_line_follows_the_declared_order(self):
         """jsonify sorts keys, so the wire order is alphabetical."""
         page = self.page()
-        assert "showKept(view, data.record, routine.record)" in page
+        assert "showKept(view, data.record, routine.record," in page
         assert "order && order.length ? order : Object.keys" in page
+
+    def test_why_a_column_came_out_empty_is_said_where_it_happened(self):
+        """The route has always returned the reasons and the page threw them
+        away, so a fare in pounds added to a tip in dollars showed a missing
+        column and nothing else. An empty cell in a log is the last thing
+        anybody thinks to hover over."""
+        page = self.page()
+        assert "(data.gaps || []).concat(data.mismatched || [])" in page
+        at = page.index("function showKept")
+        body = page[at:at + 1600]
+        assert 'note.className = "kept-gap"' in body
+        assert "note.textContent" in body and "note.title = gaps.join" in body
+
+    def test_the_notes_line_is_omitted_when_there_is_nothing_to_note(self):
+        page = self.page()
+        at = page.index("function showKept")
+        assert "if (!gaps || !gaps.length) return;" in page[at:at + 1600]
 
     def test_stored_text_never_becomes_markup(self):
         """A routine name and a field value are both stored text."""
@@ -552,15 +656,47 @@ class TestTheLayoutFitsWhereItIsShown:
     def test_the_editor_asks_for_the_field_names(self):
         page = self.page()
         assert 'id="rRecord"' in page
-        assert "record: rRecordEl.value.split(\",\")" in page
+        # Lines, not commas: a declaration can now carry a kind or a formula,
+        # and three field names joined by an operator do not fit on a shared
+        # line. Commas still separate — fields.py accepts either.
+        assert 'record: rRecordEl.value.split("\\n")' in page
+
+    def test_the_editor_explains_the_syntax(self):
+        """A box that silently accepts "name: money" and "a = b / c" without
+        saying so is a box nobody will ever type them into."""
+        page = self.page()
+        assert "<code>name: kind</code>" in page
+        assert "<code>name = a / b</code>" in page
+
+    def test_a_standardised_cell_shows_what_it_used_to_say(self):
+        """The original is stored so the tidy-up can be checked. Storing it and
+        never showing it would leave that promise reachable only by curl."""
+        page = self.page()
+        assert 'td.title = "As it was recorded: " + was;' in page
+        assert 'td.classList.add("tidied");' in page
+        assert "#recordList .tidied" in page, "the marker has no style"
+
+    def test_the_marker_is_added_after_the_class_is_assigned(self):
+        """td.className = "editable" replaces the whole attribute, so adding
+        the marker first meant it silently never appeared."""
+        page = self.page()
+        assert page.index('td.className = "editable";') < \
+            page.index('td.classList.add("tidied");')
 
     @pytest.mark.parametrize("value, expected", [
         ("=cmd|' /C calc'!A1", "'=cmd|' /C calc'!A1"),
         ("+1+1", "'+1+1"),
         ("@SUM(A1)", "'@SUM(A1)"),
-        ("68 miles", "68 miles"),
+        # Standardised first, then defused: a quantity comes out as a bare
+        # number, and neither step can turn the other's output into a formula.
+        ("68 miles", "68"),
         ("-5 °C", "-5 °C"),          # a reading, not a formula
-        ("3 h 08 min", "3 h 08 min"),
+        ("3 h 08 min", "3.1333"),
+        # A formula wearing a unit is still prose to the standardiser — it
+        # refuses anything that is not wholly a quantity — so it arrives at the
+        # defuser untouched and gets the quote it needs.
+        ("=1+1 miles", "'=1+1 miles"),
+        ("@SUM(A1) mph", "'@SUM(A1) mph"),
     ])
     def test_a_cell_cannot_become_a_formula(self, client, value, expected):
         """Excel runs a leading =, + or @ when the file is opened.
@@ -628,3 +764,184 @@ class TestFieldsKeepTheirDeclaredOrder:
     def test_it_is_switched_off_at_the_app_rather_than_per_route(self):
         """Every response, so a later route cannot quietly reintroduce it."""
         assert app_module.app.json.sort_keys is False
+
+
+class TestATypedRoutineEndToEnd:
+    """The declaration reaches the model, the arithmetic, and the database."""
+
+    DECL = ["Start odometer: distance", "End odometer: distance",
+            "Distance traveled = End odometer - Start odometer",
+            "Start time: timestamp", "End time: timestamp",
+            "Elapsed time = End time - Start time",
+            "Total earnings: money",
+            "Earnings per hour = Total earnings / Elapsed time"]
+
+    FULL = ('{"Start odometer": "102,072", "End odometer": "102,165",'
+            ' "Start time": "Tuesday 25 August 2026 at 20:06 (UTC-04:00)",'
+            ' "End time": "Wednesday 26 August 2026 at 00:31 (UTC-04:00)",'
+            ' "Total earnings": "$115.94"}')
+    NO_TIMES = ('{"Start odometer": "102,072 mi", "End odometer": "102,165 mi",'
+                ' "Start time": "", "End time": "", "Total earnings": "$115.94"}')
+
+    def post(self, client, replies, text):
+        replies["text"] = text
+        return client.post("/api/records", json={
+            "answer": "a", "fields": self.DECL, "routine_name": "Trip"}).get_json()
+
+    def test_the_model_is_only_asked_for_the_readings(self, client, replies, monkeypatch):
+        asked = {}
+        real = records.extract
+        monkeypatch.setattr(records, "extract",
+                            lambda a, n, m, kinds=None: asked.update(n=n, k=kinds) or real(a, n, m, kinds))
+        self.post(client, replies, self.FULL)
+        assert asked["n"] == ["Start odometer", "End odometer", "Start time",
+                              "End time", "Total earnings"]
+        assert asked["k"]["Total earnings"] == "money"
+
+    def test_the_derived_fields_are_worked_out_here(self, client, replies):
+        got = self.post(client, replies, self.FULL)["record"]["fields"]
+        assert got["Distance traveled"] == "93 mi"
+        assert got["Elapsed time"] == "4h 25m"
+        assert got["Earnings per hour"] == "$26.25"
+
+    def test_a_rate_with_nothing_to_divide_by_is_left_empty(self, client, replies):
+        """This row is the one that used to come back as $23.19 an hour."""
+        out = self.post(client, replies, self.NO_TIMES)
+        assert out["record"]["fields"]["Earnings per hour"] == ""
+        assert any("Elapsed time" in g for g in out["gaps"])
+
+    def test_the_columns_come_out_in_the_order_declared(self, client, replies):
+        got = self.post(client, replies, self.FULL)["record"]["fields"]
+        assert list(got) == [f.split(":")[0].split(" =")[0] for f in self.DECL]
+
+    def test_the_declared_kind_settles_the_very_first_record(self, client, replies):
+        """With one row there is no column to vote, so an undeclared odometer
+        would come out bare and every row after it with a unit."""
+        got = self.post(client, replies, self.FULL)["record"]["fields"]
+        assert got["Start odometer"] == "102072 mi"
+
+    def test_a_routine_keeps_its_declaration(self, client):
+        made = client.post("/api/routines", json={
+            "name": "Trip", "body": "b", "record": self.DECL}).get_json()
+        rid = made["id"]
+        listed = client.get("/api/routines").get_json()["routines"]
+        kept = [r for r in listed if r["id"] == rid][0]["record"]
+        assert "Elapsed time = End time - Start time" in kept
+        assert "Total earnings: money" in kept
+
+
+class TestYouAreToldWhatIsWrongWithADeclaration:
+    def test_saving_a_routine_reports_a_typo(self, client):
+        out = client.post("/api/routines", json={
+            "name": "T", "body": "b",
+            "record": ["Fare: money", "Took: duration",
+                       "Per hour = Fare / Tooke"]}).get_json()
+        assert out["problems"], "a typo saved silently"
+        assert 'no field called "Tooke"' in out["problems"][0]
+
+    def test_it_is_still_saved(self, client):
+        """The column works; it just does not do what was meant. Refusing the
+        save would lose the other nine fields over one typo."""
+        out = client.post("/api/routines", json={
+            "name": "T", "body": "b",
+            "record": ["Fare: money", "Per hour = Fare / Tooke"]}).get_json()
+        assert out["id"]
+        assert len(client.get("/api/routines").get_json()["routines"]) == 1
+
+    def test_a_sound_routine_reports_nothing(self, client):
+        out = client.post("/api/routines", json={
+            "name": "T", "body": "b",
+            "record": ["Fare: money", "Took: duration",
+                       "Per hour = Fare / Took"]}).get_json()
+        assert out["problems"] == []
+
+    def test_editing_one_reports_too(self, client):
+        made = client.post("/api/routines", json={
+            "name": "T", "body": "b", "record": ["Fare: money"]}).get_json()
+        out = client.patch(f"/api/routines/{made['id']}", json={
+            "record": ["Fare: money", "Per hour = Fare / Nope"]}).get_json()
+        assert out["problems"] and "Nope" in out["problems"][0]
+
+    def test_the_editor_shows_them(self):
+        page = chat_ui.render_page("t")
+        assert "saved.problems" in page
+
+    def test_the_csv_uses_the_declared_kind(self, client, replies):
+        """A column declared text and stored as text was exported as a number,
+        because the export re-inferred instead of asking."""
+        client.post("/api/routines", json={
+            "name": "T", "body": "b", "record": ["Code: text"]})
+        replies["text"] = '{"Code": "100"}'
+        client.post("/api/records", json={"answer": "a", "fields": ["Code: text"],
+                                          "routine_name": "T"})
+        rows = list(csv.reader(io.StringIO(
+            client.get("/api/records.csv").get_data(as_text=True))))
+        assert rows[0][2] == "Code", "a text column should carry no unit"
+        assert rows[1][2] == "100"
+
+    def test_a_fixed_declaration_stops_reading_as_broken(self):
+        """The warning was set on a failed save and never cleared, so fixing
+        the fault and saving again left the old complaint on screen."""
+        page = page_script(chat_ui.render_page("t"))
+        save = page[page.index("async function saveRoutine"):]
+        save = save[:save.index("savingRoutine = true;")]
+        assert 'routineWarnEl.textContent = "";' in save, \
+            "the warning is not cleared before a fresh attempt"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+class TestTheKeptLineUnderTheReply:
+    """The shipped showKept, run against a stand-in DOM. What matters here is
+    what actually reaches the screen: a routine can produce a perfectly valid
+    row with one column silently missing, and the only place that is visible
+    at the time is this line."""
+
+    def drive(self, record, order, gaps):
+        page = page_script(chat_ui.render_page("t"))
+        at = page.index("      function showKept")
+        body = page[at:page.index("\n      // Which routine's records", at)]
+        harness = """
+        const made = [];
+        const document = { createElement: (tag) => {
+          const el = { tag, className: "", textContent: "", title: "",
+                       addEventListener() {} };
+          made.push(el); return el; } };
+        function openDrawer() {}
+        const view = { root: { appendChild() {} } };
+        """
+        call = ("showKept(view, %s, %s, %s);\nconsole.log(JSON.stringify(made));"
+                % (json.dumps(record), json.dumps(order), json.dumps(gaps)))
+        out = subprocess.run(["node", "-e", "\n".join([harness, body, call])],
+                             capture_output=True, text=True, check=True, timeout=30)
+        return json.loads(out.stdout)
+
+    RECORD = {"fields": {"Fare": "$20.00", "Tip": "", "Total": ""}}
+    ORDER = ["Fare: money", "Tip: money", "Total = Fare + Tip"]
+
+    def test_a_clean_run_says_only_what_it_kept(self):
+        made = self.drive(self.RECORD, ["Fare"], [])
+        assert [e["className"] for e in made] == ["kept"]
+        assert made[0]["textContent"] == "🗒 Kept: Fare $20.00"
+
+    def test_one_reason_is_given_in_full(self):
+        gap = 'Total: "Fare" is in £ and "Tip" is in $ — the same unit for both'
+        made = self.drive(self.RECORD, ["Fare"], [gap])
+        assert [e["className"] for e in made] == ["kept", "kept-gap"]
+        assert made[1]["textContent"] == "⚠ " + gap
+
+    def test_two_reasons_are_still_read_at_a_glance(self):
+        made = self.drive(self.RECORD, ["Fare"], ["a: one", "b: two"])
+        assert made[1]["textContent"] == "⚠ a: one · b: two"
+
+    def test_more_than_two_are_counted_and_kept_on_hover(self):
+        """Otherwise the line under a reply becomes a paragraph."""
+        gaps = ["a: one", "b: two", "c: three"]
+        made = self.drive(self.RECORD, ["Fare"], gaps)
+        assert made[1]["textContent"] == "⚠ 3 fields not worked out"
+        assert made[1]["title"] == "a: one\nb: two\nc: three"
+
+    def test_a_reason_goes_in_as_text_whatever_it_says(self):
+        """It quotes field names, which are stored text like any other."""
+        made = self.drive(self.RECORD, ["Fare"], ["<img onerror=x>: nope"])
+        assert made[1]["textContent"] == "⚠ <img onerror=x>: nope"
+        assert "innerHTML" not in str(made[1])

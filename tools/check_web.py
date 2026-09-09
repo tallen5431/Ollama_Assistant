@@ -8,11 +8,18 @@ Ollama, so it works whether or not the desktop is awake.
 
     .venv/bin/python tools/check_web.py
     .venv/bin/python tools/check_web.py https://en.wikipedia.org/wiki/Ada_Lovelace
+    .venv/bin/python tools/check_web.py https://en.wikipedia.org/wiki/Ada_Lovelace "analytical engine"
+
+A question can be given as the second argument: the link list is ranked against
+it, and the ranking is most of what makes the list worth showing a model, so
+checking it with a question the page can actually answer says more than the
+default does.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 
@@ -23,6 +30,7 @@ os.environ.setdefault("WEB_ENABLED", "1")
 import web  # noqa: E402
 
 DEFAULT_PAGE = "https://en.wikipedia.org/wiki/Ada_Lovelace"
+DEFAULT_QUESTION = "what was the analytical engine?"
 OK, BAD, WARN = "  ✅", "  ❌", "  ⚠️ "
 
 
@@ -75,9 +83,9 @@ def check_fetch(url: str) -> dict:
     return doc
 
 
-def check_links(doc: dict) -> None:
-    """Did link extraction find topic links rather than navigation?"""
-    print("\n3. Links found in the readable body")
+def check_links(doc: dict, question: str) -> None:
+    """Did link extraction find topic links, and does ranking float them up?"""
+    print(f"\n3. Links found in the readable body — ranked against {question!r}")
     links = doc.get("links") or []
     if not links:
         print(f"{WARN} none. Following will be skipped and the model gets no link map.")
@@ -85,44 +93,77 @@ def check_links(doc: dict) -> None:
         return
 
     same = [l for l in links if web.same_site(doc["url"], l["url"])]
-    print(f"{OK} {len(links)} links, {len(same)} on the same site (only these are followed)")
-    for link in same[:8]:
-        print(f"     · {link['text'][:48]:50} {link['url'][:52]}")
+    followable = "same-site only" if not web.followable(
+        doc, {"url": "https://elsewhere.example/"}) else "any site (WEB_FOLLOW_SCOPE=any)"
+    print(f"{OK} {len(links)} links, {len(same)} on the same site; following is {followable}")
 
-    junk = [l for l in same if l["text"].lower() in
+    ranked = web.rank_links(links, question, here=doc["url"])
+    print("     the order the model is shown them in, best first:")
+    for i, link in enumerate(ranked[:8], 1):
+        away = "" if web.same_site(doc["url"], link["url"]) else " (external)"
+        print(f"     {i}. {(link['text'][:44] + away)[:48]:50} {link['url'][:52]}")
+
+    # Said carefully. An unchanged order does not mean the ranking did nothing
+    # useful — it also happens when the page already listed its links best
+    # first — so this reports what it saw rather than diagnosing why.
+    if [l["url"] for l in ranked] == [l["url"] for l in links]:
+        print(f"{WARN} the order is unchanged from the page's own. Either nothing")
+        print("     matched the question, or the page already led with the best")
+        print("     link. Re-run with a question using words from a section title")
+        print("     to tell the two apart.")
+    else:
+        print(f"{OK} ranking moved the question's links up the list")
+
+    junk = [l for l in ranked[:8] if l["text"].lower() in
             {"edit", "read", "view history", "talk", "main page", "contents"}]
     if junk:
         print(f"{WARN} navigation leaked through: {[l['text'] for l in junk][:5]}")
     else:
-        print(f"{OK} no obvious navigation or chrome in the list")
+        print(f"{OK} no obvious navigation or chrome near the top of the list")
 
 
-def check_context(doc: dict) -> None:
-    """Does the assembled context stay inside its budget?"""
+def check_context(doc: dict, question: str) -> None:
+    """Does the assembled context stay inside its budget, and does it number
+    the links the same way a fetch request is resolved?"""
     from config import get_num_ctx
     print("\n4. Context assembly")
     budget = web.context_budget(get_num_ctx())
-    context = web.build_context([doc], char_budget=budget)
+    ids: dict = {}
+    context = web.build_context([doc], char_budget=budget, question=question,
+                                link_ids=ids, may_fetch=True)
     ratio = len(context) / budget if budget else 0
     verdict = OK if ratio <= 1.15 else BAD
     print(f"{verdict} {len(context)} characters against a {budget} budget ({ratio:.2f}x)")
     print(f"     OLLAMA_NUM_CTX={get_num_ctx()}, leaving the rest for the conversation")
     if "Other pages linked from this one" in context:
-        print(f"{OK} the link map is in the context the model will see")
+        print(f"{OK} the link map is in the context the model will see ({len(ids)} numbered)")
+    elif doc.get("links"):
+        print(f"{WARN} the budget left no room for the link map at this num_ctx")
+
+    # The one failure here that is worse than no links at all: a request for
+    # [1.3] resolving to a different page than the one listed as [1.3].
+    listed = dict(re.findall(r"^\[(\d+\.\d+)\][^—]*— (\S+)$", context, re.M))
+    if listed == {k: v["url"] for k, v in ids.items()}:
+        print(f"{OK} every number in the list resolves to the page shown beside it")
+    else:
+        print(f"{BAD} the numbering shown and the numbering resolved disagree —")
+        print("     a request to read a link would fetch the wrong page")
+
     if context.count("----- END WEB RESULTS -----") != 1:
         print(f"{BAD} the page forged an end-of-results marker — that should be impossible")
 
 
 def main() -> int:
     url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PAGE
+    question = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_QUESTION
     print("Checking web access against the real internet.")
     print("Nothing here talks to Ollama, so a sleeping desktop does not matter.")
 
     searched = check_search()
     doc = check_fetch(url)
     if doc:
-        check_links(doc)
-        check_context(doc)
+        check_links(doc, question)
+        check_context(doc, question)
 
     print("\n" + "-" * 62)
     if searched and doc:

@@ -41,8 +41,11 @@ cards: a `Start.sh` / `Start.bat` launcher, `HOST`/`PORT` from the environment,
   so "two odometer photos → how far did I drive and how long did it take" is two
   taps. Four are shipped. See "Routines" below.
 - 🗒 **Records** — a routine can keep a row per run. Two odometer photos become
-  *distance 68 miles · elapsed 3 h 08 min* in a table you can correct and pull
-  out as CSV or JSON with `curl`. See "Records" below.
+  *distance 68 mi · elapsed 3h 08m* in a table you can correct and pull out as
+  CSV or JSON with `curl`. Fields can say what they hold and which of them are
+  arithmetic over the others — those are worked out here rather than by a model
+  doing sums in prose, so a rate with nothing to divide by comes out empty
+  instead of invented. See "Records" below.
 - 💾 **Conversation history** — threads are stored server-side, so one started
   on your desktop continues on your phone. ☰ opens the list; rename, delete,
   reopen. **Turn Basic Auth on if you enable this** — see "Conversation history".
@@ -126,6 +129,7 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_CONNECT_TIMEOUT` | `5`                    | How long to wait to *connect*, separately. A sleeping desktop drops the packet rather than refusing it, so this is what stops a message hanging for the full reply timeout |
 | `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
 | `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
+| `PHOTO_READ_EACH`   | `0`                         | Also read each photo on its own before answering, so the `[image n]` numbering is reliable. Costs one model call per photo; only applies with more than one — see "Keeping several photos straight" |
 | `PHOTO_META`        | `1`                         | Whether a browser that has never touched the toggle starts with **📍 Photo details** on. `0` makes off the default |
 | `PHOTO_KEEP_DAYS`   | `30`                        | How long stored photos stay in the history. Every word is kept for good; only the pixels expire. `0` keeps them for good too |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
@@ -138,7 +142,13 @@ All settings are environment variables (the server manager injects them):
 | `WEB_PLANNER_MODEL` | *(unset)*                   | Small model used to generate search queries. Unset reuses the answering model; avoid reasoning models here |
 | `WEB_DISTILLER_MODEL` | *(unset)*                 | Small model that cuts each fetched page down to what bears on your question. Unset means off — see "Distilling pages". Measured 12,016 → 231 characters on a two-page turn |
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
-| `WEB_FOLLOW_LINKS`  | `2`                         | How many pages linked from a URL you pasted may also be read. Same site, one hop; `0` disables it |
+| `WEB_FOLLOW_LINKS`  | `2`                         | How many linked pages may also be read, per hop. Same site by default; `0` disables following everywhere |
+| `WEB_FOLLOW_ON_SEARCH` | `1`                      | Whether pages found by *searching* have their links followed too, not just a URL you pasted. `0` restores the old pasted-URL-only behaviour |
+| `WEB_MAX_HOPS`      | `1`                         | How far retrieval may follow links outward. `1` is one hop; `2` lets a followed page be followed *from* — the spec linked from the release note linked from the search result. Capped at `3` |
+| `WEB_FETCH_HOPS`    | `0`                         | How many times the answering model may ask for a numbered link to be read before it answers. Off by default: each request spends a whole generation that produced no reply — see "Asking to read a link" |
+| `WEB_LINKS_IN_CONTEXT` | `25`                     | How many links to list per page, before the context budget trims it. The list is ranked against your question, so this is the ceiling rather than the usual number. `0` turns the list off |
+| `WEB_LINK_SCOPE`    | `all`                       | Which links the model is *shown*: `all`, or `site` for same-site only (what it used to be). Nothing on this list is fetched |
+| `WEB_FOLLOW_SCOPE`  | `site`                      | Which links may actually be **opened**. Deliberately stricter than what is shown; `any` lifts the same-site restriction |
 | `WEB_SHARE_LOCATION` | `1`                        | Whether a photo's GPS position may inform a search query. `0` keeps the date and camera and drops the position — see "Photo details" |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
 | `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
@@ -191,12 +201,14 @@ The mic button only shows when the `vosk` package is installed; without it the
 app runs exactly as before. Audio is captured in the browser, downsampled to
 16 kHz mono, and posted to `/api/transcribe` — it never leaves your network.
 
-**Headphones (on by default).** Next to the language picker is a 🎧 **Headphones**
-tickbox, ticked out of the box. It turns off browser echo cancellation, which
-exists to stop speaker output leaking into the mic and has nothing to cancel on
-headphones — while its residual suppressor ducks the mic whenever playback is
-loud, so leaving it on makes you go silent over music. Untick it on laptop
-speakers, where the leak is real and cancelling it helps.
+**Raw mic (on by default).** 🎙 **Raw mic** is ticked out of the box. It turns
+off browser echo cancellation, which exists to stop speaker output leaking into
+the mic and has nothing to cancel on headphones — while its residual suppressor
+ducks the mic whenever playback is loud, so leaving it on makes you go silent
+over music. Untick it on laptop speakers, where the leak is real and cancelling
+it helps. (It is named for what it does rather than for when to use it: called
+"Headphones", everyone not wearing any unticked it, which turned the very thing
+that was spoiling dictation back on.)
 
 **Auto-send.** ⚡ **Auto-send** sends the message as soon as speech is
 transcribed, instead of waiting for the Send button. Off by default.
@@ -213,6 +225,38 @@ that adapts to the room. A pause of 900 ms ends an utterance and anything
 shorter than 300 ms is treated as a noise blip rather than speech. If a reply is
 still streaming when you finish talking, the text waits in the box rather than
 being dropped.
+
+### Dictating for somewhere else
+
+Offline speech-to-text is useful well beyond talking to a model: plenty of apps
+have no dictation of their own, and this page can be the one that does. Dictate
+here, then take the words away.
+
+Once there is anything in the box, two buttons appear in the composer beside
+the mic:
+
+- 📋 **Copy** — on a phone this opens the **share sheet**, which is the whole
+  journey in one tap: pick WhatsApp, Signal, Messages, and the text arrives
+  there. No clipboard, and it works on a plain-HTTP page where the clipboard API
+  does not exist at all. On a desktop it copies to the clipboard instead. Where
+  neither is available it selects the text and tells you to press Ctrl+C —
+  because a button that quietly does nothing is worse than one that asks for
+  help. Whichever happened is said in the hint line underneath; you should never
+  have to find out in the other app.
+- 🩹 **Clear** — empties the box for the next one.
+
+Copying deliberately does **not** clear the box. Copying is not a decision to
+throw the text away — you might copy it and then send it here too — and a
+composer that empties itself unbidden costs a whole dictated paragraph the one
+time it is wrong.
+
+Both buttons are hidden while the box is empty, so nothing about the page
+changes until you have something to act on.
+
+For this use, leave ⚡ **Auto-send** off — it hands each utterance straight to
+the model, which is the opposite of what you want here. 🔁 **Continuous** is
+worth turning *on*: it keeps the mic open through pauses, so a long message can
+be spoken in several goes and accumulates in the box.
 
 ### Background noise
 
@@ -316,6 +360,13 @@ reads it twice.
 
 ## Web access
 
+> ⚠️ **Address guard.** Every URL — pasted, or picked by a model out of a page
+> — is resolved and checked before it is fetched, and again on the connected
+> socket so a name that answers differently the second time cannot slip past.
+> An IPv6 address is judged by the IPv4 address it embeds, if it embeds one:
+> `64:ff9b::a00:1` is 10.0.0.1 wearing a NAT64 prefix, and on an IPv6-only
+> network with a translator it reaches it for real.
+>
 🌐 **Web access** (off by default) lets the app read the web on the model's
 behalf. The model itself never gets a network connection — the app does the
 fetching and hands over text.
@@ -333,17 +384,34 @@ Two paths:
   the page's *readable body* — nav, footers, citations and "edit" links are
   already excluded — and does two things with them:
 
-  1. **A link map** goes to the model as context: what else the site covers, and
+  1. **A link map** goes to the model as context: what else is covered, and
      where. It's marked as not-read, so the model can say "the hinge page covers
-     that" rather than inventing what's on it.
+     that" rather than inventing what's on it. Each link is numbered `[n.m]` —
+     document `n`, link `m` — so the model can point at one exactly.
   2. **A couple are actually opened.** A small model picks which links look like
      they answer the question, and those pages are fetched too.
 
-  One hop, same site only, and every URL still goes through the address guard.
-  A link is chosen by a model out of content written by a stranger, so it gets
-  no more trust than a pasted URL does — following an arbitrary outbound link
-  would be a much larger surface for very little gain. `WEB_FOLLOW_LINKS=0`
-  turns the following off; the link map stays.
+  Every URL still goes through the address guard, and by default only same-site
+  links may be *opened*. A link is chosen by a model out of content written by a
+  stranger, so it gets no more trust than a pasted URL does — following an
+  arbitrary outbound link would be a much larger surface for very little gain.
+  `WEB_FOLLOW_SCOPE=any` lifts that if you want it. `WEB_FOLLOW_LINKS=0` turns
+  the following off; the link map stays.
+
+  **The list is ranked against your question**, not taken in page order. This
+  matters more than it sounds: a Wikipedia article has hundreds of links and
+  room for a couple of dozen, and the first couple of dozen *in document order*
+  are the site's navigation furniture every single time. The link that answered
+  the question was reliably somewhere in the ones that got dropped. Ranking is
+  lexical — question words against anchor text and URL slug — so it costs no
+  model call and runs on every page of every web turn.
+
+  **Links that leave the site are shown too**, tagged `(external)`. They used to
+  be dropped, which quietly hid the most useful link on a lot of pages: the
+  outside source being cited. Showing one is not fetching it — `WEB_FOLLOW_SCOPE`
+  still governs what may be opened — but a model that cannot *see* the link
+  cannot tell you where to look next, which is the whole job of the list.
+  `WEB_LINK_SCOPE=site` restores the old same-site-only list.
 - **Otherwise a planner turns your message into search queries.** A short,
   cheap, deterministic call replies with either `NONE` or up to three `Q: `
   lines — search-engine keywords, each attacking the topic from a different
@@ -360,10 +428,60 @@ Two paths:
   search, which from the outside looks identical to a search that found
   nothing.
 
+  **Pages found this way have their links followed too.** For a long time they
+  did not, which left out the case that comes up most: a search lands on the
+  overview page and the specifics are one click away, exactly as they are on a
+  page you paste by hand. The picker is asked once for the whole turn rather
+  than once per page — three results from three sites is one question, and
+  asking per page means three model calls, none of which can see that the best
+  link on the turn was on result two. `WEB_FOLLOW_ON_SEARCH=0` turns it off.
+
 Both the planner and the answering model are told today's date. A model's sense
 of "now" is its training cutoff, which is how *"the latest release"* gets
 answered with a version from two years ago and how the planner writes queries
 anchored to the wrong year.
+
+### Going deeper
+
+Two settings control how far retrieval travels from where it started, and they
+answer different questions.
+
+`WEB_MAX_HOPS` is **the app deciding**. At `1` — the default — the pages first
+retrieved may have their links followed once, and there it stops. At `2` a page
+reached by following can be followed *from* in turn, which is what finds the
+specification linked from the release note linked from the search result. Each
+hop is another picker call and another round of fetches, on hardware that is
+usually running the answering model at the same time, so it is capped at `3`.
+
+`WEB_FETCH_HOPS` is **the model deciding**, and it is off by default. With it
+on, the model that has actually read the pages is told it may reply with:
+
+```
+FETCH: [2.3]
+```
+
+…and nothing else, naming one of the numbered links. The page is fetched, and
+the model is asked again with it in front of it. The request is never shown to
+you — it is the machinery talking, not the reply — and it is recognised before
+it is displayed, so you don't watch a marker arrive and then get overwritten.
+
+This is the better signal of the two: nothing judges whether a page answered
+the question as well as the model trying to answer from it. It is also the more
+expensive, because a request spends a whole generation that produced no reply.
+On a single-GPU desktop that is the difference between a reply in four seconds
+and a reply in twenty, which is why it is opt-in.
+
+The offer is only made while a hop remains **and** there are numbered links to
+name, and it is withdrawn as soon as it is spent — a model invited to ask for
+something that cannot be delivered just burns a generation. Ask for a number
+that was never on the list and the app says so in the panel and asks again
+rather than leaving a marker where your answer should be.
+
+However these settings multiply out, retrieval never puts more than **eight**
+documents in front of the model. At the permitted maximums the arithmetic
+reaches fifteen, and fifteen documents do not fit in any window this app runs
+at — each would get its 800-character floor and overrun the context budget
+several times over.
 
 ### Planner model
 
@@ -489,6 +607,36 @@ It exercises search, fetch, decoding, link extraction and context assembly, and
 prints what it found. Nothing in it talks to Ollama, so a sleeping desktop
 doesn't matter — run it when a web answer looks wrong and it will tell you
 which half is at fault.
+
+Being offline is also its blind spot. Whether a small model actually *replies*
+in the two shapes link-following depends on — bare numbers from the picker, a
+bare `FETCH: [n.m]` from the answering model — can only be answered by asking a
+real model, so that has a checker of its own. This one does wake the desktop:
+
+```bash
+.venv/bin/python tools/check_links.py
+.venv/bin/python tools/check_links.py URL "a question the page does not answer"
+.venv/bin/python tools/check_links.py URL "question" --model qwen3:8b
+```
+
+It fetches the page, shows the link order the model will see and which links
+ranking promoted, asks your real picker model and reports whether its reply
+parsed, then asks your real answering model and classifies what came back —
+a well-formed request, a request for a link that doesn't exist, a malformed
+attempt, or a direct answer. It also checks that the numbering shown and the
+numbering resolved agree, which is the one failure that would silently fetch
+the wrong page.
+
+**Choose the question deliberately.** The interesting case is one the page
+*mentions* but doesn't answer, where a link plainly would — that is what the
+feature is for. If the page answers it outright, a direct answer is the correct
+result, and the tool says so rather than marking it wrong.
+
+The two `❌`s worth acting on: a picker whose reply parses to nothing means
+following will silently never happen on that model (use a small non-reasoning
+model for `WEB_PLANNER_MODEL`), and a malformed `FETCH` means the marker would
+reach the user instead of an answer (leave `WEB_FETCH_HOPS` at `0` on that
+model).
 
 ### Search backend
 
@@ -819,6 +967,12 @@ box is at the top of the ☰ list. Typing "A23" finds the thread where that only
 ever appeared in a reply; typing "Brighton" also turns up the trip a routine
 wrote down. Escape or the ✕ clears it.
 
+A record is searched on what it *said* as well as on what it says now.
+Standardising turned "54 miles" into "54 mi" and "1 hour 12 minutes" into
+"1h 12m", so searching for the words you remember writing found nothing —
+tidying the log had quietly made half of it unfindable, which is worse than
+the untidiness was. Both readings match.
+
 > ⚠️ **Anything stored here is readable by anyone who can reach the app.** Until
 > now there was nothing to steal; with history on, your past conversations are
 > on disk and served to whoever asks. If you keep history, turn Basic Auth on:
@@ -851,6 +1005,37 @@ Re-uploading every screenshot in a thread on every turn was slow over a phone
 connection and rarely what was meant; earlier turns keep their text, so the
 conversation still reads. Set `CHAT_IMAGE_TURNS` higher if you compare images
 across turns.
+
+### Keeping several photos straight
+
+A routine with two photos asks a model to do something the input does not
+support. The pictures arrive as pixels with **no labels attached to them**,
+while the details beside them say "Image 1", "Image 2" — so using a capture
+time means aligning two lists across two messages by position, and then joining
+each time to the odometer read out of the matching picture. Nothing in the
+input anchors that join. It is a *binding* problem rather than a hard one,
+which is why it fails on large models as readily as small ones.
+
+Two things address it, and they stack:
+
+- **Take the times off the file** (above). A field declared `= earliest photo
+  taken` never goes near a model, so the commonest version of this join simply
+  stops existing. This is on wherever a routine declares it, and the shipped
+  🚗 Trip routine does.
+- **`PHOTO_READ_EACH=1`** reads each photo separately *first*, the way this app
+  has always read photos for models without vision, and hands the answering
+  model the labelled readings alongside the pictures. The join becomes text to
+  text, matched on a number — a thing models are reliably good at. The pictures
+  stay, and the preamble tells the model to trust its own eyes where a reading
+  disagrees. Off by default because it costs a model call per photo, and skipped
+  for a single photo, which has nothing to be confused with.
+
+The photo-details block counts the same photos. It labels its lines "Image 1",
+"Image 2", and the pictures carry no labels of their own — so the numbering is
+only true if it counts exactly what the model is about to see. It used to
+describe the newest turn alone: at `CHAT_IMAGE_TURNS=3` with two photos a turn,
+"Image 1" pointed at the *third* photo on screen and every time in the answer
+belonged to a different picture.
 
 ## Vision models
 
@@ -1035,6 +1220,202 @@ not inside the stream, so a model that's asleep or that returns something
 unparseable costs you a row and nothing else. Nothing extractable means no row,
 rather than a blank one — a blank record is worse than none.
 
+### Saying what a field holds
+
+A field can be a bare name, as it always was — read it off the answer and work
+out what it is from the column. It can also say what it holds, and it can say
+that it is arithmetic over the others:
+
+```
+Start odometer: distance
+End odometer: distance
+Distance traveled = End odometer - Start odometer
+Start time: timestamp
+End time: timestamp
+Elapsed time = End time - Start time
+Total earnings: money
+Earnings per mile = Total earnings / Distance traveled
+Earnings per hour = Total earnings / Elapsed time
+Average speed = Distance traveled / Elapsed time
+```
+
+Ten columns, and **the model is asked for five**. The rest are worked out here,
+in Python, from those five.
+
+That is not a tidiness argument, it is a correctness one. A real log had one
+trip recorded twice, five minutes apart: `$26.23` an hour and then `$23.19` an
+hour, for the same 93 miles and the same $115.94. The second capture had no
+start or end time in it *at all* — so its hourly rate had been worked out from
+nothing. The model was never asked to divide; it was asked what the answer
+said, and it obliged. **Now that field comes out empty**, and the table says
+why when you hover it: *"Nothing to work it out from — needs Total earnings /
+Elapsed time"*.
+
+`name: kind` takes any of **money, distance, speed, duration, timestamp,
+number, text**. `name = a op b` takes `-`, `+`, `*`, `/` over two other fields,
+and a computed field can build on one declared above it — the hourly rate
+divides by an elapsed time that was itself computed from two timestamps.
+
+### Times come from the file, not from the model
+
+```
+Start time = earliest photo taken
+End time   = latest photo taken
+```
+
+A field declared that way is filled straight from the photo's own EXIF, and
+**the model is never asked for it**.
+
+This one is worth explaining, because it looks like a model failing at an easy
+job and it isn't. The capture times reach a model as a block of text saying
+*"Image 1: taken Friday 07 August 2026 at 13:37"* — while the photos themselves
+arrive as pixels in a different message, carrying no labels at all. To use a
+time, the model has to align two lists across two messages by position and then
+join each time to the odometer it read out of the matching picture. That join
+has no anchor in the input, so it is a *binding* problem rather than a hard
+one — which is exactly why large models get it wrong too, and confidently.
+
+The app never had that problem: your browser reads the EXIF before the image is
+re-encoded, so the exact time is already in hand. It was being rendered to
+prose, read back by a model, rewritten as prose, and parsed again — four hops
+for a figure that started out exact, and two of them can invent.
+
+`photo 1 taken` picks by position; `earliest`/`latest photo taken` pick by the
+recorded instant, which is what a trip actually wants — a gallery hands photos
+over in whatever order it likes, and the later one is the end of the trip
+whichever slot it landed in.
+
+Where the file records no time — a screenshot, an edited copy, or **📍 Photo
+details** switched off — the field is empty and anything built on it is empty
+too, with a note saying so. And where the times carry no zone (EXIF very often
+records none), the elapsed time is still worked out, with a note that it is out
+by whole hours if the clock moved in between. That caveat used to live in the
+routine's prompt; it now lives where the arithmetic does.
+
+The shipped **🚗 Trip** routine uses this. It declares seven fields and asks the
+model for **two** — the two odometer readings, which is the only part of the job
+that needs eyes.
+
+**A declaration is checked when you save it.** A formula naming a field that
+does not exist is an error nowhere: it computes to nothing, every run, and an
+empty column looks exactly like a run where there was no data. One typo could
+cost a month of records before anyone noticed. The editor now says so straight
+away — *"Per hour: there is no field called \"Tooke\"."* — and still saves,
+because refusing would lose nine good fields over one bad one. It also catches
+chained sums (`Net = Gross - Fees - Tax`, which this grammar cannot express),
+fields that need themselves, and pairs that wait on each other.
+
+**Order does not decide the answer.** Computed fields resolve by what each one
+needs, so an hourly rate may divide by an elapsed time declared below it.
+
+A declared kind also beats the column vote. Inference is a good guess across a
+column and a good guess is still a guess; it also cannot work on the *first*
+row of a new routine, where there is no column to look at yet.
+
+**You do not have to declare the kinds to get the sums.** Writing the obvious
+thing —
+
+```
+Start odometer
+End odometer
+Miles = End odometer - Start odometer
+```
+
+— works. The arithmetic asks storage what kind the column holds, which is the
+same question storage asks when it files the value away, so the two cannot
+disagree about what `102,072 mi` means. Declaring the kinds is still worth
+doing: it settles the first row of a new routine, where there is no column yet,
+and it settles a genuinely ambiguous value like `20:06`, which is a clock time
+in one column and twenty hours in another.
+
+**The answer comes out in the units that went in.** A routine keeping
+kilometres gets kilometres, and a fare in pounds totals in pounds — including
+through a chain, where a second sum built on the first stays in the first's
+units.
+
+Three things it will not do, for the same reason the standardiser will not:
+
+- **Invent a figure.** Missing input, or a divide by zero, gives an empty cell
+  and a note saying which input was missing — never a number.
+- **Force a value into its declared kind.** A `Total earnings` that reads
+  `unknown` is reported and *left as it is*. Overwriting it with a blank would
+  throw away the one thing it told you, and leave a log that looks complete.
+- **Add unlike things.** Two units of the same kind that are not the same unit
+  — miles and kilometres, pounds and dollars — are refused with a note naming
+  both, never converted: there is no exchange rate in this app and it should
+  not invent one. A sum with no meaning at all, money plus a distance, is
+  refused outright rather than answered as a bare number.
+
+Everything written before this still works: a list of bare names is a list of
+untyped read fields, which is exactly what it always meant. The shipped
+**🚗 Trip** routine now ships with the declaration above, as a worked example.
+
+### One shape per column
+
+The fields are written by whichever model answered, in whatever words it
+reached for that day. A real log had one trip recorded twice, five minutes
+apart, agreeing about every fact and about none of the formatting:
+
+```
+"102,072"    "102,072 mi"      "100,409 miles"
+93           93 mi             66 miles
+$1.2465      $1.24 per mile    $0.55 per mile ($36.00 / 66 mi)
+21.2 mph     ≈ 23.21 mph       21.70 MPH
+```
+
+Every one of those is correct and none of them sorts against the row above it.
+So a value is put into a standard shape on its way in, and records kept before
+that existed are rewritten once at startup.
+
+**The rule: the presentation is standardised, the number never is.** `$1.2465`
+does not become `$1.25` and `$36.00` does not become `$36` — rounding is a
+change to the data. A minus sign and a leading decimal point are part of the
+figure, not decoration: `-$12.50` stays negative and `.5 mi` is half a mile.
+What comes off is only decoration: a thousands separator, a repeated unit, an
+"approximately", a bracket showing the working.
+
+For any value that changed, **the model's own wording is kept alongside it**. A
+standardised cell is underlined with a faint dotted line in the Records table,
+and hovering it (or long-pressing on a phone) says what it used to read — so
+the tidy-up can always be checked against what it replaced rather than taken on
+faith.
+
+Two things it deliberately will not do:
+
+- **Rewrite prose.** A value that merely *contains* a number is a sentence.
+  "54 miles to Brighton" stays exactly that; turning it into "54 mi" would
+  delete where the trip went and take the word Brighton out of search with it.
+- **Guess a unit from one value.** Whether a bare `93` is ninety-three miles is
+  a fact only its column knows, so the column votes: a single value that names
+  its unit settles it for the rest, and a column that is mostly notes stays
+  notes.
+
+Timestamps come out as `2026-08-25 20:06 UTC-04:00` — sortable, and keeping the
+offset, which is the one part of a timestamp you cannot recover by looking at it
+again. A stated date with no time stays a date rather than being padded to
+midnight, which would read as a measurement rather than a gap.
+
+### Checking a log
+
+Standardising a value is safe, so it happens on its own. Changing a *number* is
+not, so nothing does it for you:
+
+```bash
+.venv/bin/python tools/check_records.py
+.venv/bin/python tools/check_records.py --csv trips.csv
+.venv/bin/python tools/check_records.py --routine "🚗 Uber Trip"
+```
+
+It reports three things and edits nothing. **Rows that disagree with their own
+arithmetic** — the derived fields are a model doing sums in prose, and a model
+given no duration will still produce an hourly rate. **The same run recorded
+twice.** And **a preview of what standardising would change**, so you can see it
+before it happens.
+
+Run against the log those samples came from, it found the same trip logged
+twice at $26.23/hour and $23.19/hour — the second row had no start or end time
+in it at all, so its rate had been worked out from nothing.
+
 **Getting it out.** Two links in the Records pane, and both are ordinary
 endpoints, so another machine can pull them:
 
@@ -1047,6 +1428,13 @@ curl -s 'http://nucbox:8070/api/records.csv?routine=🚗%20Trip'
 The CSV timestamps are ISO 8601, so a spreadsheet and a database both parse
 them, and the columns are the union of every field across the log — a routine
 whose fields changed doesn't lose the older runs' data.
+
+**The unit goes in the header and the cell holds the number alone** —
+`Total earnings (USD)` with `115.94` under it, `Distance traveled (mi)` with
+`93`. A cell reading `$115.94` or `93 mi` is *text* to a spreadsheet: it will
+not sum, it will not chart, and it sorts `100 mi` before `93 mi`. Timestamps
+and free text are written out as they stand, because a number would say less
+than they do.
 
 Records outlive the routine that made them. Deleting **🚗 Trip** doesn't touch
 a year of trips; the routine's name is copied into each row rather than looked
