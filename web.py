@@ -503,7 +503,19 @@ class _Extractor(HTMLParser):
                 self._parts.append(" ")
 
     def handle_data(self, data):
-        if self._in_title:
+        # The skip depth is checked for the title too, not only for the body.
+        # <title> is not exclusive to <head>: SVG uses it for the accessible
+        # name of a graphic, so every icon on a page carries one. Checking
+        # _in_title first meant those won over the skip depth and were
+        # concatenated onto the real title, which is how a page came back as
+        #
+        #   NBC News - Breaking Headlines … | NBC NewsNBC News LogoSearch
+        #   SearchNBC News LogoToday Logo
+        #
+        # — the title, then the alt text of the logo, the two search buttons
+        # and the Today logo. That string is what a source is cited as and
+        # what the reader sees under the reply, so it is worth being exact.
+        if self._in_title and not self._skip:
             self.title += data
         elif not self._skip:
             self._parts.append(data)

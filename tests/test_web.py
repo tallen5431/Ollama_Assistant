@@ -3053,3 +3053,42 @@ class TestTheTitleIsWhateverTheTitleSays:
 
     def test_and_entities_still_resolve(self):
         assert web.html_to_text("<title>A &amp; B</title>")["title"] == "A & B"
+
+
+class TestATitleOnAnIconIsNotThePagesTitle:
+    """From a real search. <title> is not exclusive to <head> — SVG uses it for
+    the accessible name of a graphic, so every icon on a page carries one, and
+    they were being concatenated onto the real title. The source line under the
+    reply read
+
+        [3] NBC News - Breaking Headlines … | NBC NewsNBC News LogoSearch
+            SearchNBC News LogoToday Logo
+
+    which is the title, then the alt text of the logo, both search buttons and
+    the Today logo."""
+
+    NEWS = """<html><head><title>NBC News - Breaking Headlines | NBC News</title>
+    </head><body><header>
+      <svg><title>NBC News Logo</title><path/></svg>
+      <button><svg><title>Search</title></svg></button>
+      <button><svg><title>Search</title></svg></button>
+      <svg><title>Today Logo</title></svg>
+    </header><main><p>Oil hits $100 a barrel.</p></main></body></html>"""
+
+    def test_the_title_stops_where_the_title_stops(self):
+        assert web.html_to_text(self.NEWS)["title"] == \
+            "NBC News - Breaking Headlines | NBC News"
+
+    def test_the_icons_do_not_reach_the_body_either(self):
+        assert web.html_to_text(self.NEWS)["text"] == "Oil hits $100 a barrel."
+
+    @pytest.mark.parametrize("wrapper", ["svg", "button", "nav", "template"])
+    def test_a_title_inside_anything_skipped_is_skipped(self, wrapper):
+        """The rule is the skip depth, not a special case for SVG."""
+        page = (f"<title>Real</title><{wrapper}><title>Junk</title></{wrapper}>")
+        assert web.html_to_text(page)["title"] == "Real"
+
+    def test_a_page_whose_only_title_is_on_an_icon_has_no_title(self):
+        """Better than borrowing a logo's alt text and citing the source as
+        "Search"."""
+        assert web.html_to_text("<svg><title>Search</title></svg><p>x</p>")["title"] == ""
