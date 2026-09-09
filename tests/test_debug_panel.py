@@ -249,3 +249,92 @@ class TestThePanel:
         js = page_script(self.page())
         at = js.index("if (obj.debug)")
         assert "addStep(view, obj.debug); scrollDown(); continue;" in js[at:at + 120]
+
+
+class TestThePanelDoesNotMisleadAboutWhatItIsShowing:
+    """Both of these were found by being misled by them.
+
+    The panel is the only view of what the model was actually handed, so a
+    view that quietly omits the part you are looking for is worse than no
+    view — you draw a conclusion from it and go on to act on the conclusion.
+    """
+
+    def test_a_clipped_context_says_it_is_clipped(self, app, monkeypatch):
+        """It clipped at 2000 characters in silence, and the per-page link
+        lists live at the *end* of a block five times that long — so the panel
+        showed a context with no numbered links in it whether or not there
+        were any."""
+        monkeypatch.setattr(app, "chat_stream", a_reply)
+        monkeypatch.setattr(app, "web_enabled", lambda: True)
+        monkeypatch.setattr(app.web, "plan_searches", lambda *a, **k: ["q"])
+        monkeypatch.setattr(app.web, "search",
+                            lambda *a, **k: [{"url": "https://e.test/a", "title": "A",
+                                              "snippet": "s"}])
+        monkeypatch.setattr(app.web, "fetch", lambda url, **k: {
+            "url": url, "title": "A", "text": "long page. " * 900, "links": []})
+        found = steps(app.app.test_client().post("/api/chat", json={
+            "model": "m", "web": True,
+            "messages": [{"role": "user", "content": "what is a?"}]}))
+        blocks = named(found, "Sent to the model")["system"]
+        clipped = [b for b in blocks if "characters shown" in b]
+        assert clipped, "a clipped block must say so"
+        assert "of" in clipped[0], "and say how much of how much"
+        assert "link lists come after" in clipped[0], \
+            "and say what is missing, which is the whole reason it matters"
+
+    def test_a_short_context_is_not_labelled_as_clipped(self, app, monkeypatch):
+        monkeypatch.setattr(app, "chat_stream", a_reply)
+        found = steps(app.app.test_client().post(
+            "/api/chat", json={"model": "m", "messages": [
+                {"role": "user", "content": "hello"}]}))
+        for block in named(found, "Sent to the model")["system"] or []:
+            assert "characters shown" not in block
+
+
+class TestItSaysWhetherTheModelWasInvitedToFollowALink:
+    """WEB_MAX_HOPS is the app following a link on its own judgement;
+    WEB_FETCH_HOPS is the model asking for one. A turn where the app followed
+    two links and the model was never invited looked exactly like a turn where
+    it was invited and declined."""
+
+    def _turn(self, app, monkeypatch):
+        monkeypatch.setattr(app, "chat_stream", a_reply)
+        monkeypatch.setattr(app, "web_enabled", lambda: True)
+        monkeypatch.setattr(app.web, "plan_searches", lambda *a, **k: ["q"])
+        monkeypatch.setattr(app.web, "search", lambda *a, **k: [
+            {"url": "https://e.test/a", "title": "A", "snippet": "s"}])
+        monkeypatch.setattr(app.web, "fetch", lambda url, **k: {
+            "url": url, "title": "A", "text": "the page", "links": []})
+        return steps(app.app.test_client().post("/api/chat", json={
+            "model": "m", "web": True,
+            "messages": [{"role": "user", "content": "what is a?"}]}))
+
+    def test_a_turn_that_never_touched_the_web_says_nothing_about_it(
+            self, app, monkeypatch):
+        """A line about a setting that could not have applied is clutter, and
+        the panel is worth reading only while everything in it is this turn."""
+        monkeypatch.setattr(app, "chat_stream", a_reply)
+        found = steps(app.app.test_client().post(
+            "/api/chat", json={"model": "m", "messages": [
+                {"role": "user", "content": "hello"}]}))
+        assert named(found, "Asking to read a link") is None
+
+    def test_off_says_which_setting_turned_it_off(self, app, monkeypatch):
+        monkeypatch.setattr(app, "get_web_fetch_hops", lambda: 0)
+        entry = named(self._turn(app, monkeypatch), "Asking to read a link")
+        assert entry is not None
+        assert "WEB_FETCH_HOPS" in entry["detail"]
+
+    def test_and_names_the_setting_it_is_confused_with(self, app, monkeypatch):
+        monkeypatch.setattr(app, "get_web_fetch_hops", lambda: 0)
+        entry = named(self._turn(app, monkeypatch), "Asking to read a link")
+        assert "WEB_MAX_HOPS" in entry["detail"], \
+            "the confusable setting is named, because it is confusable"
+
+    def test_on_but_nothing_to_name_is_a_different_answer(self):
+        note = app_module._fetch_offer_note(1, {})
+        assert "no numbered links" in note and "budget" in note
+
+    def test_on_with_links_says_how_many(self):
+        note = app_module._fetch_offer_note(2, {"1.1": {}, "1.2": {}, "2.1": {}})
+        assert "3" in note and "2" in note

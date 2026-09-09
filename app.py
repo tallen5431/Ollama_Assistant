@@ -956,12 +956,31 @@ def api_chat() -> Any:
                     kept_sources.extend(
                         {"url": d["url"], "title": d["title"]} for d in documents)
                     yield _line({"sources": list(kept_sources)})
+            # Clipped, and it says so. The preview is the first 2000 characters
+            # of a block that is routinely five times that, and the per-page
+            # link lists live at the *end* of it — so reading the panel and
+            # finding no numbered links proved nothing, while looking exactly
+            # like proof that there were none. An hour went into diagnosing a
+            # budget problem that did not exist. A view that silently omits the
+            # part you are looking for is worse than no view.
             yield _step(
                 "Sent to the model",
                 f"{len(convo)} turns, {sum(len(str(t.get('content') or '')) for t in convo)} "
                 f"characters of text, num_ctx {options.get('num_ctx')}",
-                system=[str(t.get("content") or "")[:2000]
+                system=[_previewed(str(t.get("content") or ""))
                         for t in convo if t.get("role") == "system"])
+            # Whether the model was even invited to follow a link, and if not
+            # why not. "Followed links" already reports the app's own picker,
+            # and the two were easy to confuse: a turn where the app followed
+            # two links and the model was never asked looked identical to one
+            # where the model was asked and declined.
+            #
+            # Only where there were pages to follow links from. On a question
+            # that never touched the web this is a line about a setting that
+            # could not have applied, and the panel is worth reading only for
+            # as long as everything in it is about this turn.
+            if documents:
+                yield _step("Asking to read a link", _fetch_offer_note(hops, link_ids))
 
             # The model may answer, or — while a hop is left and it was told it
             # could — ask for one of the numbered links to be read first. A
@@ -1751,6 +1770,48 @@ def _clipped(text: str) -> str:
     if len(text) <= _PANEL_TEXT_MAX:
         return text
     return text[:_PANEL_TEXT_MAX].rsplit(" ", 1)[0] + " …[shown in part]"
+
+
+# What the context block preview shows. Longer than _PANEL_TEXT_MAX because
+# this is the one thing in the panel you read to check what the model was
+# actually given.
+_PANEL_CONTEXT_MAX = 2000
+
+
+def _previewed(text: str) -> str:
+    """A system message for the panel, saying plainly when it is only part.
+
+    The count is the point. This used to clip at exactly this length in
+    silence, and the per-page link lists sit at the end of a block that is
+    routinely five times longer — so the panel showed a context with no
+    numbered links in it whether or not the context had any, and reading it
+    that way sent a diagnosis in entirely the wrong direction.
+    """
+    if len(text) <= _PANEL_CONTEXT_MAX:
+        return text
+    return (text[:_PANEL_CONTEXT_MAX].rsplit(" ", 1)[0]
+            + f"\n\n…[{_PANEL_CONTEXT_MAX} of {len(text)} characters shown. "
+              "The per-page link lists come after this point.]")
+
+
+def _fetch_offer_note(hops: int, link_ids: Dict[str, Dict[str, str]]) -> str:
+    """Whether the model was offered a link to follow, and if not, why not.
+
+    Two settings reach almost the same outcome from opposite directions, and
+    the panel could not tell them apart: WEB_MAX_HOPS is the app following a
+    link on its own judgement, WEB_FETCH_HOPS is the model asking for one. A
+    turn where the app followed two links and the model was never invited
+    looked exactly like a turn where it was invited and declined.
+    """
+    if hops < 1:
+        return ("not offered — WEB_FETCH_HOPS is 0, so the model was not told "
+                "it could ask. (That is a different setting from WEB_MAX_HOPS, "
+                "which is the app following links on its own.)")
+    if not link_ids:
+        return ("not offered — no numbered links survived the context budget "
+                "for the model to name")
+    return (f"offered {len(link_ids)} numbered link(s), up to {hops} "
+            f"request(s)")
 
 
 def _read_images_for(model: str, images: List[str], reader: str,

@@ -920,9 +920,27 @@ a web page with the same suspicion you'd treat the page itself.
 ### Context window
 
 An attached page is large, so a wider window is requested (`OLLAMA_NUM_CTX`,
-default 8192) whenever web context is present. Ollama otherwise defaults to a
-modest window regardless of what the model supports, and the conversation would
-be silently pushed out of it.
+default 8192). Ollama otherwise defaults to a modest window regardless of what
+the model supports, and the conversation would be silently pushed out of it.
+
+Sent on **every** turn, not only the ones that fetched something: Ollama
+reloads the runner and throws away the KV cache when a model's load options
+change, so asking for a wider window only on web turns made every switch
+between a plain question and a grounded one pay a reload.
+
+It is also what the retrieval budget is computed from — `web.context_budget()`
+gives about 13,600 characters at the default 8192, and doubles as you raise it.
+Retrieve more than that and the pages are trimmed to fit; retrieve a lot more
+and the per-page link maps are dropped entirely to leave room for the pages
+themselves, which is the first thing to check if the model never asks to follow
+a link. **Show what it did** reports both numbers — "Context from the web" is
+what was retrieved, "Sent to the model" is what survived the budget.
+
+Two things cap it. The model's own trained context length — `ollama show
+<model>` prints it — and VRAM, since the KV cache is allocated up front and
+grows with the window. `ollama ps` is the practical test: if `PROCESSOR` stops
+saying `100% GPU` after you raise it, you have gone past what the card holds
+and it will be far slower.
 
 ## Conversation history
 
