@@ -93,6 +93,57 @@ _SNIPPET_MAX = 400
 _MAX_IMAGES_READ = 4
 _MAX_READING_CHARS = 600
 
+# How many times running is still writing rather than looping. Three is enough
+# for anything a dashboard or a screenshot legitimately repeats — "0 0 0" in a
+# table, a row of dashes — and far below what a model that has come off the
+# rails produces.
+_REPEAT_LIMIT = 3
+
+# The longest phrase checked for looping. A degenerate model repeats a token or
+# a short phrase; beyond four words a genuine repeated sentence is likelier
+# than a loop, and cutting one of those would lose real text.
+_REPEAT_UNIT_MAX = 4
+
+
+def _stop_repeating(text: str) -> str:
+    """Collapse a run of the same word or phrase down to a few.
+
+    Small models degenerate. Measured on a real odometer photo: glm-ocr read
+    "MODEL 3 LONG RANGE DUAL MOTOR 105,639 mi" correctly and then emitted 135
+    empty code fences — 789 characters carrying 199 characters of reading.
+
+    That mattered for two reasons. The junk goes into the context as though it
+    were something the camera saw, and — worse — it is counted against
+    _MAX_READING_CHARS, so a long reading could have had its real text cut off
+    to make room for the loop. Trimmed before the cap, not after.
+
+    Conservative on purpose: it only fires on a run *longer* than anything
+    plausible, and it keeps the first few, so a reading that genuinely repeats
+    still says that it does.
+    """
+    words = text.split()
+    out: List[str] = []
+    at = 0
+    while at < len(words):
+        best = (0, 0)                      # (how many words it covers, unit size)
+        for size in range(1, _REPEAT_UNIT_MAX + 1):
+            unit = words[at:at + size]
+            if len(unit) < size:
+                break
+            runs = 1
+            while words[at + runs * size:at + (runs + 1) * size] == unit:
+                runs += 1
+            if runs > _REPEAT_LIMIT and runs * size > best[0]:
+                best = (runs * size, size)
+        covered, size = best
+        if covered:
+            out.extend(words[at:at + size] * _REPEAT_LIMIT)
+            at += covered
+        else:
+            out.append(words[at])
+            at += 1
+    return " ".join(out)
+
 # A Wikipedia article points at hundreds of pages. Enough to show what a site
 # covers, few enough that the list itself does not become the context.
 _MAX_LINKS_KEPT = 120
@@ -2288,7 +2339,13 @@ def describe_images(
         except Exception as exc:  # noqa: BLE001 - reported, never raised as-is
             logger.warning("Image description (%s) failed: %s", model, exc)
             raise ReadFailed(str(exc)) from exc
-        text = " ".join((reply or "").split())[:_MAX_READING_CHARS]
+        # Looping trimmed before the cap, not after: a model that has come off
+        # the rails would otherwise spend the whole reading budget on its loop
+        # and push the part it read correctly off the end.
+        text = _stop_repeating(" ".join((reply or "").split()))
+        if len(text) < len(" ".join((reply or "").split())):
+            logger.warning("%s repeated itself reading an image; trimmed", model)
+        text = text[:_MAX_READING_CHARS]
         if text:
             readings.append(text if len(images) == 1 else f"[image {index}] {text}")
 

@@ -788,3 +788,57 @@ class TestAskingForTheTextEvenFromAModelThatCanSee:
         ollama_client.invalidate_models_cache()
         self.send(mod)
         assert "readers" not in seen
+
+
+class TestAModelThatComesOffTheRails:
+    """Measured on a real odometer photo: glm-ocr read
+
+        MODEL 3 LONG RANGE DUAL MOTOR 105,639 mi
+
+    correctly and then emitted 135 empty code fences — 789 characters
+    carrying 199 characters of reading. Small models degenerate, and the junk
+    both reaches the model as though the camera saw it and is counted against
+    the reading cap, so a longer reading could have had its real text cut off
+    to make room for the loop.
+    """
+
+    def test_the_loop_is_collapsed_and_the_reading_survives(self):
+        import web
+        reply = ("MODEL 3 LONG RANGE DUAL MOTOR 105,639 mi ```markdown "
+                 "MODEL 3 LONG RANGE DUAL MOTOR 105,639 mi ``` " + "``` " * 130)
+        out = web._stop_repeating(" ".join(reply.split()))
+        assert "105,639 mi" in out, "the reading is the thing being protected"
+        assert out.count("```") <= 6
+        assert len(out) < len(reply) / 4
+
+    @pytest.mark.parametrize("text", [
+        "the cat sat on the mat",
+        "no no no",                       # three is writing, not looping
+        "ODO 105639 END ODO 105639 END",  # a phrase twice is not a loop
+        "",
+    ])
+    def test_ordinary_text_is_left_exactly_alone(self, text):
+        import web
+        assert web._stop_repeating(text) == text
+
+    @pytest.mark.parametrize("unit", ["x", "a b", "p q r"])
+    def test_a_repeated_phrase_loops_too_not_just_a_word(self, unit):
+        import web
+        out = web._stop_repeating((unit + " ") * 40)
+        assert out == " ".join([unit] * 3)
+
+    def test_it_is_trimmed_before_the_cap_not_after(self, monkeypatch):
+        """The point of doing it first: the loop must not spend the budget
+        that the real reading needed."""
+        import web
+        import ollama_client
+        tail = " ".join(["```"] * 400)
+        # Comfortably inside _MAX_READING_CHARS on its own, so anything
+        # lost can only have been lost to the loop.
+        real = " ".join(f"LINE{i} VALUE{i}" for i in range(25))
+        assert len(real) < web._MAX_READING_CHARS
+        monkeypatch.setattr(ollama_client, "chat",
+                            lambda *a, **k: real + " " + tail)
+        got = web.describe_images(["aW1n"], "glm-ocr:latest", ocr=True)
+        assert "LINE24" in got, "the loop pushed real text off the end"
+        assert got.count("```") <= 6
