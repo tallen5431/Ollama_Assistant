@@ -331,6 +331,32 @@ def get_photo_read_each() -> bool:
     return _flag("PHOTO_READ_EACH", "0")
 
 
+def get_always_ocr() -> bool:
+    """Whether to transcribe an image even when the answering model can see it.
+
+    Transcription normally happens only for a model without eyes, on the
+    reasoning that a model which can read the picture itself does not need it
+    read to it. That is right when you want the image *discussed* and wrong
+    when you want what it *says*: a general vision model paraphrases, and the
+    exact string is the whole point of a serial number, an error message or an
+    odometer. An OCR model gets those right.
+
+    It also made the behaviour depend on something no one chose. Ollama learns
+    to report a model's capabilities, a model that reported none starts
+    reporting vision, and a setup that had been transcribing every screenshot
+    for months quietly stops — with nothing wrong and nothing to find.
+
+    On, the image is transcribed *and* still handed over as pixels: the
+    transcript is an anchor, not a substitute, and the model is told to trust
+    its own eyes where the two disagree. Costs one model call per turn with an
+    image, which is why it is off by default.
+
+    Does nothing unless an OCR model is installed — transcribing an image with
+    the same model that is about to look at it achieves nothing.
+    """
+    return _flag("IMAGE_ALWAYS_OCR", "0")
+
+
 def get_photo_meta_default() -> bool:
     """Whether a browser that has never chosen starts with photo details on.
 
