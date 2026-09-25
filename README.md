@@ -130,6 +130,7 @@ All settings are environment variables (the server manager injects them):
 | `OLLAMA_KEEP_ALIVE` | *(Ollama's default)*        | How long the answering model stays in VRAM after a turn, e.g. `30m` to skip a 30b's load time between messages. Helper models always unload immediately |
 | `CHAT_IMAGE_TURNS`  | `1`                         | How many recent image-bearing turns re-send their attachments. Raise it if you compare images across turns |
 | `PHOTO_READ_EACH`   | `0`                         | Also read each photo on its own before answering, so the `[image n]` numbering is reliable. Costs one model call per photo; only applies with more than one — see "Keeping several photos straight" |
+| `IMAGE_ALWAYS_OCR`  | `0`                         | Transcribe an attached image even when the answering model can see it. For when you want the exact text rather than a description — see "When OCR suddenly stops". Needs an OCR model installed |
 | `PHOTO_META`        | `1`                         | Whether a browser that has never touched the toggle starts with **📍 Photo details** on. `0` makes off the default |
 | `PHOTO_KEEP_DAYS`   | `30`                        | How long stored photos stay in the history. Every word is kept for good; only the pixels expire. `0` keeps them for good too |
 | `CHAT_TITLE`        | `Ollama Chat`               | Title in the tab/header |
@@ -1105,6 +1106,45 @@ conversationalists. `WEB_VISION_MODEL` pins the reader if you'd rather choose.
 Capability comes from what Ollama reports in `/api/tags` — the `clip` and
 `mllama` families, an explicit `vision` capability — with a name-based fallback
 for builds whose details block is sparse.
+
+### When OCR "suddenly stops"
+
+Transcription normally runs **only for a model that cannot see**, on the
+reasoning that a model which can read the picture itself does not need it read
+to it. Two things follow from that, and both have surprised people:
+
+- Switch your answering model to a vision model and the OCR pass stops. The
+  image goes straight to it instead.
+- **It can stop on its own.** The explicit capability list is authoritative,
+  so when Ollama learns to report a capability it did not report before, a
+  model that was classed as blind becomes a model that can see — and a setup
+  that had been transcribing every screenshot for months quietly stops.
+  Reported with `gemma4:e4b` on Ollama 0.34: nothing had changed in the app,
+  nothing was misconfigured, and the classification was newly *correct*.
+
+The panel says which way a turn went, in words:
+
+```
+Images   2 in the thread; gemma4:e4b reads them itself
+Images   2 in the thread; qwen3-coder:30b cannot see, so they are transcribed for it
+```
+
+**`IMAGE_ALWAYS_OCR=1`** transcribes anyway. That rule is right when you want
+an image *discussed* and wrong when you want what it *says* — a general vision
+model paraphrases, and the exact string is the whole point of a serial number,
+an error message or an odometer.
+
+With it on, the image is transcribed **and** still sent as pixels: the
+transcript is an anchor, not a substitute, and the model is told to trust its
+own eyes where the two disagree. The panel says so:
+
+```
+Images   2 in the thread; gemma4:e4b reads them itself, and glm-ocr:latest transcribes them too
+```
+
+Costs one model call per turn carrying an image, which is why it is off by
+default. It does nothing unless an OCR model is installed — transcribing an
+image with the same model that is about to look at it achieves nothing.
 
 All three paths handle the image identically. Anything up to 1920 px on the long
 edge is kept at its original size and encoded as **PNG** — losslessly, so the

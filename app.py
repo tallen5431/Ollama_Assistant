@@ -44,6 +44,7 @@ import voice
 import web
 from chat_ui import render_page
 from config import (
+    get_always_ocr,
     get_app_title,
     get_default_model,
     get_distiller_model,
@@ -877,19 +878,37 @@ def api_chat() -> Any:
             # Any image still in the thread, not only a newly attached one, so a
             # follow-up question about the same screenshot keeps its context.
             images = web.conversation_images(turns)
+            # Transcribe when the model cannot read the picture itself — or
+            # when it can and you asked for the text anyway. The second case
+            # exists because "it can see, so it does not need reading to" is
+            # right for discussing an image and wrong for wanting what it
+            # says: a general vision model paraphrases, and the exact string
+            # is the entire point of a serial number or an odometer.
+            blind = not _model_has_vision(model)
+            reader, is_ocr_reader = _image_reader(model) if images else ("", False)
+            # An OCR model, specifically. With none installed _image_reader
+            # falls back to the answering model, and handing an image to the
+            # same model that is about to look at it buys nothing.
+            also_ocr = bool(images) and not blind and get_always_ocr() \
+                and is_ocr_reader and reader != model
             if images:
                 yield _step(
                     "Images", f"{len(images)} in the thread; {model} "
-                    + ("reads them itself" if _model_has_vision(model)
-                       else "cannot see, so they are transcribed for it"))
-            if images and not _model_has_vision(model):
-                reader, is_ocr_reader = _image_reader(model)
-                if reader:
-                    transcript, context = yield from _read_images_for(
-                        model, images, reader, is_ocr_reader)
+                    + ("cannot see, so they are transcribed for it" if blind
+                       else f"reads them itself, and {reader} transcribes them too"
+                       if also_ocr else "reads them itself"))
+            if images and (blind or also_ocr) and reader:
+                transcript, context = yield from _read_images_for(
+                    model, images, reader, is_ocr_reader)
+                if blind:
                     # Drop the base64 once it is transcribed: this model will
                     # never read it, and it costs the body limit every turn.
                     convo = web.with_context(web.strip_images(turns), context)
+                else:
+                    # The pictures stay. The transcript is an anchor for them,
+                    # not a replacement, and image_context tells the model to
+                    # trust its own eyes where the two disagree.
+                    convo = web.with_context(convo, context)
             elif images and len(images) > 1 and get_photo_read_each():
                 # A model that *can* see, given each photo read on its own so
                 # that the labels are reliable. The pictures carry no labels,

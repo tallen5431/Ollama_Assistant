@@ -693,3 +693,98 @@ class TestDescribeWhenThereIsNoTextToRead:
         system = [m for m in seen["messages"] if m["role"] == "system"][0]["content"]
         assert "no readable text" in system
         assert len(seen["readers"]) == 2
+
+
+class TestAskingForTheTextEvenFromAModelThatCanSee:
+    """Reported: OCR "suddenly stopped" with nothing changed.
+
+    Transcription ran only for a model without eyes. Ollama learned to report
+    gemma4:e4b's vision capability, `_model_has_vision` flipped to True, and a
+    setup that had been transcribing every screenshot for months quietly
+    stopped — correctly, by the old rule, and uselessly, because what was
+    wanted was the exact text a general vision model paraphrases away.
+    """
+
+    SEEING = [
+        {"name": "glm-ocr:latest", "size": 2_200_000_000},
+        # As a newer Ollama reports it: capabilities present, and authoritative.
+        {"name": "gemma4:e4b", "size": 9_600_000_000,
+         "capabilities": ["completion", "vision"]},
+    ]
+
+    @pytest.fixture
+    def rig(self, monkeypatch):
+        import importlib
+        import app as app_module
+        import ollama_client
+        import web
+
+        monkeypatch.delenv("WEB_VISION_MODEL", raising=False)
+        mod = importlib.reload(app_module)
+        monkeypatch.setattr(ollama_client, "list_models", lambda: self.SEEING)
+        monkeypatch.setattr(mod, "list_models", lambda: self.SEEING)
+        for name in ("vision_models", "ocr_models", "has_vision", "is_ocr"):
+            monkeypatch.setattr(mod, name, getattr(oc, name))
+
+        seen = {}
+
+        def fake_read(images, model, ocr=False, **kw):
+            seen.setdefault("readers", []).append(model)
+            return "SERIAL NO. 8H4-22119-B"
+
+        def fake_stream(model, messages, options=None, **kw):
+            seen["messages"] = messages
+            yield '{"message": {"content": "ok"}, "done": true}'
+
+        monkeypatch.setattr(web, "read_images", fake_read)
+        monkeypatch.setattr(mod, "chat_stream", fake_stream)
+        return mod, seen
+
+    def send(self, mod):
+        return mod.app.test_client().post("/api/chat", json={
+            "model": "gemma4:e4b",
+            "messages": [{"role": "user", "content": "what is the serial?",
+                          "images": ["aW1n"]}]}).get_data(as_text=True)
+
+    def test_off_it_is_left_to_the_model_that_can_see(self, rig, monkeypatch):
+        """The behaviour that surprised nobody until it did — still the default."""
+        mod, seen = rig
+        monkeypatch.setattr(mod, "get_always_ocr", lambda: False)
+        self.send(mod)
+        assert "readers" not in seen, "nothing should have been transcribed"
+
+    def test_on_the_ocr_model_reads_it_anyway(self, rig, monkeypatch):
+        mod, seen = rig
+        monkeypatch.setattr(mod, "get_always_ocr", lambda: True)
+        self.send(mod)
+        assert seen["readers"] == ["glm-ocr:latest"]
+        system = [m for m in seen["messages"] if m["role"] == "system"]
+        assert any("8H4-22119-B" in m["content"] for m in system)
+
+    def test_and_the_pictures_are_still_sent(self, rig, monkeypatch):
+        """The transcript is an anchor for the image, not a replacement — the
+        model is told to trust its own eyes where the two disagree."""
+        mod, seen = rig
+        monkeypatch.setattr(mod, "get_always_ocr", lambda: True)
+        self.send(mod)
+        assert any(m.get("images") for m in seen["messages"]), \
+            "a model that can see must still be given the image"
+
+    def test_the_panel_says_both_things_happened(self, rig, monkeypatch):
+        mod, seen = rig
+        monkeypatch.setattr(mod, "get_always_ocr", lambda: True)
+        body = self.send(mod)
+        assert "reads them itself, and glm-ocr:latest transcribes them too" in body
+
+    def test_with_no_ocr_model_installed_it_does_nothing(self, rig, monkeypatch):
+        """Transcribing an image with the same model about to look at it buys
+        nothing, so the setting stays out of the way rather than paying for a
+        call that cannot help."""
+        mod, seen = rig
+        monkeypatch.setattr(mod, "get_always_ocr", lambda: True)
+        monkeypatch.setattr(mod, "list_models", lambda: [self.SEEING[1]])
+        import ollama_client
+        monkeypatch.setattr(ollama_client, "list_models", lambda: [self.SEEING[1]])
+        ollama_client.invalidate_models_cache()
+        self.send(mod)
+        assert "readers" not in seen
