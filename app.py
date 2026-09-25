@@ -65,6 +65,7 @@ from config import (
     get_web_fetch_hops,
     get_web_follow_links,
     get_web_follow_on_search,
+    get_web_follow_scope,
     get_web_max_hops,
     get_web_max_docs,
     logger,
@@ -1452,6 +1453,7 @@ def _follow_links(
     sources: List[Dict[str, Any]],
     documents: List[Dict[str, str]],
     budget: int,
+    report_empty: bool = False,
 ) -> Any:
     """Open a couple of the pages ``sources`` link to, if any look relevant.
 
@@ -1459,9 +1461,22 @@ def _follow_links(
     only same-site links are candidates at all — a link is chosen by a model
     from content written by a stranger, so it gets no more trust than a pasted
     URL does. Returns the documents it added, so the caller can hop from them.
+
+    ``report_empty`` says whether "nothing followed" is worth a panel line.
+    True on the first hop, where the absence of the row is a question — did
+    the picker decline, or was it never asked? — and False after it, where the
+    first hop has already reported and a second "nothing more" is noise.
     """
     candidates = _link_candidates(question, sources, documents)
     if not candidates:
+        if report_empty:
+            offered = sum(len(s.get("links") or []) for s in sources)
+            yield _step(
+                "Followed links",
+                f"none to follow — {offered} link(s) on the page(s) read, none "
+                "of them followable"
+                + ("; WEB_FOLLOW_SCOPE keeps this to the site each page is on"
+                   if offered and get_web_follow_scope() != "any" else ""))
         return []
 
     picker = get_planner_model() or model
@@ -1470,8 +1485,14 @@ def _follow_links(
                                   answering_model=model)
     except Exception as exc:  # noqa: BLE001 - an enhancement, never a requirement
         logger.warning("Link picking failed: %s", exc)
+        if report_empty:
+            yield _step("Followed links", f"{picker} could not be asked: {exc}")
         return []
     if not chosen:
+        if report_empty:
+            yield _step("Followed links",
+                        f"{len(candidates)} offered to {picker}; it chose none "
+                        "as worth opening")
         return []
 
     yield _line({"status": "Following: " + " · ".join(c["text"][:40] for c in chosen)})
@@ -1505,12 +1526,12 @@ def _deepen(
     if budget < 1 or hops < 1:
         return
     frontier = list(documents)
-    for _ in range(hops):
+    for hop in range(hops):
         room = _DOC_CEILING - len(documents)
         if not frontier or room < 1:
             return
         fetched = yield from _follow_links(model, question, frontier, documents,
-                                           min(budget, room))
+                                           min(budget, room), report_empty=hop == 0)
         if not fetched:
             return          # nothing chosen or nothing readable; no deeper to go
         frontier = fetched
