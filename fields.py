@@ -104,6 +104,12 @@ _RESULT = {
 # is its zone, which subtracts correctly *because* the two may differ.
 _MUST_MATCH = (values.DISTANCE, values.SPEED, values.MONEY)
 
+# Kinds that cannot be less than nothing. Money can: a refund, a loss, a
+# balance owed are all real. A plain number can. You cannot drive minus ninety
+# miles, take minus four hours, or average minus twenty miles an hour — those
+# mean the two inputs were given the wrong way round.
+_NEVER_NEGATIVE = (values.DISTANCE, values.DURATION, values.SPEED)
+
 # A timestamp subtracts as seconds, so the difference has to be put back into
 # the units a duration is counted in.
 _SECONDS_TO_HOURS = {(values.TIMESTAMP, "-", values.TIMESTAMP): 1 / 3600.0}
@@ -459,16 +465,6 @@ def _one_sum(field: Field, left: values.Value, right: values.Value,
         filled[field.name] = ""
         notes.append(f"{field.name}: {field.right} is zero")
         return
-    # A duration between two clock times that carry no zone is right only if
-    # the clock did not move between them. EXIF very often records no offset,
-    # so this is the ordinary case rather than the exotic one — and the warning
-    # used to live in the routine's prompt, which is no longer where the
-    # arithmetic happens.
-    if (left.kind, field.op, right.kind) == (values.TIMESTAMP, "-", values.TIMESTAMP) \
-            and not (left.unit and right.unit):
-        notes.append(f"{field.name}: worked out from clock times with no time "
-                     "zone recorded — out by whole hours if the clock moved "
-                     "between them")
     number *= _SECONDS_TO_HOURS.get((left.kind, field.op, right.kind), 1.0)
     if number != number:
         # One of the inputs had no number in it — a date with no time of day,
@@ -479,6 +475,34 @@ def _one_sum(field: Field, left: values.Value, right: values.Value,
                      "value to work with")
         return
     unit = _result_unit(kind, left, right)
+    # A distance, a duration or a speed cannot be less than nothing. When one
+    # comes out negative the arithmetic is fine and the *inputs were labelled
+    # the wrong way round* — the end odometer given as the start, the two
+    # photos assigned to the wrong readings. Reported rather than recorded,
+    # and rather than quietly flipped: a trip of "-96 mi" is a false statement
+    # about the world, and turning it into "96 mi" would paper over a swap
+    # that also put the start and end times on the wrong readings.
+    if number < 0 and kind in _NEVER_NEGATIVE:
+        filled[field.name] = ""
+        notes.append(f"{field.name}: \"{field.right}\" is larger than "
+                     f"\"{field.left}\", so this came out negative — the two "
+                     "look the wrong way round")
+        return
+    # A duration between two clock times that carry no zone is right only if
+    # the clock did not move between them. EXIF very often records no offset,
+    # so this is the ordinary case rather than the exotic one — and the warning
+    # used to live in the routine's prompt, which is no longer where the
+    # arithmetic happens.
+    #
+    # Said here, once the figure is known to be one worth recording. Said
+    # earlier, a value being refused for a different reason still collected a
+    # caveat about how to read it — two notes for one field, one of them about
+    # a number that was never kept.
+    if (left.kind, field.op, right.kind) == (values.TIMESTAMP, "-", values.TIMESTAMP) \
+            and not (left.unit and right.unit):
+        notes.append(f"{field.name}: worked out from clock times with no time "
+                     "zone recorded — out by whole hours if the clock moved "
+                     "between them")
     text = values.render(kind, number, unit if kind == values.MONEY else "$", unit)
     filled[field.name] = text
     # Carrying the unit, so a second field built on this one is in the same

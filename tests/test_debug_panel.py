@@ -338,3 +338,56 @@ class TestItSaysWhetherTheModelWasInvitedToFollowALink:
     def test_on_with_links_says_how_many(self):
         note = app_module._fetch_offer_note(2, {"1.1": {}, "1.2": {}, "2.1": {}})
         assert "3" in note and "2" in note
+
+
+class TestWhyNoLinkWasFollowed:
+    """Absence was ambiguous. A turn that followed nothing showed no row at
+    all, and four quite different things looked identical: the pages carried
+    no links, the links were all off-site, the picker declined, or the picker
+    could not be reached. The same class of silence that sent an OCR
+    diagnosis in the wrong direction for two rounds.
+    """
+
+    def _turn(self, app, monkeypatch, links, chooses):
+        monkeypatch.setattr(app, "chat_stream", a_reply)
+        monkeypatch.setattr(app, "web_enabled", lambda: True)
+        monkeypatch.setattr(app.web, "plan_searches", lambda *a, **k: ["q"])
+        monkeypatch.setattr(app.web, "search", lambda *a, **k: [
+            {"url": "https://bbc.test/news", "title": "N", "snippet": "s"}])
+        monkeypatch.setattr(app.web, "fetch", lambda url, **k: {
+            "url": url, "title": "N", "text": "page", "links": links})
+        monkeypatch.setattr(app.web, "choose_links", chooses)
+        return steps(app.app.test_client().post("/api/chat", json={
+            "model": "m", "web": True,
+            "messages": [{"role": "user", "content": "what is a?"}]}))
+
+    SAME = [{"url": f"https://bbc.test/s/{i}", "text": f"Story {i}"} for i in range(5)]
+    OFF = [{"url": f"https://other.test/{i}", "text": f"Other {i}"} for i in range(5)]
+
+    def test_no_links_on_the_page_at_all(self, app, monkeypatch):
+        found = self._turn(app, monkeypatch, [], lambda *a, **k: [])
+        assert "none to follow" in named(found, "Followed links")["detail"]
+
+    def test_links_that_are_all_off_site_name_the_setting(self, app, monkeypatch):
+        found = self._turn(app, monkeypatch, self.OFF, lambda *a, **k: [])
+        detail = named(found, "Followed links")["detail"]
+        assert "5 link(s)" in detail, "say there were links, not that there were none"
+        assert "WEB_FOLLOW_SCOPE" in detail
+
+    def test_a_picker_that_declined_says_so(self, app, monkeypatch):
+        found = self._turn(app, monkeypatch, self.SAME, lambda *a, **k: [])
+        detail = named(found, "Followed links")["detail"]
+        assert "chose none" in detail and "5 offered" in detail
+
+    def test_a_picker_that_could_not_be_reached_is_not_the_same_thing(
+            self, app, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("Ollama is asleep")
+        found = self._turn(app, monkeypatch, self.SAME, boom)
+        assert "could not be asked" in named(found, "Followed links")["detail"]
+
+    def test_and_a_turn_that_followed_something_still_says_what(
+            self, app, monkeypatch):
+        found = self._turn(app, monkeypatch, self.SAME,
+                           lambda *a, **k: [self.SAME[0]])
+        assert "1 chosen" in named(found, "Followed links")["detail"]

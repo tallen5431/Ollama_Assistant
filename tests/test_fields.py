@@ -457,3 +457,60 @@ class TestADeclarationIsCheckedWhenItIsWritten:
 
     def test_nor_does_a_plain_list_of_names(self):
         assert self.check(["distance", "elapsed", "notes"]) == []
+
+
+class TestYouCannotDriveMinusNinetySixMiles:
+    """From a real trip. The odometers were assigned to the wrong photos, and
+    the subtraction was perfectly correct about it — "-96 mi", recorded as a
+    fact about a journey. A figure in a log is read as true, so a distance
+    that cannot exist must not be one of them.
+
+    Not flipped to 96 either. The swap that produced it also put the start and
+    end *times* on the wrong readings, so silently correcting the sign would
+    hide a fault in two other columns.
+    """
+
+    TRIP = fields.parse(["Start odometer: distance", "End odometer: distance",
+                         "Distance = End odometer - Start odometer"])
+
+    def test_the_right_way_round_is_a_distance(self):
+        got, notes = fields.compute(self.TRIP, {"Start odometer": "105543 mi",
+                                                "End odometer": "105639 mi"})
+        assert got["Distance"] == "96 mi" and not notes
+
+    def test_the_wrong_way_round_is_a_gap_and_a_reason(self):
+        got, notes = fields.compute(self.TRIP, {"Start odometer": "105639 mi",
+                                                "End odometer": "105543 mi"})
+        assert got["Distance"] == ""
+        assert notes and "the wrong way round" in notes[0]
+        assert "Start odometer" in notes[0] and "End odometer" in notes[0], \
+            "the note has to name which two to look at"
+
+    @pytest.mark.parametrize("kind, a, b", [
+        ("distance", "10 mi", "20 mi"),
+        ("duration", "1h 00m", "3h 00m"),
+    ])
+    def test_the_same_holds_for_every_kind_that_cannot_be_negative(self, kind, a, b):
+        parsed = fields.parse([f"A: {kind}", f"B: {kind}", "C = A - B"])
+        got, notes = fields.compute(parsed, {"A": a, "B": b})
+        assert got["C"] == "" and notes
+
+    def test_but_money_may_be_negative_because_money_is(self):
+        """A refund, a loss, a balance owed. Real amounts, all of them."""
+        parsed = fields.parse(["Paid: money", "Fees: money", "Net = Paid - Fees"])
+        got, notes = fields.compute(parsed, {"Paid": "$2.00", "Fees": "$10.00"})
+        assert got["Net"] == "-$8.00" and not notes
+
+    def test_and_a_plain_number_may_be(self):
+        parsed = fields.parse(["A: number", "B: number", "C = A - B"])
+        assert fields.compute(parsed, {"A": "5", "B": "10"})[0]["C"] == "-5"
+
+    def test_a_refused_figure_collects_no_caveat_about_how_to_read_it(self):
+        """Two notes for one field, one of them explaining a number that was
+        never kept, reads as two faults."""
+        parsed = fields.parse(["Start: timestamp", "End: timestamp",
+                               "Took = End - Start"])
+        got, notes = fields.compute(parsed, {"Start": "2026-09-24 23:39",
+                                             "End": "2026-09-24 19:18"})
+        assert got["Took"] == ""
+        assert len(notes) == 1 and "wrong way round" in notes[0]
