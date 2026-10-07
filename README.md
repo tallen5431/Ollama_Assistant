@@ -145,6 +145,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_MAX_DOCS`      | `3`                         | Pages put in front of the model per turn |
 | `WEB_FOLLOW_LINKS`  | `2`                         | How many linked pages may also be read, per hop. Same site by default; `0` disables following everywhere |
 | `WEB_FOLLOW_ON_SEARCH` | `1`                      | Whether pages found by *searching* have their links followed too, not just a URL you pasted. `0` restores the old pasted-URL-only behaviour |
+| `WEB_CARRY_TURNS`   | `3`                         | How many follow-ups that don't search are given the pages the earlier answer came from, labelled as fetched earlier. A fresh search replaces them. `0` turns it off — see "Keeping the answer tied to what was found" |
 | `WEB_MAX_HOPS`      | `1`                         | How far retrieval may follow links outward. `1` is one hop; `2` lets a followed page be followed *from* — the spec linked from the release note linked from the search result. Capped at `3` |
 | `WEB_FETCH_HOPS`    | `0`                         | How many times the answering model may ask for a numbered link to be read before it answers. Off by default: each request spends a whole generation that produced no reply — see "Asking to read a link" |
 | `WEB_LINKS_IN_CONTEXT` | `25`                     | How many links to list per page, before the context budget trims it. The list is ranked against your question, so this is the ceiling rather than the usual number. `0` turns the list off |
@@ -708,6 +709,33 @@ was. Matched on the request, not the word: *source code*, *open source* and
 ```
 Planned searches   raspberry pi 4 specifications (a search was required: the message asks for a source or link)
 ```
+
+**Follow-ups are given the pages they are about.** *"Rank them"*, *"in a
+table"* — a follow-up the planner sees no need to search for used to get no
+pages at all, only the previous reply's prose about them. So it ranked whatever
+that prose said, inventions included, and could not check a single figure.
+Now the pages a reply was answered from are saved with it, and a follow-up
+that does not search is given them, labelled for what they are:
+
+> Reference material retrieved from the web earlier in this conversation, on
+> Wednesday 07 October 2026 at 14:03, for an earlier message: "find low-cost
+> small computers". It was not looked up for the user's latest message…
+
+so the model can use them without presenting them as a search it just ran,
+and knows how old a price in them is. The panel says when it happened:
+
+```
+Carried sources   5 page(s) from an earlier turn, fetched … for "find low-cost small computers"
+```
+
+`WEB_CARRY_TURNS` (default `3`) is how many follow-ups in a row may be given
+the same pages — enough for the rank, tabulate, ask-again run a search
+usually starts. A fresh search replaces them and starts the count again; a
+search that finds nothing ends the chain, so pages about an old question do
+not reappear after a new one. It counts turns rather than judging topics, so
+a fourth follow-up gets nothing even if it is still on the subject — ask it to
+search, or raise the number. `0` turns it off. Needs history (pages are kept
+with the reply in `chat.db`, never sent to the browser) and the Web toggle on.
 
 None of this makes a small model read its context. In that conversation the
 model was handed `$100.00` and wrote `$35`; these limit the damage and make it

@@ -301,6 +301,24 @@ def get_web_follow_scope() -> str:
     return value if value in ("site", "any") else "site"
 
 
+def get_web_carry_turns() -> int:
+    """How many follow-ups may be answered from an earlier turn's pages.
+
+    A follow-up that does not search — "rank them", "put that in a table" —
+    used to get no pages at all, only the previous reply's prose about them.
+    So it ranked whatever that prose said, including anything the model had
+    made up, and could not check a single figure. With this, it is given the
+    pages the earlier answer came from, labelled as retrieved earlier and for a
+    different question.
+
+    3 by default: enough for the rank-then-tabulate-then-ask-again run of
+    follow-ups that a search usually starts, short enough that pages about one
+    topic do not trail into a conversation that has moved on. A fresh search
+    replaces them whenever one happens. 0 turns it off.
+    """
+    return max(0, min(10, int(_number("WEB_CARRY_TURNS", 3))))
+
+
 def get_web_links_in_context() -> int:
     """How many linked pages to list per document, before the budget trims it.
 

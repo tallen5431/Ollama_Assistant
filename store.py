@@ -111,6 +111,11 @@ _ADDED_COLUMNS = (
     # model's own admission that it was estimating, and the only honest way to
     # tidy a record is to still have what it said before.
     ("records", "raw", "TEXT"),
+    # The pages a reply was answered from, so that a follow-up which does not
+    # search — "rank them", "put that in a table" — can be answered from the
+    # same pages rather than from the previous reply's prose about them.
+    # Server-side only: never sent to the browser, which has the Sources list.
+    ("messages", "context", "TEXT"),
 )
 
 _TITLE_MAX = 60
@@ -387,6 +392,10 @@ def add_message(
 # thread of them does not become the database. Truncated rather than dropped:
 # the beginning of a scratchpad is the part that says what it decided to do.
 _THINKING_MAX = 20000
+# A turn's pages, as stored for the next one. The fetch caps keep a page near
+# 6,000 characters and a turn at eight at most, so this is a backstop for a
+# malformed blob rather than a limit anything should meet in practice.
+_CONTEXT_MAX = 120_000
 
 
 def save_turn(
@@ -396,8 +405,13 @@ def save_turn(
     sources: Optional[List[Dict[str, str]]] = None,
     thinking: str = "",
     steps: Optional[List[Dict[str, Any]]] = None,
+    context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Write a question and its answer together, or write neither.
+
+    ``context`` is the pages the answer was given, for last_context to hand to
+    the next turn. Stored with the reply because it belongs to the reply: a
+    turn deleted, or a thread deleted, takes its pages with it.
 
     The browser used to save both, after the stream finished. That is fine
     until the tab is not there when it finishes — a phone that locks past its
@@ -435,14 +449,19 @@ def save_turn(
              json.dumps(meta) if meta and any(meta) else None, now),
         )
         kept_thinking = (thinking or "")[:_THINKING_MAX] or None
+        kept_context = json.dumps(context) if context else None
+        if kept_context and len(kept_context) > _CONTEXT_MAX:
+            # Better none than a truncated blob that no longer parses.
+            kept_context = None
         conn.execute(
             "INSERT INTO messages"
             " (conversation_id, seq, role, content, images, sources, image_meta,"
-            "  thinking, steps, created_at)"
-            " VALUES (?, ?, 'assistant', ?, NULL, ?, NULL, ?, ?, ?)",
+            "  thinking, steps, context, created_at)"
+            " VALUES (?, ?, 'assistant', ?, NULL, ?, NULL, ?, ?, ?, ?)",
             (convo_id, seq + 1, reply,
              json.dumps(sources) if sources else None,
-             kept_thinking, json.dumps(steps) if steps else None, now),
+             kept_thinking, json.dumps(steps) if steps else None,
+             kept_context, now),
         )
         if row["title"] in ("", "New chat"):
             conn.execute(
@@ -454,6 +473,25 @@ def save_turn(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?", (now, convo_id)
             )
     return True
+
+
+def last_context(convo_id: str) -> Optional[Dict[str, Any]]:
+    """The pages the conversation's most recent reply was answered from.
+
+    The most recent reply only, not the most recent one that had any: a reply
+    that carried nothing ends the chain, so pages from three topics ago cannot
+    reappear after a turn that moved on. None when there is nothing to carry,
+    including when that reply could not be read back.
+    """
+    if not convo_id:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT context FROM messages WHERE conversation_id = ?"
+            " AND role = 'assistant' ORDER BY seq DESC LIMIT 1", (convo_id,),
+        ).fetchone()
+    found = _loads(row["context"]) if row else None
+    return found if isinstance(found, dict) else None
 
 
 def is_empty(convo_id: str) -> bool:
