@@ -64,6 +64,7 @@ from config import (
     get_vision_model,
     get_web_fetch_hops,
     get_web_follow_links,
+    get_web_carry_turns,
     get_web_follow_on_search,
     get_web_follow_scope,
     get_web_max_hops,
@@ -815,6 +816,8 @@ def api_chat() -> Any:
     thinking: List[str] = []
     kept_steps: List[Dict[str, Any]] = []
     kept_sources: List[Dict[str, str]] = []
+    # The pages this reply was answered from, saved with it for the next turn.
+    kept_context: Dict[str, Any] = {}
 
     # Streaming path — pass Ollama's NDJSON lines straight through, preceded by
     # any web-grounding progress. Any failure (including one raised mid-stream
@@ -955,6 +958,8 @@ def api_chat() -> Any:
             # What the search turned up, read or not, for checking the reply's
             # links against.
             found: List[str] = []
+            # Set when this turn's pages were carried from an earlier one.
+            carried: Optional[Dict[str, Any]] = None
             link_ids: Dict[str, Dict[str, str]] = {}
             hops = 0
             # The conversation *without* the page context, kept so that a hop
@@ -970,6 +975,23 @@ def api_chat() -> Any:
                                         photo_note=photo_note):
                     yield line
                 found.extend(outcome.get("found") or [])
+                # A follow-up that did not search — "rank them", "in a table" —
+                # used to get no pages at all, only the previous reply's prose
+                # about them, so it ranked whatever that prose said, inventions
+                # included. Given the pages that reply came from, labelled as
+                # fetched earlier and for a different question.
+                if not documents and not outcome.get("attempted"):
+                    carried = _carried_context(convo_id)
+                    if carried:
+                        documents.extend(carried["documents"])
+                        found.extend(carried["found"])
+                        yield _step(
+                            "Carried sources",
+                            f"{len(carried['documents'])} page(s) from an earlier "
+                            f"turn, fetched {carried['when']} for "
+                            f"\u201c{carried['question'][:80]}\u201d — no search "
+                            "this turn, so these are what it was given",
+                            urls=[d.get("url", "") for d in carried["documents"]])
                 if not documents and outcome.get("attempted"):
                     # Retrieval ran and produced nothing. Say so, or the answer
                     # comes back from stale memory sounding exactly like a
@@ -983,7 +1005,8 @@ def api_chat() -> Any:
                     grounded = convo
                     hops = get_web_fetch_hops()
                     convo = web.with_context(
-                        convo, _web_context(documents, turns, link_ids, hops, failed))
+                        convo, _web_context(documents, turns, link_ids, hops, failed,
+                                             carried))
                     kept_sources.extend(
                         {"url": d["url"], "title": d["title"]} for d in documents)
                     yield _line({"sources": list(kept_sources)})
@@ -1088,13 +1111,24 @@ def api_chat() -> Any:
                 # is never invited to ask for something it cannot be given.
                 hops = max(0, hops - 1)
                 convo = web.with_context(
-                    grounded, _web_context(documents, turns, link_ids, hops, failed))
+                    grounded, _web_context(documents, turns, link_ids, hops, failed,
+                                             carried))
 
             # Links the reply gave that this turn's retrieval did not. Checked
             # only where something was retrieved, because that is where an
             # invented link sits beside a Sources line and borrows its
             # credibility — the case that was seen, three of four purchase
             # links from memory, with prices to match.
+            # Saved with the reply, so the next turn can be given the same
+            # pages. Carried pages keep the question and time they were
+            # fetched for, and count one more turn towards their limit.
+            if documents:
+                kept_context.update(web.to_carry(
+                    documents, found,
+                    carried["question"] if carried else web.last_user_text(turns),
+                    carried=carried["carried"] + 1 if carried else 0,
+                    when=carried["when"] if carried else ""))
+
             if documents:
                 unchecked = web.unchecked_links("".join(answer), documents,
                                                 found, turns)
@@ -1148,7 +1182,7 @@ def api_chat() -> Any:
                 # as "the reply did not survive", about a reply sitting in the
                 # database milliseconds later.
                 _keep_turn(convo_id, last_user, "".join(answer), kept_sources,
-                           "".join(thinking), kept_steps)
+                           "".join(thinking), kept_steps, kept_context)
             finally:
                 # Nested, because a turn left registered forever would break
                 # Stop and /api/chat/status for that conversation for the life
@@ -1230,7 +1264,8 @@ def _message_field(line: str, field: str) -> str:
 
 def _keep_turn(convo_id: Optional[str], user: Dict[str, Any], reply: str,
                sources: List[Dict[str, str]], thinking: str = "",
-               steps: Optional[List[Dict[str, Any]]] = None) -> None:
+               steps: Optional[List[Dict[str, Any]]] = None,
+               context: Optional[Dict[str, Any]] = None) -> None:
     """Write the question and its answer down. Never raises into the stream."""
     if not convo_id:
         return
@@ -1242,9 +1277,31 @@ def _keep_turn(convo_id: Optional[str], user: Dict[str, Any], reply: str,
         return
     try:
         store.save_turn(convo_id, user, text, sources or None,
-                        thinking=thinking, steps=steps or None)
+                        thinking=thinking, steps=steps or None,
+                        context=context or None)
     except Exception:  # noqa: BLE001 - history is the extra, never the turn
         logger.exception("Could not save the turn to %s", convo_id)
+
+
+def _carried_context(convo_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The previous reply's pages, if a follow-up may still be given them.
+
+    None without a stored thread (there is nowhere they could have been kept),
+    with WEB_CARRY_TURNS at 0, once they have been carried as many turns as it
+    allows, or when the store cannot be read — this is an enhancement, and a
+    turn must not fail because history is unavailable.
+    """
+    limit = get_web_carry_turns()
+    if not convo_id or limit < 1:
+        return None
+    try:
+        carried = web.from_carry(store.last_context(convo_id))
+    except Exception:  # noqa: BLE001 - history is the extra, never the turn
+        logger.exception("Could not read the previous turn's pages for %s", convo_id)
+        return None
+    if not carried or carried["carried"] >= limit:
+        return None
+    return carried
 
 
 def _line(obj: Dict[str, Any]) -> str:
@@ -1342,6 +1399,7 @@ def _web_context(
     link_ids: Dict[str, Dict[str, str]],
     hops: int,
     failed: Optional[List[str]] = None,
+    carried: Optional[Dict[str, Any]] = None,
 ) -> str:
     """The fenced page block, with the link numbering it hands back recorded.
 
@@ -1357,6 +1415,7 @@ def _web_context(
         link_ids=link_ids,
         may_fetch=hops > 0,
         failed=failed,
+        carried=carried,
     )
 
 
