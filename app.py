@@ -795,7 +795,7 @@ def api_chat() -> Any:
     # Non-streaming path — single JSON object.
     if body.get("stream") is False:
         try:
-            reply = ollama_chat(model, web.strip_image_meta(messages))
+            reply = ollama_chat(model, web.defend_history(web.strip_image_meta(messages)))
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 502
         return jsonify({"model": model, "reply": reply})
@@ -863,7 +863,11 @@ def api_chat() -> Any:
             # switch (WEB_SHARE_LOCATION).
             photo_note = web.metadata_note(photo_meta,
                                            with_location=get_share_photo_location())
-            turns = web.strip_image_meta(messages)
+            # The model's earlier replies go back without the scaffolding they
+            # imitated. A reply that opened with a forged "BEGIN WEB RESULTS"
+            # was otherwise read on the next turn as retrieved material — and a
+            # turn that fetched nothing answered "based on the search results".
+            turns = web.defend_history(web.strip_image_meta(messages))
 
             # Only the most recent image-bearing turn keeps its payload. A
             # vision model otherwise re-reads every screenshot in the thread on
@@ -946,6 +950,11 @@ def api_chat() -> Any:
             # Where the numbered links point, and how many times the model may
             # still ask for one. Both empty unless a web turn fills them in.
             documents: List[Dict[str, str]] = []
+            # Pages tried and not read, told to the model as well as the panel.
+            failed: List[str] = []
+            # What the search turned up, read or not, for checking the reply's
+            # links against.
+            found: List[str] = []
             link_ids: Dict[str, Dict[str, str]] = {}
             hops = 0
             # The conversation *without* the page context, kept so that a hop
@@ -955,16 +964,18 @@ def api_chat() -> Any:
             grounded = convo
 
             if use_web:
-                outcome: Dict[str, bool] = {}
+                outcome: Dict[str, Any] = {}
                 for line in _gather_web(model, turns, documents, transcript, outcome,
+                                        failed=failed,
                                         photo_note=photo_note):
                     yield line
+                found.extend(outcome.get("found") or [])
                 if not documents and outcome.get("attempted"):
                     # Retrieval ran and produced nothing. Say so, or the answer
                     # comes back from stale memory sounding exactly like a
                     # sourced one — the worst possible failure mode for a
                     # feature whose whole point is not guessing.
-                    convo = web.with_context(convo, web.no_results_context())
+                    convo = web.with_context(convo, web.no_results_context(failed))
                 if documents:
                     # Layer the page context on whatever the image already added,
                     # bounded so the pages cannot crowd the conversation out of
@@ -972,7 +983,7 @@ def api_chat() -> Any:
                     grounded = convo
                     hops = get_web_fetch_hops()
                     convo = web.with_context(
-                        convo, _web_context(documents, turns, link_ids, hops))
+                        convo, _web_context(documents, turns, link_ids, hops, failed))
                     kept_sources.extend(
                         {"url": d["url"], "title": d["title"]} for d in documents)
                     yield _line({"sources": list(kept_sources)})
@@ -1046,7 +1057,8 @@ def api_chat() -> Any:
                 # with more than one hop the model can ask for the same page
                 # twice — which fetched it twice, listed it twice as a source,
                 # and spent the last hop learning nothing.
-                elif any(link["url"] in (d.get("url"), d.get("requested"))
+                elif any(web.url_key(link["url"]) in
+                         (web.url_key(d.get("url") or ""), web.url_key(d.get("requested") or ""))
                          for d in documents):
                     yield _step("Asked to read a link",
                                 f"[{wanted}] has already been read")
@@ -1061,6 +1073,7 @@ def api_chat() -> Any:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("Fetching requested link %s failed: %s",
                                        link["url"], exc)
+                        failed.append(f"{link['url']} — {exc}")
                         yield _line({"status": f"Could not read {_host_of(link['url'])}."})
                         yield _step("Asked to read a link",
                                     f"[{wanted}] {link['url']} — {exc}")
@@ -1075,7 +1088,21 @@ def api_chat() -> Any:
                 # is never invited to ask for something it cannot be given.
                 hops = max(0, hops - 1)
                 convo = web.with_context(
-                    grounded, _web_context(documents, turns, link_ids, hops))
+                    grounded, _web_context(documents, turns, link_ids, hops, failed))
+
+            # Links the reply gave that this turn's retrieval did not. Checked
+            # only where something was retrieved, because that is where an
+            # invented link sits beside a Sources line and borrows its
+            # credibility — the case that was seen, three of four purchase
+            # links from memory, with prices to match.
+            if documents:
+                unchecked = web.unchecked_links("".join(answer), documents,
+                                                found, turns)
+                if unchecked:
+                    yield _step("Links in the reply",
+                                f"{len(unchecked)} not from what was searched or read "
+                                "— check before using",
+                                urls=unchecked)
         except Exception as exc:  # noqa: BLE001 - surface any error to the client
             logger.exception("Chat stream failed")
             message = str(exc) or exc.__class__.__name__
@@ -1314,6 +1341,7 @@ def _web_context(
     turns: List[Dict[str, str]],
     link_ids: Dict[str, Dict[str, str]],
     hops: int,
+    failed: Optional[List[str]] = None,
 ) -> str:
     """The fenced page block, with the link numbering it hands back recorded.
 
@@ -1328,6 +1356,7 @@ def _web_context(
         question=web.last_user_text(turns),
         link_ids=link_ids,
         may_fetch=hops > 0,
+        failed=failed,
     )
 
 
@@ -1430,16 +1459,18 @@ def _link_candidates(
     model calls to answer one question, and it cannot see that the best link on
     the whole turn was on page two.
     """
-    seen = {d.get("url") for d in documents} | {d.get("requested") for d in documents}
+    # Keyed, so the clean URL of a page already read under a tracking variant
+    # is recognised as read — it was being chosen and fetched a second time.
+    seen = {web.url_key(d.get(k) or "") for d in documents for k in ("url", "requested")}
     pool: List[Dict[str, str]] = []
     for source in sources:
         for link in (source.get("links") or []):
             url = link.get("url")
             # followable(), not same_site(): what may be *opened* is a stricter
             # question than what may be listed, and it has its own setting.
-            if not url or url in seen or not web.followable(source, link):
+            if not url or web.url_key(url) in seen or not web.followable(source, link):
                 continue
-            seen.add(url)
+            seen.add(web.url_key(url))
             pool.append(link)
     # No `here`: these come from several pages at once, so a same-site bonus
     # would mean "same site as whichever page this link happened to be on",
@@ -1454,6 +1485,7 @@ def _follow_links(
     documents: List[Dict[str, str]],
     budget: int,
     report_empty: bool = False,
+    failed: Optional[List[str]] = None,
 ) -> Any:
     """Open a couple of the pages ``sources`` link to, if any look relevant.
 
@@ -1498,6 +1530,8 @@ def _follow_links(
     yield _line({"status": "Following: " + " · ".join(c["text"][:40] for c in chosen)})
     fetched, failures = _run_all(web.fetch, [c["url"] for c in chosen])
     documents.extend(fetched)
+    if failed is not None:
+        failed.extend(failures)
     if failures and not fetched:
         yield _line({"status": "Could not read the linked pages."})
     yield _step("Followed links",
@@ -1511,6 +1545,7 @@ def _deepen(
     model: str,
     question: str,
     documents: List[Dict[str, str]],
+    failed: Optional[List[str]] = None,
 ) -> Any:
     """Follow links outward from what has been retrieved, up to the hop limit.
 
@@ -1531,7 +1566,8 @@ def _deepen(
         if not frontier or room < 1:
             return
         fetched = yield from _follow_links(model, question, frontier, documents,
-                                           min(budget, room), report_empty=hop == 0)
+                                           min(budget, room), report_empty=hop == 0,
+                                           failed=failed)
         if not fetched:
             return          # nothing chosen or nothing readable; no deeper to go
         frontier = fetched
@@ -1544,6 +1580,7 @@ def _gather_web(
     transcript: Optional[str] = None,
     outcome: Optional[Dict[str, bool]] = None,
     photo_note: str = "",
+    failed: Optional[List[str]] = None,
 ) -> Any:
     """Collect web documents for this turn, yielding progress lines as it goes.
 
@@ -1558,6 +1595,8 @@ def _gather_web(
     """
     if outcome is None:
         outcome = {}
+    if failed is None:
+        failed = []
     question = web.last_user_text(messages)
     urls = web.find_urls(question)
     if urls:
@@ -1567,6 +1606,7 @@ def _gather_web(
             try:
                 documents.append(web.fetch(url))
             except web.WebError as exc:
+                failed.append(str(exc))
                 yield _line({"status": str(exc)})
 
         # A linked page is rarely self-contained: a wiki article answers half
@@ -1574,7 +1614,7 @@ def _gather_web(
         # model which of its links are worth opening, and follow a couple.
         # Only within the same site by default — following a model's pick of an
         # arbitrary outbound link is a much larger surface for very little gain.
-        yield from _deepen(model, question, documents)
+        yield from _deepen(model, question, documents, failed)
         # Deliberately not distilled. A page reached by searching is one this
         # app chose, and cutting it down to the question it was chosen to
         # answer loses nothing. A page the *user* pasted is a deliberate act,
@@ -1660,8 +1700,12 @@ def _gather_web(
     # Only alongside an image attached to *this* turn, for the same reason the
     # transcription is gated that way: last week's photo should not still be
     # steering today's queries.
+    # A request for a source or a link is one an answer from memory cannot
+    # meet, so "no search needed" is not an option the planner is given.
+    must = web.wants_source(question)
     queries = web.plan_searches(messages, model, image_note=image_note,
-                                photo_note=photo_note if images else "")
+                                photo_note=photo_note if images else "",
+                                must_search=must)
     if queries is None:
         yield _line({"status": "Could not plan a search; answering without one."})
         yield _step("Planned searches", "the planner could not be reached")
@@ -1673,7 +1717,9 @@ def _gather_web(
         return
 
     outcome["attempted"] = True
-    yield _step("Planned searches", " · ".join(queries))
+    yield _step("Planned searches", " · ".join(queries)
+                + (" (a search was required: the message asks for a source or link)"
+                   if must else ""))
     yield _line({"status": "Searching: " + " · ".join(queries)})
     # Concurrently: three searches then several fetches, run one after another,
     # each with its own timeout, is the sum of every round trip before the user
@@ -1684,6 +1730,9 @@ def _gather_web(
     # Interleave so each query contributes, then fetch more candidates than
     # needed since some will be paywalled, JS-only, or plain unreachable.
     results = web.merge_results(groups, limit=max_docs * 2)
+    # Every result found, read or not: a link the model gives to one of these
+    # is real, even if this turn never opened it.
+    outcome["found"] = [r["url"] for r in results if r.get("url")]
     # Deduped: three queries hitting the same broken backend produced the same
     # sentence three times, which reads as three different problems.
     unique: List[str] = []
@@ -1701,6 +1750,7 @@ def _gather_web(
     urls = [r["url"] for r in results]
     yield _line({"status": "Reading " + ", ".join(_host_of(u) for u in urls[:max_docs]) + "…"})
     fetched, fetch_failures = _run_all(web.fetch, urls, enough=max_docs)
+    failed.extend(fetch_failures)
     documents.extend(fetched[:max_docs])
     yield _step("Pages read", f"{len(fetched)} of {len(urls)} tried"
                 + (f"; failures: {'; '.join(fetch_failures[:4])}" if fetch_failures else ""),
@@ -1713,7 +1763,7 @@ def _gather_web(
     # picker is only ever offered pages that were actually read — a snippet has
     # no links, and its own URL is already a document.
     if get_web_follow_on_search():
-        yield from _deepen(model, question, documents)
+        yield from _deepen(model, question, documents, failed)
 
     # Paywalled, JS-only and dead pages are routine. Their search snippets are
     # already paid for, so use them to fill out the budget rather than throwing
@@ -1769,27 +1819,32 @@ def _distil_documents(question: str, documents: List[Dict[str, str]],
     def one(pair: Any) -> Any:
         index, doc = pair
         try:
-            return index, web.distil(question, doc, distiller, answering_model=model)
+            return (index, *web.distil_why(question, doc, distiller,
+                                           answering_model=model))
         except Exception:  # noqa: BLE001 - distil reports its own; this is the belt
             logger.exception("Distilling %s failed", doc.get("url"))
-            return index, None
+            return index, None, web.KEPT_UNREACHABLE
 
     # Concurrently, like the fetches: one slow page must not serialise the rest.
     done, _ = _run_all(one, list(enumerate(pages)))
-    shortened = {index: text for index, text in done if text}
-    kept = 0
+    shortened = {index: text for index, text, _ in done if text}
+    # Why each page that was not cut down was kept whole. A page _run_all
+    # never reported back at all was not asked, as far as anything here knows.
+    why = {index: reason for index, text, reason in done if not text}
+    reasons: List[str] = []
     for index, doc in enumerate(pages):
         short = shortened.get(index)
         if short:
             doc["text"] = short
             doc["distilled"] = True
         else:
-            kept += 1
+            reasons.append(why.get(index) or web.KEPT_NOT_ASKED)
+    kept = len(reasons)
     after = [len(d.get("text") or "") for d in pages]
     yield _step(
         "Distilled",
         f"{distiller}: {sum(before)} → {sum(after)} characters"
-        + (f"; {kept} page(s) kept in full because it could not be asked" if kept else ""),
+        + (f"; {kept} page(s) kept in full — {_kept_because(reasons)}" if kept else ""),
         # Bounded, like every other step that carries bulk text ("Sent to the
         # model" slices 2000, the image reads 600). This one showed each page's
         # text whole — and on the path where the distiller could not be asked,
@@ -1797,8 +1852,23 @@ def _distil_documents(question: str, documents: List[Dict[str, str]],
         # the browser and written into chat.db on every web turn, on exactly
         # the turns where distilling achieved nothing.
         text="\n\n".join(
-            f"{d.get('url', '')}\n{b} → {a} chars\n{_clipped(d.get('text') or '')}"
-            for d, b, a in zip(pages, before, after)))
+            f"{d.get('url', '')}\n{b} → {a} chars"
+            + ("" if i in shortened else
+               f" (kept in full: the distiller {why.get(i) or web.KEPT_NOT_ASKED})")
+            + f"\n{_clipped(d.get('text') or '')}"
+            for i, (d, b, a) in enumerate(zip(pages, before, after))))
+
+
+def _kept_because(reasons: List[str]) -> str:
+    """Why pages were kept whole, as one clause — "the distiller returned
+    nothing", or with counts where the pages failed differently."""
+    counts: Dict[str, int] = {}
+    for reason in reasons:
+        counts[reason] = counts.get(reason, 0) + 1
+    if len(counts) == 1:
+        return f"the distiller {reasons[0]}"
+    return "the distiller " + ", ".join(
+        f"{reason} ({n})" for reason, n in counts.items())
 
 
 # Enough of a distillation to judge it by, which is the panel's whole job. A

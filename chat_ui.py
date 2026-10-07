@@ -234,6 +234,10 @@ _PAGE = r"""<!doctype html>
       .sources { font-size:var(--fs-xs); color:var(--muted); margin:0.35rem 0.4rem 0; }
       .sources a { color:var(--muted); text-decoration:underline; }
       .sources a:hover { color:var(--text); }
+      /* Same weight as Sources, so it reads as part of the same footnote — and
+         the ⚠ is what sets it apart, not a colour a theme might lose. */
+      .linkwarn { font-size:var(--fs-xs); color:var(--muted); margin:0.2rem 0.4rem 0;
+                  overflow-wrap:anywhere; }
       .webstatus { font-size:var(--fs-xs); color:var(--muted); font-style:italic;
         margin:0 0.4rem 0.3rem; }
       details.think {
@@ -1513,6 +1517,23 @@ _PAGE = r"""<!doctype html>
           row.appendChild(more);
         }
         view.stepsBody.appendChild(row);
+        if (entry.step === "Links in the reply") showLinkWarning(view, entry);
+      }
+
+      // Links the reply gave that the search did not. Said under the reply, next
+      // to Sources, rather than only in the panel: a Sources line beside a link
+      // reads as "this link was checked", and three of four purchase links in
+      // one real reply had come from the model's memory, prices included.
+      // Plain text, not clickable — the point is to check them first.
+      function showLinkWarning(view, entry) {
+        if (!view || !view.sources || !entry.urls || !entry.urls.length) return;
+        const line = document.createElement("div");
+        line.className = "linkwarn";
+        line.textContent = "⚠ " + entry.urls.length + " link"
+          + (entry.urls.length === 1 ? "" : "s")
+          + " in this reply didn't come from what was searched or read — "
+          + "check before using: " + entry.urls.join(" · ");
+        view.sources.insertAdjacentElement("afterend", line);
       }
 
       // Split assistant text into visible content + inline <think> reasoning.

@@ -558,6 +558,20 @@ latency than the context it saves is worth. **Show what it did** gets a
 **Distilled** line with the before and after, so you can judge both the saving
 and the quality yourself.
 
+When a page is kept whole, the line says **why**, because the five reasons
+want different fixes:
+
+| The panel says the distiller… | What to try |
+| --- | --- |
+| could not be reached | Is it installed, and does it fit in VRAM beside the answering model? |
+| ran out of room mid-thought | It is thinking despite being asked not to — use a non-reasoning model |
+| returned nothing | Usually the same as the line above, or a model that is still loading |
+| answered in its own words rather than copying the page | It is paraphrasing; a different small model may follow "copy" better |
+| was not asked | The page had no text to cut |
+
+These used to be one phrase — *"kept in full because it could not be asked"* —
+and five pages out of five failing looked identical whichever it was.
+
 ### Looking at a photo before searching for it
 
 An OCR model is the right reader for a screenshot and the wrong one for a
@@ -638,6 +652,66 @@ following will silently never happen on that model (use a small non-reasoning
 model for `WEB_PLANNER_MODEL`), and a malformed `FETCH` means the marker would
 reach the user instead of an answer (leave `WEB_FETCH_HOPS` at `0` on that
 model).
+
+### Keeping the answer tied to what was found
+
+Everything in this section came from one real seven-turn conversation about
+cheap small computers. Retrieval mostly worked — on one turn the distiller
+pulled `PI4-4GB $100.00` straight off the retailer's page — and the reply still
+said `$35`, with three purchase links that were not from the search. The
+failures were downstream of retrieval, and several were the app's own.
+
+**An earlier reply cannot pass for a source.** Asked to find small computers,
+the model began its reply with `----- BEGIN WEB RESULTS -----` and labelled its
+own list `search result summary` — the app's own marker and label. That reply
+went back into the next turn untouched, and the next turn, which fetched
+nothing at all, opened *"Based on the search results, I've compiled…"*. It
+ranked its own invention, tabulated it, and was then asked for a source for it.
+Earlier replies now go back to the model without the fence lines and source
+labels they imitated; their actual words are kept.
+
+**One page is one page.** Google appends a tracking parameter (`srsltid=…`)
+to its result links, and one product page came back as two such variants and
+then again as a followed link — three of the five document slots. Duplicates
+are now compared with tracking parameters, fragments, `www.` and trailing
+slashes ignored. Anything that might choose content (`?id=`, `?ref=`) still
+counts, since merging two different pages is worse than reading one twice.
+
+**Links that did not come from the search are marked.** Under the reply, next
+to Sources:
+
+```
+⚠ 3 links in this reply didn't come from what was searched or read — check before using: …
+```
+
+A link counts as from the search if it was read, was on a page that was read,
+was a search result (read or not — it was found, so it is real), was written
+by you, or is the front page of a site that was read. Only checked on turns
+that retrieved something, since that is where an invented link sits beside a
+Sources line and borrows its credibility.
+
+**The model is told what could not be read.** The official store returned
+`HTTP 403` on four turns running; asked *"let me know if anything goes
+wrong"*, the model said nothing, because it was never told — and on the turn
+before, it gave that store's link and price from memory. Pages that failed are
+now named to the model ahead of the results, with an instruction not to fill
+them in from memory.
+
+**Asking for a source always searches.** *"Source for the pi4b please"* — the
+planner judged that a search would not help, and the model answered with fresh
+specifications from memory and no source. A message asking for a source, a
+citation, a link, or where to buy something now requires a search; the planner
+still writes the queries, so *"source for that"* searches for whatever *that*
+was. Matched on the request, not the word: *source code*, *open source* and
+*link to a library* are left alone. The panel says when this happened:
+
+```
+Planned searches   raspberry pi 4 specifications (a search was required: the message asks for a source or link)
+```
+
+None of this makes a small model read its context. In that conversation the
+model was handed `$100.00` and wrote `$35`; these limit the damage and make it
+visible, and a model that follows its sources is still the larger fix.
 
 ### Search backend
 
