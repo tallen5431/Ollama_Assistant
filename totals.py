@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Totals across a routine's log: by week, by month, and all time.
+"""Across a routine's log: totals by week, by month and all time, and
+whether a new run's odometer readings fit with the rest.
 
 The question a log of trips is kept to answer is "how did this week go", and
 the arithmetic for it has two traps that a spreadsheet's SUM and AVERAGE both
@@ -190,3 +191,77 @@ def week_of(record: Dict[str, Any], records: List[Dict[str, Any]],
     label = ("This week" if start == _week(today)
              else "Week of " + f"{start.day} {start:%b %Y}")
     return dict(_total(same, how, kinds), label=label, columns=how)
+
+
+def _spans(declaration: List[fields.Field], kinds: Dict[str, str]) -> List[Tuple[str, str]]:
+    """``(start, end)`` reading pairs: the two sides of an "End - Start" distance."""
+    out = []
+    for field in declaration:
+        if field.computed and field.op == "-" and \
+                kinds.get(field.left) == kinds.get(field.right) == values.DISTANCE:
+            out.append((field.right, field.left))
+    return out
+
+
+def _span(record: Dict[str, Any], start: str, end: str) -> Optional[Tuple[float, float, str]]:
+    a = values.parse_as(str(record["fields"].get(start, "")), values.DISTANCE, start)
+    b = values.parse_as(str(record["fields"].get(end, "")), values.DISTANCE, end)
+    if not a or not b or a.number > b.number or (a.unit and b.unit and a.unit != b.unit):
+        return None
+    return a.number, b.number, b.unit or a.unit
+
+
+def continuity(record: Dict[str, Any], records: List[Dict[str, Any]],
+               declaration: List[fields.Field], kinds: Dict[str, str],
+               columns: List[str]) -> Optional[Dict[str, Any]]:
+    """How a new run's odometer readings sit against every other run's.
+
+    An odometer only goes up, so two runs cannot share a mile: if this one
+    starts before another one ends and ends after it starts, one of the two
+    was misread, or the same trip was kept twice. That is checked when the run
+    is kept, while the photos are still on screen to check it against —
+    rather than found months later in a column of distances that add up to
+    more than the car has driven.
+
+    And the gap back to the run before is said too: miles the odometer moved
+    between two runs were driven, just not on one, and for a log of paid
+    trips that is the personal or commuting mileage.
+    """
+    out: Dict[str, Any] = {"overlaps": [], "since": ""}
+    for start, end in _spans(declaration, kinds):
+        mine = _span(record, start, end)
+        if not mine:
+            continue
+        before: Optional[Tuple[float, Dict[str, Any]]] = None
+        for other in records:
+            if other["id"] == record["id"]:
+                continue
+            theirs = _span(other, start, end)
+            if not theirs or theirs[2] != mine[2]:
+                continue
+            day = day_of(other, kinds, columns)[0]
+            when = f"{day.day} {day:%b}"
+            if (theirs[0], theirs[1]) == (mine[0], mine[1]):
+                out["overlaps"].append(
+                    f"{start} and {end}: the same readings as the run kept for "
+                    f"{when} — kept twice?")
+            elif mine[0] < theirs[1] and theirs[0] < mine[1]:
+                out["overlaps"].append(
+                    f"{start} {_reading(mine[0])} to {end} "
+                    f"{_reading(mine[1])} overlaps the run kept for {when} "
+                    f"({_reading(theirs[0])} to {_reading(theirs[1])}) "
+                    "— an odometer only goes up, so one of them is misread")
+            elif theirs[1] <= mine[0] and (before is None or theirs[1] > before[0]):
+                before = (theirs[1], other)
+        # Not beside an overlap: a gap measured from a run that may be the
+        # misread one is a figure built on the thing in question.
+        if before and not out["since"] and not out["overlaps"]:
+            day = day_of(before[1], kinds, columns)[0]
+            gap = mine[0] - before[0]
+            out["since"] = (f"{values.render(values.DISTANCE, gap, '$', mine[2])} on the "
+                            f"odometer since the run kept for {day.day} {day:%b}")
+    return out if out["overlaps"] or out["since"] else None
+
+
+def _reading(number: float) -> str:
+    return f"{number:,.0f}" if number == int(number) else f"{number:,}"

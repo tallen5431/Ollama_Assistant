@@ -209,3 +209,55 @@ class TestThePage:
         body = page[page.index("function showWeek"):]
         body = body[:body.index("\n      }\n")]
         assert "line.textContent =" in body and "innerHTML" not in body
+
+
+class TestTheOdometerOnlyGoesUp:
+    LOG = [trip("2026-10-20 18:34", 107381, 33, 3, 71.11, "a"),
+           trip("2026-10-20 14:00", 107298, 77, 4, 82.06, "b")]
+
+    def check(self, start, end):
+        new = trip("2026-10-22 13:49", start, end - start, 7, 177.61, "new")
+        return totals.continuity(new, self.LOG, PARSED, KINDS, COLUMNS)
+
+    def test_a_run_that_starts_where_the_last_ended_says_how_far_between(self):
+        got = self.check(107423, 107558)
+        assert got == {"overlaps": [],
+                       "since": "9 mi on the odometer since the run kept for 20 Oct"}
+
+    def test_an_overlap_is_named_with_both_runs_readings(self):
+        got = self.check(107400, 107450)
+        assert len(got["overlaps"]) == 1
+        assert "107,400" in got["overlaps"][0] and "107,381 to 107,414" in got["overlaps"][0]
+        assert got["since"] == "", "no gap measured from a run that may be the misread one"
+
+    def test_the_same_run_kept_twice(self):
+        got = self.check(107381, 107414)
+        assert got["overlaps"] == ["Start odometer and End odometer: the same readings "
+                                   "as the run kept for 20 Oct — kept twice?"]
+
+    def test_a_run_from_before_the_log_began_is_fine(self):
+        assert self.check(107000, 107100) is None
+
+    def test_runs_end_to_end_do_not_overlap(self):
+        assert self.check(107414, 107500)["overlaps"] == []
+
+    def test_a_routine_with_no_odometer_pair_has_nothing_to_check(self):
+        plain = fields.parse(["Fare: money"])
+        row = {"id": "x", "created_at": 0, "fields": {"Fare": "$3"}}
+        assert totals.continuity(row, [], plain, {"Fare": "money"}, ["Fare"]) is None
+
+    def test_it_comes_back_with_a_kept_run(self, client, monkeypatch):
+        store.create_routine("Trip", "b", record=DECL)
+        for row in self.LOG:
+            store.add_record("Trip", row["fields"])
+        monkeypatch.setattr(ollama_client, "chat", lambda *a, **k: (
+            '{"Start odometer": "107400", "End odometer": "107450", "Total earnings": "$30",'
+            ' "Start time": "2026-10-22 13:49", "End time": "2026-10-22 15:00"}'))
+        out = client.post("/api/records", json={
+            "answer": "a", "fields": DECL, "routine_name": "Trip"}).get_json()
+        assert len(out["continuity"]["overlaps"]) == 1
+
+    def test_the_page_shows_an_overlap_with_the_other_gaps(self):
+        page = chat_ui.render_page("t")
+        assert ".concat(fit.overlaps || [])" in page
+        assert "if (fit.since) showSince(view, fit.since);" in page

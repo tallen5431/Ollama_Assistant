@@ -728,7 +728,10 @@ def api_record_create() -> Any:
                     if kept else None,
                     # How the week stands with this run in it — the question
                     # the log is kept to answer, answered as the run is kept.
-                    "week": _quietly(store.week_so_far, kept) if kept else None})
+                    "week": _quietly(store.week_so_far, kept) if kept else None,
+                    # Whether its odometer readings fit with every other run's,
+                    # checked while the photos are still on screen.
+                    "continuity": _quietly(store.continuity_of, kept) if kept else None})
 
 
 def _quietly(work: Any, *args: Any) -> Any:

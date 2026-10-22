@@ -1016,6 +1016,15 @@ def week_so_far(record: Dict[str, Any], limit: int = 5000) -> Optional[Dict[str,
     return totals.week_of(record, *found)
 
 
+def continuity_of(record: Dict[str, Any], limit: int = 5000) -> Optional[Dict[str, Any]]:
+    """How a just-kept record's odometer readings fit with the rest of its log."""
+    found = _totals_inputs(str(record.get("routine_name") or ""), limit)
+    if not found:
+        return None
+    group, declaration, kinds, columns = found
+    return totals.continuity(record, group, declaration, kinds, columns)
+
+
 def routine_suggestion(routine_id: str) -> Optional[Dict[str, Any]]:
     """The declaration a routine's own prompt describes, if it differs.
 

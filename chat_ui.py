@@ -3921,8 +3921,13 @@ _PAGE = r"""<!doctype html>
           // or because a fare in pounds was added to a tip in dollars — rather
           // than because something broke.
           if (data.record && view) {
+            // An odometer reading that overlaps another run is a gap of the
+            // same sort: something to check while the photos are on screen.
+            const fit = data.continuity || {};
             showKept(view, data.record, routine.record,
-                     (data.gaps || []).concat(data.mismatched || []));
+                     (data.gaps || []).concat(data.mismatched || [])
+                                      .concat(fit.overlaps || []));
+            if (fit.since) showSince(view, fit.since);
             if (data.week) showWeek(view, data.week);
             if (data.suggest) offerFix(view, data.suggest);
           }
@@ -3954,6 +3959,15 @@ _PAGE = r"""<!doctype html>
         note.title = gaps.join("\n");
         note.addEventListener("click", () => openDrawer("records"));
         view.root.appendChild(note);
+      }
+
+      // The odometer's movement since the last run ended: driven, just not on
+      // a run — which in a log of paid trips is the mileage between them.
+      function showSince(view, since) {
+        const line = document.createElement("div");
+        line.className = "kept";
+        line.textContent = "↔ " + since;
+        view.root.appendChild(line);
       }
 
       // How the week stands with this run in it, under the run. The totals
