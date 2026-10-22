@@ -116,6 +116,11 @@ _ADDED_COLUMNS = (
     # same pages rather than from the previous reply's prose about them.
     # Server-side only: never sent to the browser, which has the Sources list.
     ("messages", "context", "TEXT"),
+    # Which of a record's values the app worked out from its readings, rather
+    # than kept as the model wrote them. A JSON list of field names, so the
+    # table can say "worked out" beside the figure it changed — and say what
+    # the model had written there, which is in `raw`.
+    ("records", "checked", "TEXT"),
 )
 
 _TITLE_MAX = 60
@@ -886,8 +891,114 @@ def _record_row(row: sqlite3.Row) -> Dict[str, Any]:
         # Only the fields normalising actually changed, so an untouched record
         # carries nothing extra.
         "raw": raw if isinstance(raw, dict) else {},
+        "checked": _checked_of(row),
         "created_at": row["created_at"],
     }
+
+
+def _checked_of(row: sqlite3.Row) -> List[str]:
+    found = _loads(row["checked"]) if "checked" in row.keys() else None
+    return [str(n) for n in found] if isinstance(found, list) else []
+
+
+def _declaration_for(routine_name: str, routine_id: Optional[str],
+                     conn: sqlite3.Connection) -> List[Any]:
+    """A routine's parsed declaration, by id first and then by name."""
+    row = None
+    if routine_id:
+        row = conn.execute("SELECT record FROM routines WHERE id = ?",
+                           (routine_id,)).fetchone()
+    if row is None and routine_name:
+        row = conn.execute("SELECT record FROM routines WHERE name = ?",
+                           (routine_name,)).fetchone()
+    if row is None or not row["record"]:
+        return []
+    return fields.parse(_record_fields(row["record"]))
+
+
+def _rechecked(record: Dict[str, Any], declaration: List[Any],
+               kinds: Dict[str, str]) -> Optional[tuple]:
+    """``(fields, raw, checked, changes)`` for one record, or None if it is right.
+
+    The model's wording goes to ``raw`` before a value is replaced, unless
+    something earlier already put the very first original there: that one is
+    kept, so a value rechecked twice still remembers what the model wrote.
+    """
+    changed, _ = fields.recompute(declaration, record["fields"], kinds)
+    if not changed:
+        return None
+    merged = dict(record["fields"])
+    raw = dict(record["raw"])
+    for name, value in changed.items():
+        was = record["fields"].get(name, "")
+        if was and name not in raw:
+            raw[name] = was
+        merged[name] = value
+    checked = sorted(set(record["checked"]) | set(changed))
+    changes = [{"field": name, "was": record["fields"].get(name, ""), "now": value}
+               for name, value in changed.items()]
+    return merged, raw, checked, changes
+
+
+def recheck_records(routine_name: str, limit: int = 5000) -> Dict[str, Any]:
+    """Work every record's computed values out again from its own readings.
+
+    A routine whose sums used to be done by a model has a log full of them,
+    and a real one of 27 trips had a fifth of its hourly rates off by more
+    than a rounding error — one by 17%, because the model wrote "2 hours" for
+    a trip its own clock times put at 2h 20m. Once the routine declares those
+    sums, every record kept under it is checked against them: a value that
+    disagrees with its readings is replaced, and the model's wording is kept
+    in ``raw``; a value that agrees, or that cannot be worked out because its
+    inputs were never recorded, is left exactly as it was.
+
+    Runs by itself whenever a routine's declaration is saved, and at startup,
+    so a log only ever needs fixing once. Idempotent: a log already right is
+    not written to.
+    """
+    out: Dict[str, Any] = {"records": 0, "values": 0, "changes": []}
+    if not routine_name or not db_path().exists():
+        return out
+    group = list_records(routine_name, limit=limit)
+    if not group:
+        return out
+    with _connect() as conn:
+        declaration = _declaration_for(routine_name, group[0].get("routine_id"), conn)
+        if not any(f.computed for f in declaration):
+            return out
+        kinds = _column_kinds(routine_name, {}, conn, fields.kinds(declaration))
+    for record in group:
+        result = _rechecked(record, declaration, kinds)
+        if not result:
+            continue
+        merged, raw, checked, changes = result
+        with _connect() as conn:
+            conn.execute("UPDATE records SET fields = ?, raw = ?, checked = ? WHERE id = ?",
+                         (json.dumps(merged), json.dumps(raw) if raw else None,
+                          json.dumps(checked), record["id"]))
+        out["records"] += 1
+        out["values"] += len(changes)
+        out["changes"].extend(dict(c, created_at=record["created_at"]) for c in changes)
+    if out["records"]:
+        logger.info("Rechecked %s: %d value(s) across %d record(s) worked out again",
+                    routine_name, out["values"], out["records"])
+    return out
+
+
+def recheck_all(limit: int = 5000) -> Dict[str, int]:
+    """recheck_records for every routine whose declaration has any sums."""
+    if not db_path().exists():
+        return {"records": 0, "values": 0}
+    with _connect() as conn:
+        names = [r["name"] for r in conn.execute("SELECT name, record FROM routines")
+                 if r["record"] and any(f.computed for f in
+                                        fields.parse(_record_fields(r["record"])))]
+    total = {"records": 0, "values": 0}
+    for name in names:
+        done = recheck_records(name, limit)
+        total["records"] += done["records"]
+        total["values"] += done["values"]
+    return total
 
 
 def _declared_kinds(routine_name: str, routine_id: Optional[str],
@@ -1094,8 +1205,20 @@ def update_record(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         merged, changed = _normalised(merged, kinds)
         raw = {k: v for k, v in current["raw"].items() if k not in clean}
         raw.update({k: v for k, v in changed.items() if k in clean})
-        conn.execute("UPDATE records SET fields = ?, raw = ? WHERE id = ?",
-                     (json.dumps(merged), json.dumps(raw) if raw else None, rid))
+        # A value typed in is the person's, not the app's working.
+        checked = [n for n in current["checked"] if n not in clean]
+        # Correcting a reading corrects everything built on it. Fixing a
+        # misread odometer used to leave the distance, the speed and both
+        # rates still saying what the wrong reading made them.
+        declaration = _declaration_for(current["routine_name"], current["routine_id"], conn)
+        if any(f.computed for f in declaration):
+            again = _rechecked(dict(current, fields=merged, raw=raw, checked=checked),
+                               declaration, kinds)
+            if again:
+                merged, raw, checked, _ = again
+        conn.execute("UPDATE records SET fields = ?, raw = ?, checked = ? WHERE id = ?",
+                     (json.dumps(merged), json.dumps(raw) if raw else None,
+                      json.dumps(checked) if checked else None, rid))
         row = conn.execute("SELECT * FROM records WHERE id = ?", (rid,)).fetchone()
     return _record_row(row) if row else None
 

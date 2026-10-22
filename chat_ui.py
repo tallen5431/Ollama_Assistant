@@ -664,6 +664,10 @@ _PAGE = r"""<!doctype html>
          empty one is information — it means nothing was recorded to work it
          out from — and an unmarked blank just looks like a failure. */
       #recordList .derived { color:var(--muted); font-style:italic; }
+      /* Worked out again from the readings, replacing what a model wrote. The
+         hover says what it had written; the mark says there is something to
+         hover for. */
+      #recordList .checked { border-bottom:1px dashed var(--accent); }
       #recordList .derived:empty::after { content:"—"; opacity:0.5; }
       /* The declaration box is prose-ish, so it gets prose-ish room. */
       #rRecord { min-height:4.5rem; resize:vertical; font-family:inherit; }
@@ -4042,20 +4046,32 @@ _PAGE = r"""<!doctype html>
             // replaced is kept. Show it: a tidy-up you cannot see the before
             // of is one you have to take on faith, and the whole reason the
             // original is stored is so that you do not have to.
+            const was = (record.raw || {})[name];
+            const formula = derivedIn(record.routine_name)[name];
+            // A sum, as opposed to "= earliest photo taken", which is a reading.
+            // The same operators the server reads, typed or pasted.
+            const sum = !!formula && /\s[-+*\/÷×−]\s/.test(formula);
             // Editable, because the fields were pulled out of prose by a model
-            // and a log you cannot correct is one you stop trusting.
-            td.contentEditable = "true";
-            td.className = "editable";
+            // and a log you cannot correct is one you stop trusting — except a
+            // sum, which is worked out from the others. Correct a reading and
+            // the server works the sums out again; typing over a sum would be
+            // undone by the next recheck, which is worse than not offering it.
+            td.contentEditable = sum ? "false" : "true";
+            td.className = sum ? "" : "editable";
             // After className, not before: assigning it wholesale drops any
             // class added first, which is how the marker below silently never
             // appeared the first time this was written.
-            const was = (record.raw || {})[name];
-            const formula = derivedIn(record.routine_name)[name];
-            if (was) {
+            const checked = (record.checked || []).indexOf(name) >= 0;
+            if (formula) td.classList.add("derived");
+            if (checked) {
+              td.classList.add("checked");
+              td.title = "Worked out from this record's readings ("
+                + formula + ")" + (was ? " — the model had written: " + was
+                                       : " — it was blank");
+            } else if (was) {
               td.title = "As it was recorded: " + was;
               td.classList.add("tidied");
             } else if (formula) {
-              td.classList.add("derived");
               td.title = (record.fields[name] ? "Worked out as " : "Nothing to work it "
                           + "out from — needs ") + formula;
             }
@@ -4103,9 +4119,19 @@ _PAGE = r"""<!doctype html>
         const fields = {};
         fields[name] = value;
         try {
-          await fetch("api/records/" + id, {
+          const resp = await fetch("api/records/" + id, {
             method: "PATCH", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ fields: fields }) });
+          if (!resp.ok) return;
+          const saved = (await resp.json()).record;
+          // Correcting a reading changes what is built on it — the distance,
+          // the speed, both rates — so the row is redrawn from what the server
+          // worked out, rather than left showing figures from the old reading.
+          const at = records.findIndex(r => r.id === id);
+          if (saved && at >= 0) {
+            records[at] = saved;
+            renderRecords();
+          }
         } catch (e) { /* the cell already shows what you typed */ }
       }
 
@@ -4272,12 +4298,28 @@ _PAGE = r"""<!doctype html>
               kept.body.length + " characters.";
             return;
           }
+          // It exists now, so the editor stays on it. Left as "" a new routine
+          // with a warning below stayed a new one, and fixing the typo and
+          // saving again made a second routine of the same name.
+          if (!editingRoutineId && kept && kept.id) editingRoutineId = kept.id;
           // Saved either way, and said here rather than discovered later. A
           // formula naming a field that does not exist is an error nowhere: it
           // computes to nothing every run, and an empty column looks exactly
           // like a run with no data. One typo, found in a month of records.
-          if (saved.problems && saved.problems.length) {
-            routineWarnEl.textContent = "Saved. " + saved.problems.join(" ");
+          const notes = (saved.problems || []).slice();
+          // Saving the sums reworks the log kept before them. Said out loud,
+          // because figures in old records changing without a word is exactly
+          // what makes a log stop being trusted.
+          const re = saved.rechecked || {};
+          if (re.records) {
+            notes.push(re.values + " value" + (re.values === 1 ? "" : "s") + " in " +
+              re.records + " kept record" + (re.records === 1 ? "" : "s") +
+              " worked out again from their readings — hover a marked cell in " +
+              "Records for what was there before.");
+          }
+          if (notes.length) {
+            routineWarnEl.textContent = "Saved. " + notes.join(" ");
+            await refreshRoutines();
             return;
           }
         } catch (e) {

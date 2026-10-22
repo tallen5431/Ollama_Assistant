@@ -190,6 +190,15 @@ try:
 except Exception:  # noqa: BLE001 - same rule: never stop the app starting
     logger.exception("Could not standardise stored records")
 
+# Then the figures. A routine that declares its sums has every record kept
+# under it worked out again from its own readings, so a log that a model once
+# did the arithmetic for is corrected without anyone asking. After the tidy,
+# so it reads the cleaned values. Idempotent, so a correct log is never written.
+try:
+    store.recheck_all()
+except Exception:  # noqa: BLE001 - same rule: never stop the app starting
+    logger.exception("Could not recheck stored records")
+
 
 @app.route("/manifest.webmanifest", methods=["GET"])
 def manifest() -> Any:
@@ -527,7 +536,24 @@ def api_routine_create() -> Any:
     # computes to nothing, every run, and an empty column looks exactly like a
     # run with no data. Saying so here is the difference between a typo fixed
     # in seconds and one found in a month of records.
-    return jsonify({**saved, "problems": _record_problems(saved.get("record"))})
+    return jsonify({**saved, "problems": _record_problems(saved.get("record")),
+                    "rechecked": _recheck_quietly(saved.get("name"))})
+
+
+def _recheck_quietly(name: Any) -> Dict[str, Any]:
+    """Recheck a routine's records after its declaration changed.
+
+    Saving the sums is when the log can be corrected, so it is corrected then,
+    rather than waiting for a restart or for someone to find a button. The
+    count goes back to the editor, so the change to old records is said out
+    loud. A failure here costs the recheck, never the save.
+    """
+    try:
+        done = store.recheck_records(str(name or ""))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not recheck records for %s", name)
+        return {"records": 0, "values": 0, "changes": []}
+    return dict(done, changes=done["changes"][:20])
 
 
 def _record_problems(record: Any) -> List[str]:
@@ -578,7 +604,9 @@ def api_routine_update(routine_id: str) -> Any:
     if routine is None:
         return jsonify({"error": "No such routine"}), 404
     return jsonify({"ok": True, "routine": routine,
-                    "problems": _record_problems(routine.get("record"))})
+                    "problems": _record_problems(routine.get("record")),
+                    "rechecked": _recheck_quietly(routine.get("name"))
+                    if "record" in changes else {"records": 0, "values": 0, "changes": []}})
 
 
 @app.route("/api/routines/<routine_id>", methods=["DELETE"])

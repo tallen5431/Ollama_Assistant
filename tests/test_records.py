@@ -532,8 +532,29 @@ class TestThePage:
 
     def test_the_cells_can_be_corrected(self):
         page = self.page()
-        assert 'td.contentEditable = "true";' in page
+        assert 'td.contentEditable = sum ? "false" : "true";' in page
         assert "editRecord(record.id, name, value)" in page
+
+    def test_a_sum_is_not_offered_for_typing_over(self):
+        """The server works sums out from the readings, so a typed-over sum
+        would be undone by the next recheck. The reading is what to correct."""
+        page = self.page()
+        assert "const sum = !!formula && /\\s[-+*\\/÷×−]\\s/.test(formula);" in page
+        assert 'td.className = sum ? "" : "editable";' in page
+
+    def test_a_corrected_reading_redraws_the_row(self):
+        """Fixing an odometer changes the distance, the speed and both rates;
+        the row shows what the server worked out, not the old figures."""
+        page = self.page()
+        body = page[page.index("async function editRecord"):]
+        assert "records[at] = saved;" in body
+        assert "renderRecords();" in body
+
+    def test_a_worked_out_value_says_what_the_model_had_written(self):
+        page = self.page()
+        assert '(record.checked || []).indexOf(name) >= 0' in page
+        assert '" — the model had written: " + was' in page
+        assert "#recordList .checked" in page, "the marker has no style"
 
     def test_both_exports_are_offered(self):
         page = self.page()
@@ -680,8 +701,10 @@ class TestTheLayoutFitsWhereItIsShown:
         """td.className = "editable" replaces the whole attribute, so adding
         the marker first meant it silently never appeared."""
         page = self.page()
-        assert page.index('td.className = "editable";') < \
+        assert page.index('td.className = sum ? "" : "editable";') < \
             page.index('td.classList.add("tidied");')
+        assert page.index('td.className = sum ? "" : "editable";') < \
+            page.index('td.classList.add("checked");')
 
     @pytest.mark.parametrize("value, expected", [
         ("=cmd|' /C calc'!A1", "'=cmd|' /C calc'!A1"),

@@ -438,6 +438,118 @@ def compute(fields: List[Field], row: Dict[str, str],
     return filled, notes
 
 
+def recompute(fields: List[Field], row: Dict[str, str],
+              known: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, str], List[str]]:
+    """The computed fields of a row already kept, worked out again from its readings.
+
+    Returns only the fields whose stored value is **wrong**: a different
+    number once both are written to the precision this app writes them in.
+    A correct value is left exactly as it was written, so rechecking a tidy
+    log changes nothing, and rechecking twice changes nothing the second time.
+
+    Unlike compute(), a field that cannot be worked out is never emptied. A
+    record kept is a record kept: where the inputs are missing — a start time
+    written as "18:47" with no date, so nothing can be subtracted from it — the
+    stored value stands, and it is used as the input for anything built on it.
+    In a real log that is exactly what let a trip's speed be checked against
+    an elapsed time its own clock times could not reproduce.
+    """
+    known = dict(known or {})
+    known.update(kinds(fields))
+    numbers: Dict[str, values.Value] = {}
+    for field in fields:
+        if field.computed:
+            continue
+        found = values.parse_as(row.get(field.name, ""), known.get(field.name, ""),
+                                field.name)
+        if found:
+            numbers[field.name] = found
+
+    changed: Dict[str, str] = {}
+    notes: List[str] = []
+    pending = [f for f in fields if f.computed]
+    while pending:
+        progress = False
+        stuck = []
+        for field in pending:
+            left, right = numbers.get(field.left), numbers.get(field.right)
+            if not left or not right:
+                stuck.append(field)
+                continue
+            filled: Dict[str, str] = {}
+            _one_sum(field, left, right, numbers, filled, notes)
+            progress = True
+            fresh = filled.get(field.name, "")
+            if not fresh:
+                # Refused — negative, unlike units, nothing to divide by. The
+                # stored value stays, and is what anything built on it uses.
+                _stored_as_input(field, row, known, numbers)
+                continue
+            stored = row.get(field.name, "")
+            if not _same_figure(stored, numbers[field.name], known.get(field.name, ""),
+                                field.name):
+                changed[field.name] = _as_column(fresh, numbers[field.name],
+                                                 known.get(field.name, ""))
+        if not progress:
+            # Nothing could be worked out this round. Fall back on what was
+            # recorded — but only for the fields whose own inputs will never
+            # arrive, not for the ones merely waiting on another stuck field.
+            # Falling back on all of them at once kept a trip's recorded
+            # 18.17 mph because its elapsed time could not be recomputed, when
+            # that elapsed time, taken as recorded, gives 18.93.
+            waiting = {f.name for f in stuck}
+            first = [f for f in stuck
+                     if f.left not in waiting and f.right not in waiting] or stuck
+            for field in first:
+                if _stored_as_input(field, row, known, numbers):
+                    progress = True
+            if not progress:
+                break
+            stuck = [f for f in stuck if f.name not in numbers]
+        pending = stuck
+    return changed, notes
+
+
+def _stored_as_input(field: Field, row: Dict[str, str], known: Dict[str, str],
+                     numbers: Dict[str, values.Value]) -> bool:
+    """Use the recorded value of a field that could not be worked out."""
+    stored = values.parse_as(row.get(field.name, ""), known.get(field.name, ""),
+                             field.name) if known.get(field.name) else \
+        values.parse(row.get(field.name, ""))
+    if not stored:
+        return False
+    numbers[field.name] = stored
+    return True
+
+
+def _same_figure(stored: str, fresh: values.Value, kind: str, name: str) -> bool:
+    """Whether a recorded value says the same number, at the precision shown.
+
+    "$29.79" against a worked-out 29.8014 is a different figure; "1.2465"
+    against 1.2467 is the same one written more precisely, and is left alone —
+    rechecking is for values that are wrong, not for ones written differently.
+    """
+    was = values.parse_as(stored, kind or fresh.kind, name) if stored else None
+    if not was:
+        return False
+    shown = values.render(fresh.kind, fresh.number, fresh.unit or "$", fresh.unit)
+    again = values.render(fresh.kind, was.number, fresh.unit or "$", fresh.unit)
+    return bool(shown) and shown == again
+
+
+def _as_column(text: str, fresh: values.Value, kind: str) -> str:
+    """A worked-out value, in the kind its column holds where that says more.
+
+    Two bare numbers make a bare number, but in a column that holds miles the
+    same figure is a distance; writing it bare would drop the unit every one
+    of its neighbours carries.
+    """
+    if fresh.kind == values.NUMBER and kind in (values.DISTANCE, values.SPEED,
+                                                values.MONEY, values.DURATION):
+        return values.render(kind, fresh.number)
+    return text
+
+
 def _one_sum(field: Field, left: values.Value, right: values.Value,
              numbers: Dict[str, values.Value], filled: Dict[str, str],
              notes: List[str]) -> None:
