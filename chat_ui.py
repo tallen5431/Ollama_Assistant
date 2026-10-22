@@ -659,6 +659,11 @@ _PAGE = r"""<!doctype html>
                   padding:0.4rem 0.6rem; margin:0.4rem 0; }
       .rsuggest p { white-space:pre-line; font-size:var(--fs-xs); margin:0 0 0.4rem; }
       #recordList { overflow:auto; }
+      /* Totals above the log: the same table shape, so a column reads the
+         same in both, set apart so a sum is never mistaken for a run. */
+      #recordList .totals { margin:0 0 0.8rem; padding-bottom:0.5rem;
+                            border-bottom:1px solid var(--border); }
+      #recordList .totals .chips { margin-bottom:0.3rem; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
       /* A value that was standardised on the way in. Quiet on purpose — this
@@ -3918,6 +3923,7 @@ _PAGE = r"""<!doctype html>
           if (data.record && view) {
             showKept(view, data.record, routine.record,
                      (data.gaps || []).concat(data.mismatched || []));
+            if (data.week) showWeek(view, data.week);
             if (data.suggest) offerFix(view, data.suggest);
           }
         } catch (e) { /* the answer is what matters; this is the extra */ }
@@ -3948,6 +3954,22 @@ _PAGE = r"""<!doctype html>
         note.title = gaps.join("\n");
         note.addEventListener("click", () => openDrawer("records"));
         view.root.appendChild(note);
+      }
+
+      // How the week stands with this run in it, under the run. The totals
+      // are what a log like this is kept for, and this is when they are asked.
+      function showWeek(view, week) {
+        const pairs = (week.columns || []).filter(c => (week.values || {})[c.name])
+          .map(c => c.name + " " + week.values[c.name]);
+        if (!pairs.length) return;
+        const line = document.createElement("div");
+        line.className = "kept";
+        line.textContent = "📅 " + week.label + ": " + week.count +
+          (week.count === 1 ? " run" : " runs") + " · " + pairs.join(" · ");
+        line.title = "Amounts added up; rates worked out from those totals. " +
+          "Tap for every week in Records.";
+        line.addEventListener("click", () => openDrawer("records"));
+        view.root.appendChild(line);
       }
 
       // Under the reply whose figures the model just worked out in prose, when
@@ -4045,6 +4067,16 @@ _PAGE = r"""<!doctype html>
         count.textContent = shown.length + (shown.length === 1 ? " record" : " records");
         bar.appendChild(count);
         recordListEl.appendChild(bar);
+        // Totals need one routine's columns to mean anything, so they show
+        // when the table is one routine's — chosen, or the only one there is.
+        const one = recordFilter || (shown.length && shown.every(
+          r => r.routine_name === shown[0].routine_name) ? shown[0].routine_name : "");
+        if (one) {
+          const holder = document.createElement("div");
+          holder.className = "totals";
+          recordListEl.appendChild(holder);
+          fillTotals(holder, one);
+        }
 
         const wrap = document.createElement("div");
         wrap.className = "tablewrap";
@@ -4131,6 +4163,77 @@ _PAGE = r"""<!doctype html>
         table.appendChild(body);
         wrap.appendChild(table);
         recordListEl.appendChild(wrap);
+      }
+
+      // Weeks, months or the whole log. Remembered across redraws, which
+      // happen after every correction.
+      let totalsBy = "weeks";
+      async function fillTotals(holder, routineName) {
+        let summary = null;
+        try {
+          const resp = await fetch("api/records/summary?routine=" +
+                                   encodeURIComponent(routineName));
+          if (!resp.ok) return;
+          summary = (await resp.json()).summary;
+        } catch (e) { return; }
+        if (!summary || !summary.columns || !summary.columns.length) return;
+        const draw = () => {
+          holder.innerHTML = "";
+          const pick = document.createElement("div");
+          pick.className = "chips";
+          for (const [label, value] of [["Weeks", "weeks"], ["Months", "months"],
+                                        ["All time", "all"]]) {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "chip" + (value === totalsBy ? " active" : "");
+            chip.textContent = label;
+            chip.addEventListener("click", () => { totalsBy = value; draw(); });
+            pick.appendChild(chip);
+          }
+          holder.appendChild(pick);
+          const periods = totalsBy === "all" ? [summary.all]
+            : (summary[totalsBy] || []).slice(0, totalsBy === "weeks" ? 8 : 12);
+          const wrap = document.createElement("div");
+          wrap.className = "tablewrap";
+          const table = document.createElement("table");
+          const head = document.createElement("tr");
+          for (const label of ["Period", "Runs"].concat(summary.columns.map(c => c.name))) {
+            const th = document.createElement("th");
+            th.textContent = label;
+            head.appendChild(th);
+          }
+          const thead = document.createElement("thead");
+          thead.appendChild(head);
+          table.appendChild(thead);
+          const body = document.createElement("tbody");
+          for (const period of periods) {
+            const row = document.createElement("tr");
+            const cell = (label, text, title) => {
+              const td = document.createElement("td");
+              td.setAttribute("data-label", label);
+              td.textContent = text;
+              if (title) td.title = title;
+              row.appendChild(td);
+            };
+            cell("Period", period.label);
+            cell("Runs", String(period.count));
+            for (const column of summary.columns) {
+              // A rate over a period is its totals divided, not its rows
+              // averaged: a short trip at a high rate does not count as much
+              // as a long one at a low rate, because it was not as much.
+              cell(column.name, (period.values || {})[column.name] || "",
+                   column.how === "rate"
+                     ? "Total " + column.left + " ÷ total " + column.right +
+                       ", over the runs that have both"
+                     : "Added up across the period");
+            }
+            body.appendChild(row);
+          }
+          table.appendChild(body);
+          wrap.appendChild(table);
+          holder.appendChild(wrap);
+        };
+        draw();
       }
 
       function recordFilterBar() {

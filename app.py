@@ -725,7 +725,32 @@ def api_record_create() -> Any:
     return jsonify({"record": kept, "gaps": gaps,
                     "mismatched": [f"{k}: {v}" for k, v in wrong.items()],
                     "suggest": _suggestion_quietly(body.get("routine_id"))
-                    if kept else None})
+                    if kept else None,
+                    # How the week stands with this run in it — the question
+                    # the log is kept to answer, answered as the run is kept.
+                    "week": _quietly(store.week_so_far, kept) if kept else None})
+
+
+def _quietly(work: Any, *args: Any) -> Any:
+    """An extra worked out alongside a response, where failing costs only it."""
+    try:
+        return work(*args)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not work out %s", getattr(work, "__name__", work))
+        return None
+
+
+@app.route("/api/records/summary", methods=["GET"])
+def api_records_summary() -> Any:
+    """One routine's totals: every week and month, newest first, and all time.
+
+    Amounts are summed and rates are worked out again from the sums — never
+    an average of averages, which weighs a ten-minute trip like a ten-hour one.
+    """
+    name = str(request.args.get("routine") or "")
+    if not name:
+        return jsonify({"error": "Missing 'routine'"}), 400
+    return jsonify({"summary": store.records_summary(name)})
 
 
 @app.route("/api/records/<record_id>", methods=["PATCH"])

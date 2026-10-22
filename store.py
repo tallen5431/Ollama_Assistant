@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 import fields
+import totals
 import values
 from config import logger
 
@@ -983,6 +984,36 @@ def recheck_records(routine_name: str, limit: int = 5000) -> Dict[str, Any]:
         logger.info("Rechecked %s: %d value(s) across %d record(s) worked out again",
                     routine_name, out["values"], out["records"])
     return out
+
+
+def _totals_inputs(routine_name: str, limit: int) -> Optional[tuple]:
+    """``(records, declaration, kinds, columns)`` for one routine's log."""
+    if not routine_name or not db_path().exists():
+        return None
+    group = list_records(routine_name, limit=limit)
+    if not group:
+        return None
+    with _connect() as conn:
+        declaration = _declaration_for(routine_name, group[0].get("routine_id"), conn)
+        kinds = _column_kinds(routine_name, {}, conn, fields.kinds(declaration))
+    columns = fields.names(declaration) or record_columns(group)
+    return group, declaration, kinds, columns
+
+
+def records_summary(routine_name: str, limit: int = 5000) -> Optional[Dict[str, Any]]:
+    """Totals for one routine's log by week, by month and all time."""
+    found = _totals_inputs(routine_name, limit)
+    if not found:
+        return None
+    return totals.summarise(*found)
+
+
+def week_so_far(record: Dict[str, Any], limit: int = 5000) -> Optional[Dict[str, Any]]:
+    """The totals for the week a just-kept record fell in."""
+    found = _totals_inputs(str(record.get("routine_name") or ""), limit)
+    if not found:
+        return None
+    return totals.week_of(record, *found)
 
 
 def routine_suggestion(routine_id: str) -> Optional[Dict[str, Any]]:
