@@ -653,6 +653,11 @@ _PAGE = r"""<!doctype html>
       .kept-gap { font-size:var(--fs-xs); color:var(--muted); cursor:pointer;
                   margin:0.15rem 0 0 0.3rem; }
       .kept-gap:hover { color:var(--text); }
+      /* The fix for a routine whose prompt does its sums in prose. One line
+         per field, because each is a change to what the model is asked. */
+      .rsuggest { border:1px dashed var(--accent); border-radius:6px;
+                  padding:0.4rem 0.6rem; margin:0.4rem 0; }
+      .rsuggest p { white-space:pre-line; font-size:var(--fs-xs); margin:0 0 0.4rem; }
       #recordList { overflow:auto; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
@@ -842,6 +847,13 @@ _PAGE = r"""<!doctype html>
           <p class="convo-empty">Field names, comma separated.
             After every run the model restates its own answer as these, and the
             row lands in Records. Leave empty to keep nothing.</p>
+          <!-- Sums the prompt asks the model to do, as fields that would be
+               worked out here instead. Offered, never applied: it changes
+               what the model is asked for, so a person looks first. -->
+          <div class="rsuggest" id="rSuggest" hidden>
+            <p id="rSuggestWhy"></p>
+            <button id="rSuggestUse" type="button">Use these fields</button>
+          </div>
           <p class="convo-empty" id="routineWarn"></p>
           <div class="routine-acts">
             <button class="primary" id="rSave" type="button">Save</button>
@@ -1045,6 +1057,8 @@ _PAGE = r"""<!doctype html>
       const rMetaEl  = document.getElementById("rMeta");
       const rSaveBtn  = document.getElementById("rSave");
       const rRecordEl = document.getElementById("rRecord");
+      const rSuggestEl = document.getElementById("rSuggest");
+      const rSuggestWhyEl = document.getElementById("rSuggestWhy");
       const recordPaneEl = document.getElementById("recordPane");
       const recordListEl = document.getElementById("recordList");
       const tabRecordsEl = document.getElementById("tabRecords");
@@ -3904,6 +3918,7 @@ _PAGE = r"""<!doctype html>
           if (data.record && view) {
             showKept(view, data.record, routine.record,
                      (data.gaps || []).concat(data.mismatched || []));
+            if (data.suggest) offerFix(view, data.suggest);
           }
         } catch (e) { /* the answer is what matters; this is the extra */ }
       }
@@ -3933,6 +3948,28 @@ _PAGE = r"""<!doctype html>
         note.title = gaps.join("\n");
         note.addEventListener("click", () => openDrawer("records"));
         view.root.appendChild(note);
+      }
+
+      // Under the reply whose figures the model just worked out in prose, when
+      // the routine's own prompt describes sums this could do exactly. Once a
+      // page load per routine: a nudge, not a nag under every run.
+      const offeredFix = {};
+      function offerFix(view, suggestion) {
+        if (!suggestion || !suggestion.routine_id || offeredFix[suggestion.routine_id]) return;
+        offeredFix[suggestion.routine_id] = true;
+        const line = document.createElement("div");
+        line.className = "kept-gap";
+        line.textContent = "💡 This routine's prompt has the model do sums that could " +
+          "be worked out exactly here — tap to review the fields";
+        line.title = (suggestion.why || []).join("\n");
+        line.addEventListener("click", () => {
+          const routine = routines.filter(r => r.id === suggestion.routine_id)[0];
+          if (!routine) return;
+          openDrawer("routines");
+          openRoutineEditor(routine);
+          showSuggestion(suggestion, routine.id);
+        });
+        view.root.appendChild(line);
       }
 
       // Which routine's records are on screen. "" is all of them, which is also
@@ -4049,8 +4086,9 @@ _PAGE = r"""<!doctype html>
             const was = (record.raw || {})[name];
             const formula = derivedIn(record.routine_name)[name];
             // A sum, as opposed to "= earliest photo taken", which is a reading.
-            // The same operators the server reads, typed or pasted.
-            const sum = !!formula && /\s[-+*\/÷×−]\s/.test(formula);
+            // The same operators the server reads; "÷" is not one of them, so
+            // a line written with it is still a field the model fills in.
+            const sum = !!formula && /\s[-+*\/]\s/.test(formula);
             // Editable, because the fields were pulled out of prose by a model
             // and a log you cannot correct is one you stop trusting — except a
             // sum, which is worked out from the others. Correct a reading and
@@ -4233,8 +4271,42 @@ _PAGE = r"""<!doctype html>
         routineNewBtn.hidden = true;
         routineEditEl.hidden = false;
         routineWarnUpdate();
+        showSuggestion(null);
+        if (routine) loadSuggestion(routine.id);
         rNameEl.focus();
       }
+
+      // What the routine's prompt already describes, as fields this works out
+      // itself. Asked for when the editor opens, so it is there to see without
+      // having to know to look for it.
+      let suggestedRecord = null;
+      async function loadSuggestion(id) {
+        try {
+          const resp = await fetch("api/routines/" + id + "/suggestion");
+          if (!resp.ok) return;
+          showSuggestion((await resp.json()).suggestion, id);
+        } catch (e) { /* the editor works the same without it */ }
+      }
+
+      function showSuggestion(suggestion, id) {
+        // Opened on another routine while the request was out.
+        if (suggestion && id !== editingRoutineId) return;
+        suggestedRecord = suggestion && suggestion.record && suggestion.record.length
+          ? suggestion.record : null;
+        rSuggestEl.hidden = !suggestedRecord;
+        if (!suggestedRecord) return;
+        rSuggestWhyEl.textContent = "💡 The prompt asks the model to work these out. " +
+          "They could be worked out here, exactly, instead:\n" +
+          (suggestion.why || []).join("\n");
+      }
+
+      document.getElementById("rSuggestUse").addEventListener("click", () => {
+        if (!suggestedRecord) return;
+        rRecordEl.value = suggestedRecord.join("\n");
+        rSuggestEl.hidden = true;
+        routineWarnEl.textContent = "Filled in. Save to use them — the records " +
+          "already kept are worked out again from their readings when you do.";
+      });
 
       function closeRoutineEditor() {
         editingRoutineId = null;

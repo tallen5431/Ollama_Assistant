@@ -680,3 +680,201 @@ def mismatches(fields: List[Field], row: Dict[str, str]) -> Dict[str, str]:
             out[field.name] = (f"declared {field.kind}, but "
                                f"{text!r} does not read as one")
     return out
+
+
+# --------------------------------------------------------------------------
+# Suggesting the declaration a routine's own prompt already describes
+# --------------------------------------------------------------------------
+
+# A sum the way people write one in a prompt: as a list item, with the
+# typographic operators, or in words. "÷" is not part of the grammar, so a
+# routine whose prompt says "Average speed = distance ÷ exact elapsed hours"
+# had its model do that division, every run, in prose.
+_BULLET = re.compile(r"^\s*(?:[-*•·]|\d{1,2}[.)])\s*")
+_IN_WORDS = ((re.compile(r"\s+divided\s+by\s+", re.I), " / "),
+             (re.compile(r"\s+(?:multiplied\s+by|times)\s+", re.I), " * "),
+             (re.compile(r"\s+minus\s+", re.I), " - "),
+             (re.compile(r"\s+plus\s+", re.I), " + "))
+_TYPOGRAPHIC = str.maketrans({"÷": "/", "×": "*", "−": "-", "–": "-"})
+# The operator needs space round it here, unlike in a declaration: a prompt is
+# prose, and "check-in time" is a field name, not a subtraction.
+_PROSE_SUM = re.compile(r"^(?P<name>[^=]+?)\s*=\s*(?P<left>.+?)\s+(?P<op>[-+*/])\s+"
+                        r"(?P<right>.+?)\s*[.;]?$")
+
+# Words that name the same thing in a field name and in a description of it.
+# "higher odometer" is the end one, "exact end camera timestamp" is the end
+# time, and "exact elapsed hours" is the elapsed time.
+_SAME_AS = {"higher": "end", "later": "end", "final": "end", "last": "end",
+            "finish": "end", "finishing": "end", "ending": "end", "closing": "end",
+            "lower": "start", "earlier": "start", "initial": "start",
+            "first": "start", "begin": "start", "beginning": "start",
+            "starting": "start", "opening": "start",
+            "timestamp": "time", "clock": "time", "hour": "time",
+            "minute": "time", "duration": "time"}
+_FILLER = {"the", "a", "an", "of", "exact", "exactly", "typed", "recorded",
+           "reading", "value", "camera", "photo", "image", "main", "in", "from"}
+
+
+def _words(text: str) -> set:
+    out = set()
+    for word in re.findall(r"[a-z]+", text.lower()):
+        if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
+        word = _SAME_AS.get(word, word)
+        if word not in _FILLER:
+            out.add(word)
+    return out
+
+
+def _operand(phrase: str, fields: List[Field], target: str) -> str:
+    """The one declared field a description names, or "" if not exactly one."""
+    exact = [f.name for f in fields if f.name.lower() == phrase.strip().lower()]
+    if exact:
+        return exact[0] if exact[0].lower() != target.lower() else ""
+    said = _words(phrase)
+    scored = []
+    for field in fields:
+        if field.name.lower() == target.lower():
+            continue
+        named = _words(field.name)
+        shared = len(said & named)
+        if shared:
+            scored.append(((shared, -len(named - said)), field.name))
+    if not scored:
+        return ""
+    scored.sort(reverse=True)
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return ""                       # two equally good guesses is no answer
+    return scored[0][1]
+
+
+def _prose_sums(text: str) -> List[Tuple[str, str, str, str]]:
+    """``(name, left, op, right)`` for every line of prose shaped like a sum."""
+    out = []
+    for line in str(text or "").splitlines():
+        line = _BULLET.sub("", line.translate(_TYPOGRAPHIC)).strip()
+        for pattern, op in _IN_WORDS:
+            line = pattern.sub(op, line)
+        match = _PROSE_SUM.match(line)
+        if match:
+            out.append((match.group("name").strip(), match.group("left").strip(),
+                        match.group("op"), match.group("right").strip()))
+    return out
+
+
+def _kind_by_name(name: str) -> str:
+    words = _words(name)
+    if words & {"odometer", "mileage"}:
+        return values.DISTANCE
+    if words & {"earning", "fare", "tip", "pay", "income", "revenue", "cost",
+                "price", "fee", "wage"}:
+        return values.MONEY
+    return ""
+
+
+def suggest(raw: Any, body: str = "", photos: int = 0,
+            seen: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+    """The declaration a routine's prompt already describes, or None.
+
+    A real routine asked for ten plain fields and then, in its prompt, told the
+    model how to work out five of them:
+
+        - Distance traveled = higher odometer − lower odometer
+        - Elapsed time = exact end camera timestamp − exact start camera timestamp
+        - Earnings per hour = typed total earnings ÷ exact elapsed hours
+
+    So the model did that arithmetic in prose on every run, and a fifth of the
+    hourly rates it wrote were off by more than rounding. Everything needed to
+    do it here was already written down; it just was not written in the shape
+    this reads. This reads it in that shape — each description matched to the
+    one declared field it names, or left alone if it names none or two — and
+    hands back the declaration for a person to look at and save.
+
+    Times come from the photos where the routine takes two or more, because
+    the camera recorded them exactly and the prompt was spending a page of
+    rules on getting a model to copy them. Readings get their kind where the
+    log already shows it. Nothing is suggested that would not parse cleanly.
+    """
+    current = parse(raw)
+    if not current:
+        return None
+    by_name = {f.name.lower(): f for f in current}
+    proposed: Dict[str, Field] = {}
+    why: List[str] = []
+
+    # Sums written in the prompt, or written in the declaration in a shape it
+    # did not understand — a line that is a whole formula kept as a field name.
+    lines = [str(line) for line in _lines(raw) if not _COMPUTE.match(str(line))]
+    for name, left, op, right in _prose_sums(body) + _prose_sums("\n".join(lines)):
+        field = by_name.get(name.lower())
+        whole = f"{name} = {left} {op} {right}"
+        if field is None:
+            # "Average speed = distance ÷ exact elapsed hours" as one name.
+            field = next((f for f in current if not f.derived and "=" in f.name
+                          and f.name.split("=")[0].strip().lower() == name.lower()), None)
+        if field is None or field.computed or field.source or field.name in proposed:
+            continue
+        others = [f for f in current if f is not field]
+        a, b = _operand(left, others, name), _operand(right, others, name)
+        if not a or not b or a == b:
+            continue
+        proposed[field.name] = Field(name, "", a, op, b)
+        why.append(f"{name} = {a} {op} {b} — worked out here, from “{whole}”")
+
+    if photos >= 2 and not any(f.source for f in current):
+        for field in current:
+            if field.computed or field.name in proposed:
+                continue
+            words = _words(field.name)
+            if "time" not in words or len(words) != 2:
+                continue
+            end = "end" in words
+            if not end and "start" not in words:
+                continue
+            source = "latest photo taken" if end else "earliest photo taken"
+            proposed[field.name] = Field(field.name, values.TIMESTAMP, source=source)
+            why.append(f"{field.name} = {source} — read off the photo's own file, "
+                       "not copied by the model")
+
+    if not proposed:
+        return None
+
+    # A formula typed into the declaration was kept as one long field name;
+    # what it becomes is called by the part before the "=", and anything
+    # built on it has to say that name.
+    renamed = {old: new.name for old, new in proposed.items() if old != new.name}
+    out: List[Field] = []
+    for field in current:
+        field = proposed.get(field.name, field)
+        if field.computed:
+            field = field._replace(left=renamed.get(field.left, field.left),
+                                   right=renamed.get(field.right, field.right))
+        elif not field.derived and not field.kind:
+            kind = (seen or {}).get(field.name, "")
+            if kind not in (values.DISTANCE, values.MONEY, values.SPEED,
+                            values.DURATION, values.TIMESTAMP):
+                kind = _kind_by_name(field.name)
+            if kind:
+                field = field._replace(kind=kind)
+        out.append(field)
+
+    # Only sums that mean something with the kinds involved: a description
+    # matched to the wrong field shows up as money minus a distance.
+    known = dict(seen or {})
+    known.update(kinds(out))
+    for _ in out:
+        for field in out:
+            if field.computed:
+                kind = result_kind(known.get(field.left, ""), field.op,
+                                   known.get(field.right, ""))
+                if kind:
+                    known[field.name] = kind
+    for at, field in enumerate(out):
+        if field.computed and field.name != current[at].name or \
+                field.computed and not current[at].computed:
+            if known.get(field.left) and known.get(field.right) and \
+                    not result_kind(known[field.left], field.op, known[field.right]):
+                return None
+    if problems(out) or declarations(out) == declarations(current):
+        return None
+    return {"record": declarations(out), "why": why}

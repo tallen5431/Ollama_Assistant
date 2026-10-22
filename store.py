@@ -985,6 +985,26 @@ def recheck_records(routine_name: str, limit: int = 5000) -> Dict[str, Any]:
     return out
 
 
+def routine_suggestion(routine_id: str) -> Optional[Dict[str, Any]]:
+    """The declaration a routine's own prompt describes, if it differs.
+
+    The kinds its log already holds go in, so a reading is typed by what has
+    been kept under it rather than by a guess from its name.
+    """
+    if not routine_id or not db_path().exists():
+        return None
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM routines WHERE id = ?", (routine_id,)).fetchone()
+        if row is None:
+            return None
+        routine = _routine_row(row)
+        if not routine["record"]:
+            return None
+        seen = _column_kinds(routine["name"], {}, conn, {})
+    found = fields.suggest(routine["record"], routine["body"], routine["photos"], seen)
+    return dict(found, routine_id=routine_id) if found else None
+
+
 def recheck_all(limit: int = 5000) -> Dict[str, int]:
     """recheck_records for every routine whose declaration has any sums."""
     if not db_path().exists():

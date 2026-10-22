@@ -539,7 +539,7 @@ class TestThePage:
         """The server works sums out from the readings, so a typed-over sum
         would be undone by the next recheck. The reading is what to correct."""
         page = self.page()
-        assert "const sum = !!formula && /\\s[-+*\\/÷×−]\\s/.test(formula);" in page
+        assert "const sum = !!formula && /\\s[-+*\\/]\\s/.test(formula);" in page
         assert 'td.className = sum ? "" : "editable";' in page
 
     def test_a_corrected_reading_redraws_the_row(self):

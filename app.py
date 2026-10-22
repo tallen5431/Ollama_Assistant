@@ -609,6 +609,21 @@ def api_routine_update(routine_id: str) -> Any:
                     if "record" in changes else {"records": 0, "values": 0, "changes": []}})
 
 
+@app.route("/api/routines/<routine_id>/suggestion", methods=["GET"])
+def api_routine_suggestion(routine_id: str) -> Any:
+    """The declaration this routine's prompt already describes, if any."""
+    return jsonify({"suggestion": _suggestion_quietly(routine_id)})
+
+
+def _suggestion_quietly(routine_id: Any) -> Optional[Dict[str, Any]]:
+    """store.routine_suggestion, where a failure costs only the suggestion."""
+    try:
+        return store.routine_suggestion(str(routine_id or ""))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not suggest a declaration for %s", routine_id)
+        return None
+
+
 @app.route("/api/routines/<routine_id>", methods=["DELETE"])
 def api_routine_delete(routine_id: str) -> Any:
     """Remove a routine."""
@@ -704,8 +719,13 @@ def api_record_create() -> Any:
     # The gaps travel with it: a blank hourly rate is only reassuring once you
     # know it is blank because no elapsed time was recorded, rather than
     # because something broke.
+    # And, where the routine's prompt is telling the model to do sums this
+    # could do instead, the declaration that would — offered under the very
+    # reply whose figures the model just worked out, which is when it reads.
     return jsonify({"record": kept, "gaps": gaps,
-                    "mismatched": [f"{k}: {v}" for k, v in wrong.items()]})
+                    "mismatched": [f"{k}: {v}" for k, v in wrong.items()],
+                    "suggest": _suggestion_quietly(body.get("routine_id"))
+                    if kept else None})
 
 
 @app.route("/api/records/<record_id>", methods=["PATCH"])
