@@ -1372,8 +1372,10 @@ guessed. Extraction rather than pattern-matching, because the answers are prose
 and no regex survives the next model.
 
 It is good, not beyond question, and the app doesn't pretend otherwise: **every
-cell is editable**. Tap it, type, and it saves. A log you can't correct is one
-you stop trusting.
+reading is editable**. Tap it, type, and it saves. A log you can't correct is one
+you stop trusting. A *sum* is not — it is worked out from the readings, so you
+correct the reading and the distance, the speed and both rates built on it are
+worked out again and the row redraws.
 
 It never costs you an answer. The extraction runs after the reply has finished,
 not inside the stream, so a model that's asleep or that returns something
@@ -1555,10 +1557,109 @@ offset, which is the one part of a timestamp you cannot recover by looking at it
 again. A stated date with no time stays a date rather than being padded to
 midnight, which would read as a measurement rather than a gap.
 
+### Rechecking a log against its own readings
+
+Once a routine declares its sums, **every record already kept under it is
+worked out again from its own readings** — at startup, whenever the declaration
+is saved, and whenever a reading is corrected. A real log of 27 trips had every
+odometer reading right and a fifth of its hourly rates wrong by more than
+rounding: one 17% high because the model called a 2h 20m trip "2 hours", one
+speed left blank, one per-mile rate rounded down.
+
+- **Only values that are wrong change.** "Wrong" means a different figure at the
+  precision shown: `$1.2467` against a worked-out `$1.25` is the same figure
+  written more precisely, and is left alone.
+- **What the model wrote is kept.** A rechecked cell is underlined with a dashed
+  line, and hovering it says *"Worked out from this record's readings (Total
+  earnings / Elapsed time) — the model had written: $37.86"*. The first original
+  is the one kept, however many times a value is rechecked.
+- **Nothing is ever blanked.** Where a value cannot be worked out again — clock
+  times like `18:47` with no date, so nothing can be subtracted — the recorded
+  value stands, and is used for anything built on it. That trip's speed was
+  still checked: its recorded 4h 04m gives 18.9 mph, not the 18.17 written.
+- **Twice is the same as once.** A log already right is not written to.
+
+Saving the declaration says how much changed: *"Saved. 42 values in 24 kept
+records worked out again from their readings."*
+
+### When the prompt already says how
+
+A routine often asks for plain names and then, in its prompt, tells the model
+how to work half of them out:
+
+```
+- Distance traveled = higher odometer − lower odometer
+- Elapsed time = exact end camera timestamp − exact start camera timestamp
+- Earnings per hour = typed total earnings ÷ exact elapsed hours
+```
+
+Everything needed to do those sums exactly is already written down, just not in
+the shape a declaration reads. So the app reads it in that shape — each
+description matched to the one declared field it names (`higher odometer` is
+`End odometer`, `exact elapsed hours` is `Elapsed time`), photo times taken from
+the files where the routine takes two photos, readings typed by what the log
+already holds — and offers the declaration it adds up to:
+
+- in the routine editor, as soon as you open the routine, with **Use these
+  fields**;
+- under a reply whose figures the model just worked out, once per page load:
+  *"💡 This routine's prompt has the model do sums that could be worked out
+  exactly here — tap to review the fields"*.
+
+It is offered, never applied — it changes what the model is asked for, so you
+look first. **Use these fields** fills the box; **Save** applies it and
+rechecks the log. A description that fits two fields, a sum that means nothing
+for its kinds (money minus a distance), or anything that would not read back
+cleanly is not suggested at all.
+
+### Totals
+
+With one routine on screen, Records opens with its totals — **Weeks**,
+**Months** or **All time** — and the line under each reply says how the week
+stands with that run in it:
+
+```
+🗒 Kept: Start odometer 107423 mi · End odometer 107558 mi · …
+↔ 9 mi on the odometer since the run kept for 20 Oct
+📅 This week: 3 runs · Distance traveled 245 mi · Elapsed time 14h 30m · Average speed 16.9 mph · Total earnings $330.78 · Earnings per mile $1.35 · Earnings per hour $22.81
+```
+
+Two rules, because these are the two ways a spreadsheet's SUM and AVERAGE get
+a log like this wrong:
+
+- **Only amounts are added.** Miles driven, hours, money earned. An odometer is
+  a reading, and the sum of two readings is a number of no meaning; so is the
+  sum of two clock times. The two sides of `End odometer - Start odometer` are
+  never added, and neither is a column whose name says it is a rate.
+- **A rate is total over total, never an average of rates.** $100 in one hour
+  and $100 in four is $40 an hour, not the $62.50 that averaging the two rates
+  claims. And only across the runs that have both halves: a run with earnings
+  and no recorded hours would otherwise raise the rate.
+
+A run belongs to the day its own first timestamp says, so a trip driven on the
+20th and logged at 6 a.m. on the 21st counts on the 20th. Weeks start on
+Monday.
+
+### The odometer only goes up
+
+When a run is kept, its `Start odometer`–`End odometer` span is compared with
+every other run's. Two runs cannot share a mile, so an overlap means one of them
+was misread — or the same trip was kept twice — and it is said under the reply
+while the photos are still on screen:
+
+```
+⚠ Start odometer 107,400 to End odometer 107,450 overlaps the run kept for 20 Oct (107,381 to 107,414) — an odometer only goes up, so one of them is misread
+```
+
+Otherwise the line says how far the odometer moved since the previous run
+ended — driven, just not on a run. In a log of paid trips, that is the mileage
+between them.
+
 ### Checking a log
 
-Standardising a value is safe, so it happens on its own. Changing a *number* is
-not, so nothing does it for you:
+Rechecking happens on its own once the sums are declared. For a log whose
+routine has not declared them yet — or a CSV from somewhere else — there is a
+report that edits nothing:
 
 ```bash
 .venv/bin/python tools/check_records.py
@@ -1829,11 +1930,13 @@ found nothing, and only the last of those means the retrieval worked.
 | `GET /api/routines`  | Every saved routine, in strip order |
 | `POST /api/routines` | Save one — body `{ "name", "body", "photos"?, "web"?, "photo_meta"? }`. `web`/`photo_meta` are `true`/`false`/`null`, where null means "leave the toggle alone" |
 | `POST /api/routines/starters` | Install the shipped routines, skipping names already taken. Idempotent |
-| `PATCH /api/routines/<id>` | Change any subset of those fields. An absent key leaves it alone; an explicit `null` clears a forcing |
+| `PATCH /api/routines/<id>` | Change any subset of those fields. An absent key leaves it alone; an explicit `null` clears a forcing. Saving `record` rechecks the routine's log and returns `"rechecked": {"records", "values", "changes"}` (as does `POST /api/routines`) |
+| `GET /api/routines/<id>/suggestion` | The declaration this routine's prompt already describes — `{"suggestion": {"record": [...], "why": [...]}}`, or `null` when there is nothing to suggest |
 | `DELETE /api/routines/<id>` | Remove one |
 | `GET /api/records`   | Kept records, newest first, plus the union of their columns. `?routine=` narrows it |
-| `POST /api/records`  | Restate an answer as fields and keep it — body `{ "answer", "fields": [...], "routine_name"?, "routine_id"?, "conversation_id"?, "model"? }`. Returns `{"record": null}` when nothing could be pulled out, which is an outcome rather than an error |
-| `PATCH /api/records/<id>` | Correct fields — body `{ "fields": {...} }`. Merges, so an edit never drops a column it didn't mention |
+| `POST /api/records`  | Restate an answer as fields and keep it — body `{ "answer", "fields": [...], "routine_name"?, "routine_id"?, "conversation_id"?, "model"? }`. Returns `{"record": null}` when nothing could be pulled out, which is an outcome rather than an error. Alongside the record: `week` (that week's totals), `continuity` (`{"overlaps": [...], "since"}` for the odometer readings) and `suggest` (as from `/suggestion`) |
+| `GET /api/records/summary` | One routine's totals — `?routine=` required. `{"summary": {"columns", "all", "weeks", "months"}}`, newest first; amounts summed, rates worked out from the sums |
+| `PATCH /api/records/<id>` | Correct fields — body `{ "fields": {...} }`. Merges, so an edit never drops a column it didn't mention, and works out the routine's sums again from the corrected readings |
 | `DELETE /api/records/<id>` | Remove one |
 | `GET /api/records.csv` | The whole log as CSV, ISO timestamps, `?routine=` narrows it |
 | `GET /api/voice/models` | Available + downloadable Vosk speech models |
@@ -1867,6 +1970,9 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `web.py`          | Optional web fetching/search used to ground answers |
 | `store.py`        | SQLite conversation history, routines and records |
 | `records.py`      | Restating a routine's answer as the fields it declared |
+| `fields.py`       | Reading a routine's declaration, working out its sums, and suggesting one from its prompt |
+| `values.py`       | Reading and standardising one value — money, distance, speed, duration, timestamp |
+| `totals.py`       | Totals by week, month and all time; whether a run's odometer readings fit the log |
 | `tests/`          | pytest suite (no Ollama or `vosk` needed) |
 | `Start.sh` / `Start.bat` | Launchers for Linux / Windows |
 

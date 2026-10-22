@@ -563,6 +563,9 @@ _PAGE = r"""<!doctype html>
                                  flex:1 1 auto; min-width:0; min-height:0; }
       #routineList { overflow-y:auto; display:flex; flex-direction:column; gap:0.25rem; }
       #routineEdit { display:flex; flex-direction:column; gap:0.3rem; overflow-y:auto; }
+      /* It scrolls, so nothing in it should shrink: a paragraph squeezed below
+         its own height spills its text over the one after it. */
+      #routineEdit > * { flex-shrink:0; }
       #routineEdit label { font-size:var(--fs-xs); color:var(--muted);
         margin-top:0.35rem; font-weight:600; }
       #routineEdit input, #routineEdit select, #routineEdit textarea {
@@ -653,7 +656,17 @@ _PAGE = r"""<!doctype html>
       .kept-gap { font-size:var(--fs-xs); color:var(--muted); cursor:pointer;
                   margin:0.15rem 0 0 0.3rem; }
       .kept-gap:hover { color:var(--text); }
+      /* The fix for a routine whose prompt does its sums in prose. One line
+         per field, because each is a change to what the model is asked. */
+      .rsuggest { border:1px dashed var(--accent); border-radius:6px;
+                  padding:0.4rem 0.6rem; margin:0.4rem 0; }
+      .rsuggest p { white-space:pre-line; font-size:var(--fs-xs); margin:0 0 0.4rem; }
       #recordList { overflow:auto; }
+      /* Totals above the log: the same table shape, so a column reads the
+         same in both, set apart so a sum is never mistaken for a run. */
+      #recordList .totals { margin:0 0 0.8rem; padding-bottom:0.5rem;
+                            border-bottom:1px solid var(--border); }
+      #recordList .totals .chips { margin-bottom:0.3rem; }
       #recordList .editable { min-width:5rem; cursor:text; }
       #recordList .editable:focus { outline:1px solid var(--accent); }
       /* A value that was standardised on the way in. Quiet on purpose — this
@@ -664,6 +677,10 @@ _PAGE = r"""<!doctype html>
          empty one is information — it means nothing was recorded to work it
          out from — and an unmarked blank just looks like a failure. */
       #recordList .derived { color:var(--muted); font-style:italic; }
+      /* Worked out again from the readings, replacing what a model wrote. The
+         hover says what it had written; the mark says there is something to
+         hover for. */
+      #recordList .checked { border-bottom:1px dashed var(--accent); }
       #recordList .derived:empty::after { content:"—"; opacity:0.5; }
       /* The declaration box is prose-ish, so it gets prose-ish room. */
       #rRecord { min-height:4.5rem; resize:vertical; font-family:inherit; }
@@ -838,6 +855,13 @@ _PAGE = r"""<!doctype html>
           <p class="convo-empty">Field names, comma separated.
             After every run the model restates its own answer as these, and the
             row lands in Records. Leave empty to keep nothing.</p>
+          <!-- Sums the prompt asks the model to do, as fields that would be
+               worked out here instead. Offered, never applied: it changes
+               what the model is asked for, so a person looks first. -->
+          <div class="rsuggest" id="rSuggest" hidden>
+            <p id="rSuggestWhy"></p>
+            <button id="rSuggestUse" type="button">Use these fields</button>
+          </div>
           <p class="convo-empty" id="routineWarn"></p>
           <div class="routine-acts">
             <button class="primary" id="rSave" type="button">Save</button>
@@ -1041,6 +1065,8 @@ _PAGE = r"""<!doctype html>
       const rMetaEl  = document.getElementById("rMeta");
       const rSaveBtn  = document.getElementById("rSave");
       const rRecordEl = document.getElementById("rRecord");
+      const rSuggestEl = document.getElementById("rSuggest");
+      const rSuggestWhyEl = document.getElementById("rSuggestWhy");
       const recordPaneEl = document.getElementById("recordPane");
       const recordListEl = document.getElementById("recordList");
       const tabRecordsEl = document.getElementById("tabRecords");
@@ -3898,8 +3924,15 @@ _PAGE = r"""<!doctype html>
           // or because a fare in pounds was added to a tip in dollars — rather
           // than because something broke.
           if (data.record && view) {
+            // An odometer reading that overlaps another run is a gap of the
+            // same sort: something to check while the photos are on screen.
+            const fit = data.continuity || {};
             showKept(view, data.record, routine.record,
-                     (data.gaps || []).concat(data.mismatched || []));
+                     (data.gaps || []).concat(data.mismatched || [])
+                                      .concat(fit.overlaps || []));
+            if (fit.since) showSince(view, fit.since);
+            if (data.week) showWeek(view, data.week);
+            if (data.suggest) offerFix(view, data.suggest);
           }
         } catch (e) { /* the answer is what matters; this is the extra */ }
       }
@@ -3929,6 +3962,53 @@ _PAGE = r"""<!doctype html>
         note.title = gaps.join("\n");
         note.addEventListener("click", () => openDrawer("records"));
         view.root.appendChild(note);
+      }
+
+      // The odometer's movement since the last run ended: driven, just not on
+      // a run — which in a log of paid trips is the mileage between them.
+      function showSince(view, since) {
+        const line = document.createElement("div");
+        line.className = "kept";
+        line.textContent = "↔ " + since;
+        view.root.appendChild(line);
+      }
+
+      // How the week stands with this run in it, under the run. The totals
+      // are what a log like this is kept for, and this is when they are asked.
+      function showWeek(view, week) {
+        const pairs = (week.columns || []).filter(c => (week.values || {})[c.name])
+          .map(c => c.name + " " + week.values[c.name]);
+        if (!pairs.length) return;
+        const line = document.createElement("div");
+        line.className = "kept";
+        line.textContent = "📅 " + week.label + ": " + week.count +
+          (week.count === 1 ? " run" : " runs") + " · " + pairs.join(" · ");
+        line.title = "Amounts added up; rates worked out from those totals. " +
+          "Tap for every week in Records.";
+        line.addEventListener("click", () => openDrawer("records"));
+        view.root.appendChild(line);
+      }
+
+      // Under the reply whose figures the model just worked out in prose, when
+      // the routine's own prompt describes sums this could do exactly. Once a
+      // page load per routine: a nudge, not a nag under every run.
+      const offeredFix = {};
+      function offerFix(view, suggestion) {
+        if (!suggestion || !suggestion.routine_id || offeredFix[suggestion.routine_id]) return;
+        offeredFix[suggestion.routine_id] = true;
+        const line = document.createElement("div");
+        line.className = "kept-gap";
+        line.textContent = "💡 This routine's prompt has the model do sums that could " +
+          "be worked out exactly here — tap to review the fields";
+        line.title = (suggestion.why || []).join("\n");
+        line.addEventListener("click", () => {
+          const routine = routines.filter(r => r.id === suggestion.routine_id)[0];
+          if (!routine) return;
+          openDrawer("routines");
+          openRoutineEditor(routine);
+          showSuggestion(suggestion, routine.id);
+        });
+        view.root.appendChild(line);
       }
 
       // Which routine's records are on screen. "" is all of them, which is also
@@ -4004,6 +4084,16 @@ _PAGE = r"""<!doctype html>
         count.textContent = shown.length + (shown.length === 1 ? " record" : " records");
         bar.appendChild(count);
         recordListEl.appendChild(bar);
+        // Totals need one routine's columns to mean anything, so they show
+        // when the table is one routine's — chosen, or the only one there is.
+        const one = recordFilter || (shown.length && shown.every(
+          r => r.routine_name === shown[0].routine_name) ? shown[0].routine_name : "");
+        if (one) {
+          const holder = document.createElement("div");
+          holder.className = "totals";
+          recordListEl.appendChild(holder);
+          fillTotals(holder, one);
+        }
 
         const wrap = document.createElement("div");
         wrap.className = "tablewrap";
@@ -4042,20 +4132,33 @@ _PAGE = r"""<!doctype html>
             // replaced is kept. Show it: a tidy-up you cannot see the before
             // of is one you have to take on faith, and the whole reason the
             // original is stored is so that you do not have to.
+            const was = (record.raw || {})[name];
+            const formula = derivedIn(record.routine_name)[name];
+            // A sum, as opposed to "= earliest photo taken", which is a reading.
+            // The same operators the server reads; "÷" is not one of them, so
+            // a line written with it is still a field the model fills in.
+            const sum = !!formula && /\s[-+*\/]\s/.test(formula);
             // Editable, because the fields were pulled out of prose by a model
-            // and a log you cannot correct is one you stop trusting.
-            td.contentEditable = "true";
-            td.className = "editable";
+            // and a log you cannot correct is one you stop trusting — except a
+            // sum, which is worked out from the others. Correct a reading and
+            // the server works the sums out again; typing over a sum would be
+            // undone by the next recheck, which is worse than not offering it.
+            td.contentEditable = sum ? "false" : "true";
+            td.className = sum ? "" : "editable";
             // After className, not before: assigning it wholesale drops any
             // class added first, which is how the marker below silently never
             // appeared the first time this was written.
-            const was = (record.raw || {})[name];
-            const formula = derivedIn(record.routine_name)[name];
-            if (was) {
+            const checked = (record.checked || []).indexOf(name) >= 0;
+            if (formula) td.classList.add("derived");
+            if (checked) {
+              td.classList.add("checked");
+              td.title = "Worked out from this record's readings ("
+                + formula + ")" + (was ? " — the model had written: " + was
+                                       : " — it was blank");
+            } else if (was) {
               td.title = "As it was recorded: " + was;
               td.classList.add("tidied");
             } else if (formula) {
-              td.classList.add("derived");
               td.title = (record.fields[name] ? "Worked out as " : "Nothing to work it "
                           + "out from — needs ") + formula;
             }
@@ -4077,6 +4180,94 @@ _PAGE = r"""<!doctype html>
         table.appendChild(body);
         wrap.appendChild(table);
         recordListEl.appendChild(wrap);
+      }
+
+      // Weeks, months or the whole log. Remembered across redraws, which
+      // happen after every correction.
+      let totalsBy = "weeks";
+      let totalsMore = false;
+      async function fillTotals(holder, routineName) {
+        let summary = null;
+        try {
+          const resp = await fetch("api/records/summary?routine=" +
+                                   encodeURIComponent(routineName));
+          if (!resp.ok) return;
+          summary = (await resp.json()).summary;
+        } catch (e) { return; }
+        if (!summary || !summary.columns || !summary.columns.length) return;
+        const draw = () => {
+          holder.innerHTML = "";
+          const pick = document.createElement("div");
+          pick.className = "chips";
+          for (const [label, value] of [["Weeks", "weeks"], ["Months", "months"],
+                                        ["All time", "all"]]) {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "chip" + (value === totalsBy ? " active" : "");
+            chip.textContent = label;
+            chip.addEventListener("click", () => {
+              totalsBy = value; totalsMore = false; draw();
+            });
+            pick.appendChild(chip);
+          }
+          // Below 720px each period is a card of eight lines, so a full list
+          // pushed the log itself off the bottom of a phone. The latest two,
+          // and the rest on request.
+          const every = totalsBy === "all" ? [summary.all] : (summary[totalsBy] || []);
+          const room = totalsMore ? every.length
+            : window.matchMedia("(max-width: 720px)").matches ? 2
+            : totalsBy === "weeks" ? 8 : 12;
+          const periods = every.slice(0, room);
+          if (every.length > periods.length) {
+            const more = document.createElement("button");
+            more.type = "button";
+            more.className = "chip";
+            more.textContent = "+" + (every.length - periods.length) + " more";
+            more.addEventListener("click", () => { totalsMore = true; draw(); });
+            pick.appendChild(more);
+          }
+          holder.appendChild(pick);
+          const wrap = document.createElement("div");
+          wrap.className = "tablewrap";
+          const table = document.createElement("table");
+          const head = document.createElement("tr");
+          for (const label of ["Period", "Runs"].concat(summary.columns.map(c => c.name))) {
+            const th = document.createElement("th");
+            th.textContent = label;
+            head.appendChild(th);
+          }
+          const thead = document.createElement("thead");
+          thead.appendChild(head);
+          table.appendChild(thead);
+          const body = document.createElement("tbody");
+          for (const period of periods) {
+            const row = document.createElement("tr");
+            const cell = (label, text, title) => {
+              const td = document.createElement("td");
+              td.setAttribute("data-label", label);
+              td.textContent = text;
+              if (title) td.title = title;
+              row.appendChild(td);
+            };
+            cell("Period", period.label);
+            cell("Runs", String(period.count));
+            for (const column of summary.columns) {
+              // A rate over a period is its totals divided, not its rows
+              // averaged: a short trip at a high rate does not count as much
+              // as a long one at a low rate, because it was not as much.
+              cell(column.name, (period.values || {})[column.name] || "",
+                   column.how === "rate"
+                     ? "Total " + column.left + " ÷ total " + column.right +
+                       ", over the runs that have both"
+                     : "Added up across the period");
+            }
+            body.appendChild(row);
+          }
+          table.appendChild(body);
+          wrap.appendChild(table);
+          holder.appendChild(wrap);
+        };
+        draw();
       }
 
       function recordFilterBar() {
@@ -4103,9 +4294,19 @@ _PAGE = r"""<!doctype html>
         const fields = {};
         fields[name] = value;
         try {
-          await fetch("api/records/" + id, {
+          const resp = await fetch("api/records/" + id, {
             method: "PATCH", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ fields: fields }) });
+          if (!resp.ok) return;
+          const saved = (await resp.json()).record;
+          // Correcting a reading changes what is built on it — the distance,
+          // the speed, both rates — so the row is redrawn from what the server
+          // worked out, rather than left showing figures from the old reading.
+          const at = records.findIndex(r => r.id === id);
+          if (saved && at >= 0) {
+            records[at] = saved;
+            renderRecords();
+          }
         } catch (e) { /* the cell already shows what you typed */ }
       }
 
@@ -4207,8 +4408,42 @@ _PAGE = r"""<!doctype html>
         routineNewBtn.hidden = true;
         routineEditEl.hidden = false;
         routineWarnUpdate();
+        showSuggestion(null);
+        if (routine) loadSuggestion(routine.id);
         rNameEl.focus();
       }
+
+      // What the routine's prompt already describes, as fields this works out
+      // itself. Asked for when the editor opens, so it is there to see without
+      // having to know to look for it.
+      let suggestedRecord = null;
+      async function loadSuggestion(id) {
+        try {
+          const resp = await fetch("api/routines/" + id + "/suggestion");
+          if (!resp.ok) return;
+          showSuggestion((await resp.json()).suggestion, id);
+        } catch (e) { /* the editor works the same without it */ }
+      }
+
+      function showSuggestion(suggestion, id) {
+        // Opened on another routine while the request was out.
+        if (suggestion && id !== editingRoutineId) return;
+        suggestedRecord = suggestion && suggestion.record && suggestion.record.length
+          ? suggestion.record : null;
+        rSuggestEl.hidden = !suggestedRecord;
+        if (!suggestedRecord) return;
+        rSuggestWhyEl.textContent = "💡 The prompt asks the model to work these out. " +
+          "They could be worked out here, exactly, instead:\n" +
+          (suggestion.why || []).join("\n");
+      }
+
+      document.getElementById("rSuggestUse").addEventListener("click", () => {
+        if (!suggestedRecord) return;
+        rRecordEl.value = suggestedRecord.join("\n");
+        rSuggestEl.hidden = true;
+        routineWarnEl.textContent = "Filled in. Save to use them — the records " +
+          "already kept are worked out again from their readings when you do.";
+      });
 
       function closeRoutineEditor() {
         editingRoutineId = null;
@@ -4272,12 +4507,28 @@ _PAGE = r"""<!doctype html>
               kept.body.length + " characters.";
             return;
           }
+          // It exists now, so the editor stays on it. Left as "" a new routine
+          // with a warning below stayed a new one, and fixing the typo and
+          // saving again made a second routine of the same name.
+          if (!editingRoutineId && kept && kept.id) editingRoutineId = kept.id;
           // Saved either way, and said here rather than discovered later. A
           // formula naming a field that does not exist is an error nowhere: it
           // computes to nothing every run, and an empty column looks exactly
           // like a run with no data. One typo, found in a month of records.
-          if (saved.problems && saved.problems.length) {
-            routineWarnEl.textContent = "Saved. " + saved.problems.join(" ");
+          const notes = (saved.problems || []).slice();
+          // Saving the sums reworks the log kept before them. Said out loud,
+          // because figures in old records changing without a word is exactly
+          // what makes a log stop being trusted.
+          const re = saved.rechecked || {};
+          if (re.records) {
+            notes.push(re.values + " value" + (re.values === 1 ? "" : "s") + " in " +
+              re.records + " kept record" + (re.records === 1 ? "" : "s") +
+              " worked out again from their readings — hover a marked cell in " +
+              "Records for what was there before.");
+          }
+          if (notes.length) {
+            routineWarnEl.textContent = "Saved. " + notes.join(" ");
+            await refreshRoutines();
             return;
           }
         } catch (e) {

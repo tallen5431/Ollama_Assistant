@@ -190,6 +190,15 @@ try:
 except Exception:  # noqa: BLE001 - same rule: never stop the app starting
     logger.exception("Could not standardise stored records")
 
+# Then the figures. A routine that declares its sums has every record kept
+# under it worked out again from its own readings, so a log that a model once
+# did the arithmetic for is corrected without anyone asking. After the tidy,
+# so it reads the cleaned values. Idempotent, so a correct log is never written.
+try:
+    store.recheck_all()
+except Exception:  # noqa: BLE001 - same rule: never stop the app starting
+    logger.exception("Could not recheck stored records")
+
 
 @app.route("/manifest.webmanifest", methods=["GET"])
 def manifest() -> Any:
@@ -527,7 +536,24 @@ def api_routine_create() -> Any:
     # computes to nothing, every run, and an empty column looks exactly like a
     # run with no data. Saying so here is the difference between a typo fixed
     # in seconds and one found in a month of records.
-    return jsonify({**saved, "problems": _record_problems(saved.get("record"))})
+    return jsonify({**saved, "problems": _record_problems(saved.get("record")),
+                    "rechecked": _recheck_quietly(saved.get("name"))})
+
+
+def _recheck_quietly(name: Any) -> Dict[str, Any]:
+    """Recheck a routine's records after its declaration changed.
+
+    Saving the sums is when the log can be corrected, so it is corrected then,
+    rather than waiting for a restart or for someone to find a button. The
+    count goes back to the editor, so the change to old records is said out
+    loud. A failure here costs the recheck, never the save.
+    """
+    try:
+        done = store.recheck_records(str(name or ""))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not recheck records for %s", name)
+        return {"records": 0, "values": 0, "changes": []}
+    return dict(done, changes=done["changes"][:20])
 
 
 def _record_problems(record: Any) -> List[str]:
@@ -578,7 +604,24 @@ def api_routine_update(routine_id: str) -> Any:
     if routine is None:
         return jsonify({"error": "No such routine"}), 404
     return jsonify({"ok": True, "routine": routine,
-                    "problems": _record_problems(routine.get("record"))})
+                    "problems": _record_problems(routine.get("record")),
+                    "rechecked": _recheck_quietly(routine.get("name"))
+                    if "record" in changes else {"records": 0, "values": 0, "changes": []}})
+
+
+@app.route("/api/routines/<routine_id>/suggestion", methods=["GET"])
+def api_routine_suggestion(routine_id: str) -> Any:
+    """The declaration this routine's prompt already describes, if any."""
+    return jsonify({"suggestion": _suggestion_quietly(routine_id)})
+
+
+def _suggestion_quietly(routine_id: Any) -> Optional[Dict[str, Any]]:
+    """store.routine_suggestion, where a failure costs only the suggestion."""
+    try:
+        return store.routine_suggestion(str(routine_id or ""))
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not suggest a declaration for %s", routine_id)
+        return None
 
 
 @app.route("/api/routines/<routine_id>", methods=["DELETE"])
@@ -676,8 +719,41 @@ def api_record_create() -> Any:
     # The gaps travel with it: a blank hourly rate is only reassuring once you
     # know it is blank because no elapsed time was recorded, rather than
     # because something broke.
+    # And, where the routine's prompt is telling the model to do sums this
+    # could do instead, the declaration that would — offered under the very
+    # reply whose figures the model just worked out, which is when it reads.
     return jsonify({"record": kept, "gaps": gaps,
-                    "mismatched": [f"{k}: {v}" for k, v in wrong.items()]})
+                    "mismatched": [f"{k}: {v}" for k, v in wrong.items()],
+                    "suggest": _suggestion_quietly(body.get("routine_id"))
+                    if kept else None,
+                    # How the week stands with this run in it — the question
+                    # the log is kept to answer, answered as the run is kept.
+                    "week": _quietly(store.week_so_far, kept) if kept else None,
+                    # Whether its odometer readings fit with every other run's,
+                    # checked while the photos are still on screen.
+                    "continuity": _quietly(store.continuity_of, kept) if kept else None})
+
+
+def _quietly(work: Any, *args: Any) -> Any:
+    """An extra worked out alongside a response, where failing costs only it."""
+    try:
+        return work(*args)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not work out %s", getattr(work, "__name__", work))
+        return None
+
+
+@app.route("/api/records/summary", methods=["GET"])
+def api_records_summary() -> Any:
+    """One routine's totals: every week and month, newest first, and all time.
+
+    Amounts are summed and rates are worked out again from the sums — never
+    an average of averages, which weighs a ten-minute trip like a ten-hour one.
+    """
+    name = str(request.args.get("routine") or "")
+    if not name:
+        return jsonify({"error": "Missing 'routine'"}), 400
+    return jsonify({"summary": store.records_summary(name)})
 
 
 @app.route("/api/records/<record_id>", methods=["PATCH"])
@@ -750,7 +826,7 @@ def api_records_csv() -> Any:
     kinds, heads = {}, []
     for name in columns:
         seen = [r["fields"].get(name, "") for r in rows]
-        kinds[name] = declared.get(name) or values.column_kind(seen)
+        kinds[name] = declared.get(name) or values.column_kind(seen, name)
         unit = values.unit_label(kinds[name], seen)
         heads.append(f"{name} ({unit})" if unit else name)
     buffer = io.StringIO()
@@ -760,7 +836,7 @@ def api_records_csv() -> Any:
         stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
         writer.writerow(
             [stamp, _csv_safe(row["routine_name"])] +
-            [_csv_safe(values.number_of(row["fields"].get(name, ""), kinds[name]))
+            [_csv_safe(values.number_of(row["fields"].get(name, ""), kinds[name], name))
              for name in columns])
     return Response(
         buffer.getvalue(),
