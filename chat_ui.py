@@ -563,6 +563,9 @@ _PAGE = r"""<!doctype html>
                                  flex:1 1 auto; min-width:0; min-height:0; }
       #routineList { overflow-y:auto; display:flex; flex-direction:column; gap:0.25rem; }
       #routineEdit { display:flex; flex-direction:column; gap:0.3rem; overflow-y:auto; }
+      /* It scrolls, so nothing in it should shrink: a paragraph squeezed below
+         its own height spills its text over the one after it. */
+      #routineEdit > * { flex-shrink:0; }
       #routineEdit label { font-size:var(--fs-xs); color:var(--muted);
         margin-top:0.35rem; font-weight:600; }
       #routineEdit input, #routineEdit select, #routineEdit textarea {
@@ -4182,6 +4185,7 @@ _PAGE = r"""<!doctype html>
       // Weeks, months or the whole log. Remembered across redraws, which
       // happen after every correction.
       let totalsBy = "weeks";
+      let totalsMore = false;
       async function fillTotals(holder, routineName) {
         let summary = null;
         try {
@@ -4201,12 +4205,28 @@ _PAGE = r"""<!doctype html>
             chip.type = "button";
             chip.className = "chip" + (value === totalsBy ? " active" : "");
             chip.textContent = label;
-            chip.addEventListener("click", () => { totalsBy = value; draw(); });
+            chip.addEventListener("click", () => {
+              totalsBy = value; totalsMore = false; draw();
+            });
             pick.appendChild(chip);
           }
+          // Below 720px each period is a card of eight lines, so a full list
+          // pushed the log itself off the bottom of a phone. The latest two,
+          // and the rest on request.
+          const every = totalsBy === "all" ? [summary.all] : (summary[totalsBy] || []);
+          const room = totalsMore ? every.length
+            : window.matchMedia("(max-width: 720px)").matches ? 2
+            : totalsBy === "weeks" ? 8 : 12;
+          const periods = every.slice(0, room);
+          if (every.length > periods.length) {
+            const more = document.createElement("button");
+            more.type = "button";
+            more.className = "chip";
+            more.textContent = "+" + (every.length - periods.length) + " more";
+            more.addEventListener("click", () => { totalsMore = true; draw(); });
+            pick.appendChild(more);
+          }
           holder.appendChild(pick);
-          const periods = totalsBy === "all" ? [summary.all]
-            : (summary[totalsBy] || []).slice(0, totalsBy === "weeks" ? 8 : 12);
           const wrap = document.createElement("div");
           wrap.className = "tablewrap";
           const table = document.createElement("table");
