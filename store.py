@@ -940,7 +940,7 @@ def _column_kinds(routine_name: str, extra: Dict[str, str],
             continue
         for name, text in stored.items():
             columns.setdefault(name, []).append(str(text))
-    out = {name: values.column_kind(seen) for name, seen in columns.items()}
+    out = {name: values.column_kind(seen, name) for name, seen in columns.items()}
     out.update({k: v for k, v in (declared or {}).items() if v})
     return out
 
@@ -950,7 +950,9 @@ def _normalised(fields: Dict[str, str], kinds: Dict[str, str]) -> tuple:
     out: Dict[str, str] = {}
     raw: Dict[str, str] = {}
     for name, text in fields.items():
-        tidy = values.canonical(text, kinds.get(name, ""))
+        # The name too: "23.70 per hour" is $23.70 in a column that already
+        # says per hour, and a contradiction to leave alone in one that doesn't.
+        tidy = values.canonical(text, kinds.get(name, ""), name)
         out[name] = tidy
         if tidy != text:
             raw[name] = text
@@ -1122,7 +1124,7 @@ def normalise_stored(limit: int = 5000) -> Dict[str, int]:
         for record in group:
             for name, text in record["fields"].items():
                 columns.setdefault(name, []).append(str(text))
-        kinds = {name: values.column_kind(seen) for name, seen in columns.items()}
+        kinds = {name: values.column_kind(seen, name) for name, seen in columns.items()}
         with _connect() as conn:
             kinds.update({k: v for k, v in
                           _declared_kinds(routine, group[0].get("routine_id"), conn).items()

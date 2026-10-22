@@ -311,7 +311,7 @@ def kinds(fields: List[Field], rows: Optional[List[Dict[str, str]]] = None) -> D
         for field in fields:
             if field.name not in out:
                 seen = [str(r.get(field.name, "")) for r in rows]
-                out[field.name] = values.column_kind(seen)
+                out[field.name] = values.column_kind(seen, field.name)
     return out
 
 
@@ -407,7 +407,8 @@ def compute(fields: List[Field], row: Dict[str, str],
     for field in fields:
         if field.computed:
             continue
-        found = values.parse_as(row.get(field.name, ""), known.get(field.name, ""))
+        found = values.parse_as(row.get(field.name, ""), known.get(field.name, ""),
+                                field.name)
         if found:
             numbers[field.name] = found
 
@@ -563,7 +564,7 @@ def mismatches(fields: List[Field], row: Dict[str, str]) -> Dict[str, str]:
         text = str(row.get(field.name, "")).strip()
         if not text:
             continue
-        if not values.parse_as(text, field.kind):
+        if not values.parse_as(text, field.kind, field.name):
             out[field.name] = (f"declared {field.kind}, but "
                                f"{text!r} does not read as one")
     return out

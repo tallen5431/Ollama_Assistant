@@ -750,7 +750,7 @@ def api_records_csv() -> Any:
     kinds, heads = {}, []
     for name in columns:
         seen = [r["fields"].get(name, "") for r in rows]
-        kinds[name] = declared.get(name) or values.column_kind(seen)
+        kinds[name] = declared.get(name) or values.column_kind(seen, name)
         unit = values.unit_label(kinds[name], seen)
         heads.append(f"{name} ({unit})" if unit else name)
     buffer = io.StringIO()
@@ -760,7 +760,7 @@ def api_records_csv() -> Any:
         stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
         writer.writerow(
             [stamp, _csv_safe(row["routine_name"])] +
-            [_csv_safe(values.number_of(row["fields"].get(name, ""), kinds[name]))
+            [_csv_safe(values.number_of(row["fields"].get(name, ""), kinds[name], name))
              for name in columns])
     return Response(
         buffer.getvalue(),

@@ -84,8 +84,20 @@ _SIGNED = r"(-?\s*(?:" + _NUM + r"))"
 
 # The sign may sit either side of the symbol: -$12.50 and $-12.50 both occur.
 _MONEY_RE = re.compile(r"(-)?\s*([$£€])\s*(-)?\s*(" + _NUM + r")")
-_DISTANCE_RE = re.compile(_SIGNED + r"\s*(mi\b|miles?\b|km\b|kilometres?\b|kilometers?\b)", re.I)
-_SPEED_RE = re.compile(_SIGNED + r"\s*(mph\b|mi/h\b|km/h\b|kph\b)", re.I)
+# Speed is every way of saying distance-over-time, not only the abbreviations.
+# "18.6 miles per hour" and "36 mi/hour" were read as 18.6 and 36 *miles*: the
+# distance pattern matched the front, and "per hour" is allowed to trail a
+# quantity, so a speed became a distance with its denominator thrown away. In
+# a column of speeds written that way the column voted "distance" and tidying
+# rewrote every one of them as miles.
+_PER_HOUR = r"(?:\s*/\s*|\s+per\s+|\s+an\s+)(?:h|hr|hour)s?\b"
+_SPEED_RE = re.compile(
+    _SIGNED + r"\s*(mph\b|kph\b|kmh\b"
+    r"|(?:mi|miles?|km|kilomet(?:er|re)s?)" + _PER_HOUR + r")", re.I)
+# And a distance is not followed by a time it is divided by.
+_DISTANCE_RE = re.compile(
+    _SIGNED + r"\s*(mi\b|miles?\b|km\b|kilometres?\b|kilometers?\b)(?!" + _PER_HOUR + r")",
+    re.I)
 _BARE_RE = re.compile(r"^\s*" + _SIGNED + r"\s*$")
 
 # "4 hours 25 minutes", "3 hours and 8 minutes", "3.35 hours", "45 minutes".
@@ -112,6 +124,7 @@ _ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})")
 # the lookbehind, "20:06" could also match at "0:06".
 _TIME = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?", re.I)
 _ISO_T = re.compile(r"(\d)T(\d)")
+_TAKEN = re.compile(r"^\s*(?:image\s*\d+\s*:\s*)?(?:taken|captured|shot)\b\s*(?:on\s+)?", re.I)
 
 
 def _clean(text: str) -> str:
@@ -189,7 +202,7 @@ def _speed(text: str) -> Optional[Value]:
     match = _SPEED_RE.search(text)
     if not match or not _only_a_quantity(text, [match.span()]):
         return None
-    unit = "km/h" if match.group(2).lower() in ("km/h", "kph") else "mph"
+    unit = "km/h" if match.group(2).lower().startswith(("k", "km")) else "mph"
     digits = _digits(match.group(1))
     return Value(SPEED, digits, float(digits), unit, f"{digits} {unit}")
 
@@ -236,6 +249,11 @@ def _timestamp(text: str) -> Optional[Value]:
     # The T of an ISO stamp is a separator, not a word. Left in, it is residue
     # with a letter in it, and the whole value reads as prose about a date.
     body = _ISO_T.sub(r"\1 \2", text)
+    # The app's own photo-details wording, copied back by a model: "taken
+    # Sunday 20 September 2026 at 21:21 (evening) (UTC-04:00)". Three of
+    # twenty-seven real records were exactly that, and this app could not read
+    # the sentence it writes itself.
+    body = _TAKEN.sub("", body)
     body = _DAYPART.sub("", _WEEKDAY.sub("", body))
     offset = ""
     off = _OFFSET.search(body)
@@ -340,16 +358,69 @@ def parse(text: str) -> Optional[Value]:
     return None
 
 
-def parse_as(text: str, kind: str) -> Optional[Value]:
+# A rate written into the value: "per mile", "/h", "an hour". Recognised so it
+# can be dropped where the column already says it, and only there.
+_RATE_SUFFIX = re.compile(
+    r"\s*(?:per\s+|/\s*|an?\s+)(mile|mi|hour|hr|h|km|kilomet(?:er|re))s?\b\.?\s*$", re.I)
+_RATE_IN_NAME = re.compile(
+    r"(?:\bper\s+|/\s*)(mile|mi|hour|hr|h|km|kilomet(?:er|re))s?\b|\b(hourly)\b", re.I)
+_RATE_CLASS = {"mile": "mile", "mi": "mile", "hour": "hour", "hr": "hour", "h": "hour",
+               "hourly": "hour", "km": "km", "kilometer": "km", "kilometre": "km"}
+# Currency in words. "USD" and "dollars" say what "$" says; written as "$" the
+# value sorts, sums and exports with the rest of its column.
+_CURRENCY_WORD = re.compile(
+    r"^(-?\s*(?:" + _NUM + r"))\s*(?:US\s*)?(?:dollars?|usd|bucks)\b"
+    r"|^(?:US\s*\$|USD)\s*(-?\s*(?:" + _NUM + r"))", re.I)
+
+
+def rate_of(name: str) -> str:
+    """The rate a column name declares — "mile", "hour", "km" — or ""."""
+    match = _RATE_IN_NAME.search(str(name or ""))
+    if not match:
+        return ""
+    return _RATE_CLASS.get((match.group(1) or match.group(2)).lower(), "")
+
+
+def _without_rate(body: str, name: str) -> Optional[str]:
+    """``body`` with a rate suffix the column already states taken off.
+
+    None means the value states a rate the column does not — "$21.91 per mile"
+    under "Earnings per hour" — which is a contradiction to show, not tidy.
+    Without a column name nothing changes here, which is how every caller
+    behaved before names were passed in.
+    """
+    wants = rate_of(name)
+    match = _RATE_SUFFIX.search(body)
+    if not wants or not match:
+        return body
+    said = _RATE_CLASS.get(match.group(1).lower(), "")
+    return body[:match.start()].strip() if said == wants else None
+
+
+def parse_as(text: str, kind: str, name: str = "") -> Optional[Value]:
     """Read one value as a known kind, which is what a column gives us.
 
     A bare "93" in a column of miles is 93 miles — a fact only the column
     knows, and the single most common shape in a real log, because a model
     that has just written "Distance traveled" does not repeat the unit.
+
+    ``name`` is the column's name, where the caller has it. A column called
+    "Earnings per hour" already says per hour, so "23.70 per hour", "$21.91/h"
+    and "37.86 dollars/hour" in it are all $ amounts — in a real log those
+    three shapes sat beside 22 plain numbers, and as text none of them would
+    sum. The rate is only dropped when it is the one the column states.
     """
     body = _clean(text)
     if not body or kind in (TEXT, ""):
         return None
+    if kind == MONEY:
+        body = _without_rate(body, name)
+        if body is None:
+            return None
+        word = _CURRENCY_WORD.match(body)
+        if word:
+            amount = _digits(word.group(1) or word.group(2))
+            body = f"-${amount[1:]}" if amount.startswith("-") else f"${amount}"
     direct = {MONEY: _money, DISTANCE: _distance, SPEED: _speed,
               DURATION: _duration, TIMESTAMP: _timestamp}.get(kind)
     found = direct(body) if direct else None
@@ -377,7 +448,7 @@ def parse_as(text: str, kind: str) -> Optional[Value]:
     return found._replace(approximate=approximate)
 
 
-def column_kind(values: List[str]) -> str:
+def column_kind(values: List[str], name: str = "") -> str:
     """One kind for a whole column, decided by what most of it looks like.
 
     Per value this cannot be done: "102,072" is a number and "102,072 mi" is a
@@ -393,6 +464,10 @@ def column_kind(values: List[str]) -> str:
             continue
         filled += 1
         found = parse(raw)
+        if not found and _names_money(raw):
+            # "37.86 dollars/hour" says it is money; asking whether it is
+            # money, under this column's name, is how to hear it.
+            found = parse_as(raw, MONEY, name)
         if found:
             votes[found.kind] = votes.get(found.kind, 0) + 1
     if not votes:
@@ -411,12 +486,17 @@ def column_kind(values: List[str]) -> str:
     return NUMBER if votes.get(NUMBER) else TEXT
 
 
-def canonical(text: str, kind: str = "") -> str:
+def _names_money(raw: str) -> bool:
+    """Whether a value carries its own currency marker."""
+    return bool(re.search(r"[$£€]|\b(?:dollars?|usd|bucks)\b", str(raw or ""), re.I))
+
+
+def canonical(text: str, kind: str = "", name: str = "") -> str:
     """The standard rendering of one value; unchanged when it cannot be read."""
     flat = " ".join(str(text or "").split())
     if not flat:
         return ""
-    found = parse_as(flat, kind) if kind else parse(flat)
+    found = parse_as(flat, kind, name) if kind else parse(flat)
     return found.text if found else flat
 
 
@@ -426,16 +506,16 @@ def canonical_column(values: List[str], kind: str = "") -> List[str]:
     return [canonical(v, kind) for v in values]
 
 
-def number_of(text: str, kind: str = "") -> str:
+def number_of(text: str, kind: str = "", name: str = "") -> str:
     """The bare number, for a spreadsheet cell. "" when there isn't one.
 
     A cell reading "$115.94" is text to a spreadsheet and will not sum; one
     reading 115.94 under a column headed "Total earnings (USD)" is a number
     and says exactly as much.
     """
-    found = parse_as(text, kind) if kind else parse(text)
+    found = parse_as(text, kind, name) if kind else parse(text)
     if not found or found.kind == TIMESTAMP:
-        return canonical(text, kind) if found else " ".join(str(text or "").split())
+        return canonical(text, kind, name) if found else " ".join(str(text or "").split())
     return found.digits
 
 

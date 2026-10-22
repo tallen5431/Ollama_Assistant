@@ -410,3 +410,107 @@ class TestTheThingsStandardisingWillNotFix:
                 self.row(**{"Start odometer": "100,409", "End odometer": "100,469",
                             "Total earnings": "$53.54"})]
         assert check.check_duplicates(rows, check.find_roles(self.COLUMNS)) == 0
+
+
+class TestASpeedWrittenOutIsStillASpeed:
+    """From a real log: "18.6 miles per hour" and "36 mi/hour" were read as 18.6
+    and 36 *miles*. The distance pattern matched the front and "per hour" is
+    allowed to trail a quantity, so the denominator was thrown away — and in a
+    column of speeds written that way, tidying would have rewritten every one
+    of them as a distance."""
+
+    @pytest.mark.parametrize("text, expected", [
+        ("18.6 miles per hour", "18.6 mph"), ("36 mi/hour", "36 mph"),
+        ("40 mi/hr", "40 mph"), ("22 miles/hour", "22 mph"),
+        ("12 kilometres per hour", "12 km/h"), ("10 km/h", "10 km/h"),
+        ("30 kph", "30 km/h"), ("22 mph", "22 mph"),
+    ])
+    def test_every_way_of_writing_it(self, text, expected):
+        found = values.parse(text)
+        assert found.kind == values.SPEED and found.text == expected
+
+    def test_a_speed_is_never_read_as_a_distance(self):
+        assert values.parse_as("18.6 miles per hour", values.DISTANCE) is None
+
+    def test_a_column_of_them_votes_speed(self):
+        column = ["18.6 miles per hour", "36 miles per hour", "22.1 miles per hour"]
+        kind = values.column_kind(column)
+        assert kind == values.SPEED
+        assert [values.canonical(v, kind) for v in column] == \
+            ["18.6 mph", "36 mph", "22.1 mph"]
+
+    def test_distances_are_unaffected(self):
+        assert values.parse("93 mi").kind == values.DISTANCE
+        assert values.parse("102,072 miles").text == "102072 mi"
+        assert values.parse("54 miles to Brighton") is None
+
+
+class TestTheAppReadsItsOwnTimestamps:
+    """The photo-details note says "taken Sunday 20 September 2026 at 21:21
+    (evening) (UTC-04:00)". Models copy it back word for word — three of
+    twenty-seven real records did — and the app could not read its own
+    sentence, so those rows could not be sorted, checked or subtracted."""
+
+    @pytest.mark.parametrize("text, expected", [
+        ("taken Sunday 20 September 2026 at 21:21 (evening) (UTC-04:00)",
+         "2026-09-20 21:21 UTC-04:00"),
+        ("taken Monday 21 September 2026 at 03:06 (night) (UTC-04:00)",
+         "2026-09-21 03:06 UTC-04:00"),
+        ("Image 1: taken Friday 28 August 2026 at 20:10 (evening) (UTC-04:00)",
+         "2026-08-28 20:10 UTC-04:00"),
+        ("taken Thursday 10 September 2026 at 17:03 (afternoon)", "2026-09-10 17:03"),
+    ])
+    def test_its_own_wording_is_a_timestamp(self, text, expected):
+        found = values.parse_as(text, values.TIMESTAMP)
+        assert found and found.text == expected
+
+    def test_two_of_them_subtract(self):
+        start = values.parse("taken Sunday 20 September 2026 at 21:21 (evening) (UTC-04:00)")
+        end = values.parse("taken Monday 21 September 2026 at 03:06 (night) (UTC-04:00)")
+        assert round((end.number - start.number) / 3600, 4) == 5.75
+
+    def test_a_time_with_no_date_is_still_not_a_timestamp(self):
+        """No guessing the day: "19:36 (evening)" could be any evening."""
+        assert values.parse_as("19:36 (evening) (UTC-04:00)", values.TIMESTAMP) is None
+        assert values.parse_as("18:47", values.TIMESTAMP) is None
+
+
+class TestARateTheColumnAlreadyStates:
+    """A real "Earnings per hour" column held 22 plain numbers beside
+    "23.70 per hour", "$21.91/h" and "37.86 dollars/hour". As text those would
+    not sum or chart, and the CSV wrote them out as text."""
+
+    @pytest.mark.parametrize("text, column, expected", [
+        ("2.16 per mile", "Earnings per mile", "$2.16"),
+        ("23.70 per hour", "Earnings per hour", "$23.70"),
+        ("$21.91/h", "Earnings per hour", "$21.91"),
+        ("37.86 dollars/hour", "Earnings per hour", "$37.86"),
+        ("1.05 dollars/mile", "Earnings per mile", "$1.05"),
+        ("$12 an hour", "Hourly pay", "$12"),
+    ])
+    def test_is_dropped(self, text, column, expected):
+        assert values.canonical(text, values.MONEY, column) == expected
+
+    def test_a_rate_the_column_does_not_state_is_left_alone(self):
+        """$21.91 per mile under "Earnings per hour" is a contradiction to show,
+        not something to tidy away."""
+        assert values.canonical("$21.91 per mile", values.MONEY, "Earnings per hour") == \
+            "$21.91 per mile"
+
+    @pytest.mark.parametrize("text, expected", [
+        ("USD 40.00", "$40.00"), ("115.94 dollars", "$115.94"), ("-12.50 dollars", "-$12.50"),
+    ])
+    def test_currency_in_words_is_the_symbol(self, text, expected):
+        assert values.canonical(text, values.MONEY, "Total earnings") == expected
+
+    def test_without_a_name_nothing_changes(self):
+        """Every caller before names were passed: same answers as before."""
+        assert values.canonical("$1.24 per mile", values.MONEY) == "$1.24"
+        assert values.canonical("2.16 per mile", values.MONEY) == "2.16 per mile"
+
+    def test_the_export_gives_a_number(self):
+        assert values.number_of("$21.91/h", values.MONEY, "Earnings per hour") == "21.91"
+
+    def test_and_the_column_votes_money(self):
+        column = ["23.95", "23.70 per hour", "$21.91/h", "37.86 dollars/hour", "19.28"]
+        assert values.column_kind(column, "Earnings per hour") == values.MONEY
