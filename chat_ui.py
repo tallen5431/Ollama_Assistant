@@ -482,7 +482,8 @@ _PAGE = r"""<!doctype html>
       .drawer-tabs { display:flex; gap:0.2rem; background:var(--surface2);
         border:1px solid var(--border-soft); border-radius:var(--pill);
         padding:0.2rem; flex:1 1 auto; min-width:0; max-width:22rem; }
-      .tab { font-size:var(--fs-xs); padding:0.35rem 0.7rem; color:var(--muted);
+      .tab { font-size:var(--fs-xs); padding:0.35rem 0.45rem; color:var(--muted);
+        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
         background:transparent; border:0; border-radius:var(--pill);
         flex:1 1 0; min-width:0; }
       .tab:hover:not(.active) { background:var(--surface3); }
@@ -540,6 +541,28 @@ _PAGE = r"""<!doctype html>
       .convo-act:hover { color:var(--text); background:var(--surface2); }
       .convo-empty { color:var(--muted); font-size:var(--fs-sm); margin:0.5rem 0.2rem;
         line-height:1.5; }
+      /* Models: one row each, name above what it is and what it is for. */
+      #modelPane { overflow-y:auto; display:flex; flex-direction:column; gap:0.25rem; }
+      #modelPane > * { flex-shrink:0; }
+      #modelPane .mrow { display:flex; align-items:center; gap:0.3rem;
+        padding:0.35rem 0.45rem; border-radius:var(--r1); }
+      #modelPane .mrow:hover { background:var(--surface2); }
+      #modelPane .mtext { flex:1 1 auto; min-width:0; display:flex;
+        flex-direction:column; gap:0.1rem; }
+      #modelPane .mname { font-size:var(--fs-sm); overflow:hidden;
+        text-overflow:ellipsis; white-space:nowrap; }
+      #modelPane .mrole { color:var(--accent); }
+      #modelPane .mpull { display:flex; gap:0.3rem; }
+      #modelPane .mpull input { flex:1 1 auto; min-width:0; }
+      #modelPane progress { width:100%; height:0.5rem; }
+      #modelPane #mWarn:empty { display:none; }
+      #mPulls .mname { white-space:normal; }
+      /* On a phone the header has no room to spare, and with history on the
+         same panel is one tap further in, behind ☰. With history off there is
+         no ☰, so the shortcut stays. */
+      @media (max-width: 640px) {
+        #menu:not([hidden]) ~ #manageModels { display:none; }
+      }
       /* Thirty threads is a wall of titles. Days give it somewhere to land. */
       .daymark { font-size:var(--fs-xs); color:var(--faint); font-weight:600;
         text-transform:uppercase; letter-spacing:0.05em;
@@ -790,6 +813,7 @@ _PAGE = r"""<!doctype html>
         <div class="drawer-tabs">
           <button id="tabChats" class="tab active" type="button">Chats</button>
           <button id="tabRoutines" class="tab" type="button">Routines</button>
+          <button id="tabModels" class="tab" type="button">Models</button>
           <button id="tabRecords" class="tab tab-link" type="button" title="Open the records log">Records ↗</button>
         </div>
         <button id="drawerClose" class="iconbtn" title="Close" type="button"><svg class="i" aria-hidden="true"><use href="#i-close"></use></svg></button>
@@ -870,6 +894,26 @@ _PAGE = r"""<!doctype html>
           </div>
         </div>
       </div>
+      <!-- What is on the desktop's GPU and disk, from here rather than a
+           terminal on another machine. -->
+      <div id="modelPane" hidden>
+        <p class="convo-empty" id="mWarn"></p>
+        <div class="searchhead">In memory now</div>
+        <div id="mLoaded"></div>
+        <button id="mFree" type="button" hidden>Free all GPU memory</button>
+        <div class="searchhead">Download a model</div>
+        <div class="mpull">
+          <input id="mName" placeholder="e.g. qwen3:4b" autocomplete="off"
+                 autocapitalize="off" spellcheck="false" maxlength="200">
+          <button class="primary" id="mPull" type="button">Download</button>
+        </div>
+        <div class="chips" id="mSuggest"></div>
+        <p class="hint">Names are as on <a href="https://ollama.com/library"
+          target="_blank" rel="noopener noreferrer">ollama.com/library</a>.</p>
+        <div id="mPulls"></div>
+        <div class="searchhead">Installed</div>
+        <div id="mInstalled"></div>
+      </div>
     </aside>
     <aside class="sheet" id="photometa" hidden>
       <div class="drawer-head">
@@ -888,6 +932,7 @@ _PAGE = r"""<!doctype html>
         <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
         <label class="status model-label" for="model">Model</label>
         <select id="model" title="Choose which local model answers"></select>
+        <button id="manageModels" class="iconbtn" type="button" title="Manage models — download, delete, free GPU memory"><svg class="i" aria-hidden="true"><use href="#i-sliders"></use></svg></button>
         <button id="theme" class="iconbtn" type="button" title="Switch between light and dark"><svg class="i i-sun" aria-hidden="true"><use href="#i-sun"></use></svg><svg class="i i-moon" aria-hidden="true"><use href="#i-moon"></use></svg></button>
         <button id="newChat" title="Start a new conversation" type="button"><svg class="i" aria-hidden="true"><use href="#i-plus"></use></svg><span>New chat</span></button>
       </header>
@@ -1058,6 +1103,8 @@ _PAGE = r"""<!doctype html>
       const routineWarnEl = document.getElementById("routineWarn");
       const tabChatsEl = document.getElementById("tabChats");
       const tabRoutinesEl = document.getElementById("tabRoutines");
+      const tabModelsEl = document.getElementById("tabModels");
+      const modelPaneEl = document.getElementById("modelPane");
       const rNameEl  = document.getElementById("rName");
       const rBodyEl  = document.getElementById("rBody");
       const rPhotosEl = document.getElementById("rPhotos");
@@ -3677,7 +3724,7 @@ _PAGE = r"""<!doctype html>
 
       function openDrawer(pane) {
         drawerEl.hidden = false; backdropEl.hidden = railed();
-        showPane(pane === "routines" || pane === "records" ? pane : "chats");
+        showPane(["routines", "records", "models"].indexOf(pane) >= 0 ? pane : "chats");
       }
       function closeDrawer() { drawerEl.hidden = true; backdropEl.hidden = true; }
       // Only when it is in the way. On a rail it is furniture, not a dialog.
@@ -4330,11 +4377,270 @@ _PAGE = r"""<!doctype html>
         if (which === "records") { await openRecords(); return; }
         convoPaneEl.hidden = which !== "chats";
         routinePaneEl.hidden = which !== "routines";
+        modelPaneEl.hidden = which !== "models";
         tabChatsEl.classList.toggle("active", which === "chats");
         tabRoutinesEl.classList.toggle("active", which === "routines");
+        tabModelsEl.classList.toggle("active", which === "models");
         if (which === "routines") { closeRoutineEditor(); renderRoutineList(); }
+        else if (which === "models") refreshModelPane();
         else refreshConversations();
       }
+
+      // ---- Models ----
+      // What is installed on the desktop, what is holding its GPU memory, and
+      // downloading or removing a model — without a terminal on another
+      // machine. The server decides who may change anything (MODEL_ADMIN);
+      // the page only hides buttons it would refuse anyway.
+      const mWarnEl = document.getElementById("mWarn");
+      const mLoadedEl = document.getElementById("mLoaded");
+      const mInstalledEl = document.getElementById("mInstalled");
+      const mPullsEl = document.getElementById("mPulls");
+      const mNameEl = document.getElementById("mName");
+      const mFreeBtn = document.getElementById("mFree");
+      // Small and useful alongside a big answering model, each for a job this
+      // app already has a setting for.
+      const MODEL_SUGGESTIONS = [
+        ["qwen3:4b", "small helper: planner, distiller"],
+        ["llama3.2:3b", "small helper"],
+        ["nomic-embed-text", "page focus (WEB_EMBED_MODEL)"],
+        ["qwen2.5vl:7b", "reads photos"],
+      ];
+      let canManage = false;
+      const pulling = {};   // name → the progress row being drawn
+
+      function gb(bytes) {
+        const n = Number(bytes) || 0;
+        return n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : Math.round(n / 1e6) + " MB";
+      }
+
+      function modelRow(name, meta, roles, actions) {
+        const row = document.createElement("div");
+        row.className = "mrow";
+        const text = document.createElement("div");
+        text.className = "mtext";
+        const title = document.createElement("span");
+        title.className = "mname"; title.textContent = name; title.title = name;
+        const sub = document.createElement("span");
+        sub.className = "convo-meta";
+        sub.textContent = meta;
+        text.appendChild(title); text.appendChild(sub);
+        if (roles && roles.length) {
+          const role = document.createElement("span");
+          role.className = "convo-meta mrole";
+          role.textContent = "used as: " + roles.join(", ");
+          text.appendChild(role);
+        }
+        row.appendChild(text);
+        // Each action is [label, hover text, what it does].
+        for (const action of actions) {
+          const btn = document.createElement("button");
+          btn.type = "button"; btn.className = "convo-act";
+          btn.textContent = action[0]; btn.title = action[1];
+          btn.addEventListener("click", () => action[2](btn));
+          row.appendChild(btn);
+        }
+        return row;
+      }
+
+      async function refreshModelPane() {
+        let status = {}, installed = [];
+        try {
+          const [a, b] = await Promise.all([fetch("api/models/status"), fetch("api/models")]);
+          status = await a.json();
+          const data = await b.json();
+          installed = Array.isArray(data.models) ? data.models : [];
+          if (!b.ok || data.error) status.error = status.error || data.error;
+        } catch (e) {
+          status.error = "Could not reach the server.";
+        }
+        canManage = !!status.manage;
+        mWarnEl.textContent = status.error || (canManage ? "" : status.manage_reason || "");
+        document.getElementById("mPull").disabled = !canManage;
+        mNameEl.disabled = !canManage;
+        const roles = status.roles || {};
+
+        mLoadedEl.innerHTML = "";
+        const loaded = status.loaded || [];
+        if (!loaded.length) {
+          const none = document.createElement("p");
+          none.className = "convo-empty";
+          none.textContent = status.error ? "" : "Nothing loaded — the GPU is free.";
+          mLoadedEl.appendChild(none);
+        }
+        for (const m of loaded) {
+          const until = m.expires_at ? new Date(m.expires_at) : null;
+          const meta = gb(m.size_vram) + " of GPU memory"
+            + (m.size > m.size_vram ? " (+" + gb(m.size - m.size_vram) + " in RAM)" : "")
+            + (until && !isNaN(until) && until.getFullYear() < 2200
+               ? " · until " + until.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+               : "");
+          mLoadedEl.appendChild(modelRow(m.name, meta, roles[m.name],
+            canManage ? [["Unload", "Free its memory now", (btn) => unloadModel(m.name, btn)]] : []));
+        }
+        mFreeBtn.hidden = !canManage || loaded.length < 2;
+
+        mInstalledEl.innerHTML = "";
+        installed.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+        for (const m of installed) {
+          const name = m.name || m.model;
+          if (!name) continue;
+          const d = m.details || {};
+          const meta = [gb(m.size), d.parameter_size, d.quantization_level,
+                        m.vision ? "sees images" : ""].filter(Boolean).join(" · ");
+          const actions = [["Use", "Answer with this model",
+                            () => { modelEl.value = name;
+                                    modelEl.dispatchEvent(new Event("change"));
+                                    dismissDrawer(); }]];
+          if (canManage) {
+            actions.push(["✕", "Delete from disk", (btn) => deleteModel(name, roles[name], btn)]);
+          }
+          mInstalledEl.appendChild(modelRow(name, meta, roles[name], actions));
+        }
+        if (!installed.length && !status.error) {
+          const none = document.createElement("p");
+          none.className = "convo-empty";
+          none.textContent = "No models installed yet. Download one above.";
+          mInstalledEl.appendChild(none);
+        }
+
+        const chips = document.getElementById("mSuggest");
+        chips.innerHTML = "";
+        const have = installed.map(m => m.name || m.model);
+        for (const [name, why] of MODEL_SUGGESTIONS) {
+          if (have.indexOf(name) >= 0 || have.indexOf(name + ":latest") >= 0) continue;
+          const chip = document.createElement("button");
+          chip.type = "button"; chip.className = "chip";
+          chip.textContent = name; chip.title = why;
+          chip.disabled = !canManage;
+          chip.addEventListener("click", () => { mNameEl.value = name; mNameEl.focus(); });
+          chips.appendChild(chip);
+        }
+        // A download started elsewhere — another device, or this page before
+        // it was reloaded — still shows where it has got to.
+        for (const p of status.pulls || []) {
+          if (!pulling[p.name]) drawPull(p.name, p);
+        }
+      }
+
+      function drawPull(name, state) {
+        let row = pulling[name];
+        if (!row) {
+          row = document.createElement("div");
+          row.className = "mrow";
+          const text = document.createElement("div");
+          text.className = "mtext";
+          row.label = document.createElement("span");
+          row.label.className = "mname";
+          row.bar = document.createElement("progress");
+          row.bar.max = 100;
+          text.appendChild(row.label); text.appendChild(row.bar);
+          row.appendChild(text);
+          mPullsEl.appendChild(row);
+          pulling[name] = row;
+        }
+        if (state.error) {
+          row.label.textContent = name + " — " + state.error;
+          row.bar.hidden = true;
+          return;
+        }
+        const percent = typeof state.percent === "number" ? state.percent : null;
+        row.label.textContent = name + " — " + (state.status || "starting")
+          + (percent !== null ? " " + percent + "%" : "");
+        if (percent !== null) row.bar.value = percent; else row.bar.removeAttribute("value");
+      }
+
+      async function pullModel() {
+        const name = mNameEl.value.trim();
+        if (!name || !canManage) return;
+        if (pulling[name] && !pulling[name].finished) return;
+        if (pulling[name]) { pulling[name].remove(); delete pulling[name]; }
+        mWarnEl.textContent = "";
+        drawPull(name, { status: "starting" });
+        mNameEl.value = "";
+        try {
+          const resp = await fetch("api/models/pull", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name }) });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            drawPull(name, { error: data.error || "Could not start the download." });
+            pulling[name].finished = true;
+            return;
+          }
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let at;
+            while ((at = buffer.indexOf("\n")) >= 0) {
+              const line = buffer.slice(0, at).trim();
+              buffer = buffer.slice(at + 1);
+              if (!line) continue;       // the keep-alive the server sends
+              let msg;
+              try { msg = JSON.parse(line); } catch (e) { continue; }
+              if (msg.done) {
+                // Listed as installed first, then the progress row goes, so
+                // there is no moment where the model appears to be nowhere.
+                await loadModels();
+                pulling[name].finished = true;
+                await refreshModelPane();
+                pulling[name].remove(); delete pulling[name];
+                return;
+              }
+              drawPull(name, msg);
+              if (msg.error) { pulling[name].finished = true; return; }
+            }
+          }
+        } catch (e) {
+          // The page lost the connection; the server carries on downloading,
+          // and reopening the panel shows how far it has got.
+          drawPull(name, { error: "lost sight of the download — it carries on; reopen Models to check" });
+          pulling[name].finished = true;
+        }
+      }
+
+      async function deleteModel(name, roles, btn) {
+        const warn = roles && roles.length
+          ? "\n\nThis app is set to use it as: " + roles.join(", ") + ". That will stop working until it is downloaded again."
+          : "";
+        if (!window.confirm("Delete " + name + " from the desktop's disk?" + warn
+                            + "\n\nThis cannot be undone; getting it back means downloading it again.")) return;
+        btn.disabled = true;
+        try {
+          const resp = await fetch("api/models/delete", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name }) });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) { mWarnEl.textContent = data.error || "Could not delete it."; btn.disabled = false; return; }
+        } catch (e) {
+          mWarnEl.textContent = "Could not reach the server."; btn.disabled = false; return;
+        }
+        await loadModels();
+        await refreshModelPane();
+      }
+
+      async function unloadModel(name, btn, all) {
+        if (btn) btn.disabled = true;
+        try {
+          const resp = await fetch("api/models/unload", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(all ? { all: true } : { name: name }) });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            mWarnEl.textContent = data.error || "Could not unload it.";
+          }
+        } catch (e) {
+          mWarnEl.textContent = "Could not reach the server.";
+        }
+        await refreshModelPane();
+      }
+
+      document.getElementById("mPull").addEventListener("click", pullModel);
+      mNameEl.addEventListener("keydown", (e) => { if (e.key === "Enter") pullModel(); });
+      mFreeBtn.addEventListener("click", () => unloadModel("", mFreeBtn, true));
 
       async function openRecords() {
         // The drawer has done its job. On a rail it stays, so a conversation
@@ -5194,6 +5500,8 @@ _PAGE = r"""<!doctype html>
       routineEditBtn.addEventListener("click", () => openDrawer("routines"));
       tabChatsEl.addEventListener("click", () => showPane("chats"));
       tabRoutinesEl.addEventListener("click", () => showPane("routines"));
+      tabModelsEl.addEventListener("click", () => showPane("models"));
+      document.getElementById("manageModels").addEventListener("click", () => openDrawer("models"));
       tabRecordsEl.addEventListener("click", () => showPane("records"));
       routineNewBtn.addEventListener("click", () => openRoutineEditor(null));
       rSaveBtn.addEventListener("click", saveRoutine);

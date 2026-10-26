@@ -25,10 +25,11 @@ import queue
 import re
 import socket
 import sqlite3
+import ipaddress
 import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -52,6 +53,7 @@ from config import (
     get_image_turns,
     get_keep_alive,
     get_max_body_bytes,
+    get_model_admin,
     get_num_ctx,
     get_ollama_base,
     get_photo_keep_days,
@@ -62,6 +64,7 @@ from config import (
     get_server_threads,
     get_share_photo_location,
     get_vision_model,
+    get_web_embed_model,
     get_web_fetch_hops,
     get_web_search_rounds,
     get_web_follow_links,
@@ -75,6 +78,7 @@ from config import (
 )
 from ollama_client import chat as ollama_chat
 from ollama_client import chat_stream, has_vision, is_ocr, list_models, ocr_models, vision_models
+import ollama_client
 
 # -------------------------------------------------------------------
 # Flask app
@@ -312,6 +316,183 @@ def health() -> Any:
             "photo_meta": get_photo_meta_default(),
         }
     )
+
+
+# -------------------------------------------------------------------
+# Managing models — what is loaded, downloading, deleting, unloading
+# -------------------------------------------------------------------
+
+# Downloads in progress, by model name, so a panel opened (or reopened on
+# another device) mid-download shows where it has got to. A download runs to
+# the end whether or not anyone is watching: a 19 GB model abandoned at 90%
+# because a phone went to sleep is twenty minutes thrown away.
+_PULLS: Dict[str, Dict[str, Any]] = {}
+_PULLS_LOCK = threading.Lock()
+
+
+def _may_manage_models() -> Tuple[bool, str]:
+    """Whether this request may change what is installed or loaded, and why not.
+
+    Downloading fills the desktop's disk and deleting cannot be undone, so by
+    default only someone who has logged in (Basic Auth on) or who is on this
+    machine, the LAN or the tailnet may. Behind the reverse proxy the address
+    is the one the proxy reports (ProxyFix); exposed directly to the internet
+    without a proxy, a client can claim any address, which is one more reason
+    the README says to turn Basic Auth on before doing that.
+    """
+    mode = get_model_admin()
+    if mode == "off":
+        return False, "Model management is turned off here (MODEL_ADMIN=off)."
+    if mode == "on" or AUTH_ENABLED:
+        return True, ""
+    try:
+        address = ipaddress.ip_address((request.remote_addr or "").split("%")[0])
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        return True, ""
+    return False, ("Downloading and deleting models is only allowed from this "
+                   "machine, the LAN or the tailnet unless Basic Auth is on "
+                   "(MODEL_ADMIN=on overrides).")
+
+
+def _roles() -> Dict[str, List[str]]:
+    """What each configured model is used for, so a delete can say what it breaks."""
+    out: Dict[str, List[str]] = {}
+    for name, role in ((get_default_model(), "default answer"),
+                       (get_planner_model(), "search planner"),
+                       (get_distiller_model(), "page distiller"),
+                       (get_web_embed_model(), "page focus"),
+                       (get_vision_model(), "image reader")):
+        if name:
+            out.setdefault(name, []).append(role)
+    return out
+
+
+@app.route("/api/models/status", methods=["GET"])
+def api_models_status() -> Any:
+    """What is in memory now, what each model is for, and downloads under way."""
+    allowed, why = _may_manage_models()
+    try:
+        loaded = [{
+            "name": m.get("name") or m.get("model") or "",
+            "size": m.get("size") or 0,
+            "size_vram": m.get("size_vram") or 0,
+            "expires_at": m.get("expires_at") or "",
+            "context": m.get("context_length") or 0,
+        } for m in ollama_client.loaded_models()]
+        error = ""
+    except ValueError as exc:
+        loaded, error = [], str(exc)
+    with _PULLS_LOCK:
+        pulls = [dict(v, name=k) for k, v in _PULLS.items()]
+    return jsonify({"loaded": loaded, "roles": _roles(), "pulls": pulls,
+                    "manage": allowed, "manage_reason": why, "error": error})
+
+
+def _model_request() -> Tuple[Optional[str], Any]:
+    """The model named in a JSON body, or the response refusing it."""
+    if not request.is_json:
+        # JSON only: a plain HTML form on another site can POST here
+        # cross-origin without a preflight, and these change the disk.
+        return None, (jsonify({"error": "Expected a JSON request"}), 415)
+    allowed, why = _may_manage_models()
+    if not allowed:
+        return None, (jsonify({"error": why}), 403)
+    body = request.get_json(silent=True)
+    name = str((body or {}).get("name") or "").strip() if isinstance(body, dict) else ""
+    if not ollama_client.valid_model_name(name):
+        return None, (jsonify({"error": f"Not a model name: {name[:80]!r}"}), 400)
+    return name, None
+
+
+@app.route("/api/models/pull", methods=["POST"])
+def api_models_pull() -> Any:
+    """Download a model, streaming progress as NDJSON.
+
+    Lines are ``{"status", "percent"?, "completed"?, "total"?}``, then
+    ``{"done": true}`` or ``{"error"}``. The download carries on if the page
+    goes away; /api/models/status reports it.
+    """
+    name, refused = _model_request()
+    if refused:
+        return refused
+    with _PULLS_LOCK:
+        if name in _PULLS and not _PULLS[name].get("finished"):
+            return jsonify({"error": f"{name} is already downloading"}), 409
+        _PULLS[name] = {"status": "starting", "percent": 0}
+
+    def produce(emit: Any) -> None:
+        last = [-1]
+        try:
+            for line in ollama_client.pull_model(name):
+                total, done = line.get("total") or 0, line.get("completed") or 0
+                percent = round(done * 100 / total) if total else None
+                state = {"status": str(line.get("status") or ""), "percent": percent,
+                         "completed": done, "total": total}
+                with _PULLS_LOCK:
+                    _PULLS[name] = state
+                # Whole percents and status changes only: Ollama reports every
+                # few hundred kilobytes, which over 19 GB is its own download.
+                key = (state["status"], percent)
+                if key != last[0]:
+                    last[0] = key
+                    emit(_line(state))
+            emit(_line({"done": True, "name": name}))
+            with _PULLS_LOCK:
+                _PULLS.pop(name, None)
+        except ValueError as exc:
+            with _PULLS_LOCK:
+                _PULLS[name] = {"status": "failed", "error": str(exc), "finished": True}
+            emit(_line({"error": str(exc)}))
+        except Exception as exc:  # noqa: BLE001 - report, never 500 mid-stream
+            logger.exception("Pulling %s failed", name)
+            with _PULLS_LOCK:
+                _PULLS[name] = {"status": "failed", "error": str(exc), "finished": True}
+            emit(_line({"error": f"Download failed: {exc}"}))
+
+    return _detached_stream(produce, "model-pull")
+
+
+@app.route("/api/models/delete", methods=["POST"])
+def api_models_delete() -> Any:
+    """Remove a model from disk. The page asks first; this cannot be undone."""
+    name, refused = _model_request()
+    if refused:
+        return refused
+    try:
+        ollama_client.delete_model(name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 502
+    with _PULLS_LOCK:
+        _PULLS.pop(name, None)
+    return jsonify({"ok": True, "name": name})
+
+
+@app.route("/api/models/unload", methods=["POST"])
+def api_models_unload() -> Any:
+    """Free a model's memory now — or every loaded model's, with ``{"all": true}``."""
+    body = request.get_json(silent=True) if request.is_json else None
+    if isinstance(body, dict) and body.get("all") is True:
+        allowed, why = _may_manage_models()
+        if not allowed:
+            return jsonify({"error": why}), 403
+        try:
+            names = [m.get("name") or m.get("model") for m in ollama_client.loaded_models()]
+            for loaded in names:
+                if loaded:
+                    ollama_client.unload_model(loaded)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 502
+        return jsonify({"ok": True, "unloaded": [n for n in names if n]})
+    name, refused = _model_request()
+    if refused:
+        return refused
+    try:
+        ollama_client.unload_model(name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"ok": True, "unloaded": [name]})
 
 
 @app.route("/api/models", methods=["GET"])

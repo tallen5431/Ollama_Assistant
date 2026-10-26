@@ -268,6 +268,17 @@ def get_web_render() -> bool:
     return _flag("WEB_RENDER", default="0")
 
 
+def get_model_admin() -> str:
+    """Who may download, delete and unload models from the page.
+
+    ``auto`` (default): anyone when Basic Auth is on, otherwise only browsers
+    on this machine, the LAN or the tailnet. ``on``: anyone who can reach the
+    app. ``off``: nobody — the panel only shows what is installed and loaded.
+    """
+    value = os.getenv("MODEL_ADMIN", "auto").strip().lower()
+    return value if value in ("auto", "on", "off") else "auto"
+
+
 def get_web_search_rounds() -> int:
     """How many extra searches a turn may run when the pages fall short.
 
