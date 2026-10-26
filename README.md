@@ -162,6 +162,7 @@ All settings are environment variables (the server manager injects them):
 | `WEB_SEARCH_ROUNDS` | `1`                         | Extra searches a turn may run when the pages read do not answer the question. `0` turns it off; at most `3` |
 | `WEB_CACHE_MINUTES` | `120`                       | How long a fetched page and its distillation are reused. Search results are kept a quarter as long. `0` turns it off |
 | `OLLAMA_NUM_CTX`    | `8192`                      | Context window requested when web context is attached |
+| `MODEL_ADMIN`       | `auto`                      | Who may download, delete and unload models from the **Models** panel. `auto`: anyone once Basic Auth is on, otherwise only this machine, the LAN and the tailnet. `on`: anyone who can reach the app. `off`: nobody — the panel only shows what is there |
 | `CHAT_AUTH_USER` / `CHAT_AUTH_PASSWORD` | *(unset)* | Enable HTTP Basic Auth (or use `CHAT_AUTH=user:password`). Both halves are needed — with only one set, auth stays **off**, and the startup banner says so rather than leaving you to assume otherwise |
 | `CHAT_AUTH_REALM`   | `Ollama Chat`               | Name the browser shows in its password prompt. Only read when Basic Auth is on |
 | `VOSK_MODEL`        | `en-us`                     | Default Vosk language id (e.g. `es`, `fr`, `de`) |
@@ -1128,6 +1129,36 @@ grows with the window. `ollama ps` is the practical test: if `PROCESSOR` stops
 saying `100% GPU` after you raise it, you have gone past what the card holds
 and it will be far slower.
 
+## Managing models
+
+☰ → **Models** (or the sliders button beside the model picker) shows what is on
+the desktop without a terminal on it:
+
+- **In memory now** — each loaded model, how much GPU memory it holds (and how
+  much spilled into RAM, which is why a too-big model is slow), and when Ollama
+  will unload it. **Unload** frees one now; **Free all GPU memory** frees them
+  all, which is the quick fix when switching from a 30B model to something else
+  stalls on a 24 GB card.
+- **Download a model** — type a name as it appears on
+  [ollama.com/library](https://ollama.com/library) (`qwen3:4b`,
+  `nomic-embed-text`) or tap a suggestion. Progress is shown as it goes, and the
+  download carries on if the page is closed or the phone sleeps — reopen the
+  panel to see where it has got to. Finished models appear in the model picker
+  straight away.
+- **Installed** — size, parameters and quantisation, which ones can see images,
+  and what this app uses each one for (*used as: default answer, search
+  planner*). **Use** switches the conversation to it. **✕** deletes it from disk
+  after asking, and the question says what will stop working if this app is set
+  to use it.
+
+Downloading fills the desktop's disk and deleting cannot be undone, so by
+default only someone on this machine, the LAN or the tailnet may do either —
+or anyone once Basic Auth is on (`MODEL_ADMIN` changes this). Everyone else sees
+the lists and a line saying why the buttons are off. Behind the reverse proxy
+the address checked is the one the proxy reports; if the app were exposed to the
+internet *without* a proxy, a visitor could claim any address, which is one more
+reason to turn Basic Auth on before doing that.
+
 ## Conversation history
 
 Threads are stored in SQLite (`CHAT_DB`, default `./chat.db`) rather than in the
@@ -2004,6 +2035,10 @@ found nothing, and only the last of those means the retrieval worked.
 | `GET /healthz`       | Plain `ok` health probe (stays open even when auth is on) |
 | `GET /api/health`    | JSON status (Ollama host and whether it answers, default model, auth + voice on/off, and `search_backend` — the SearXNG URL this process actually has, or `"duckduckgo"`) |
 | `GET /api/models`    | Installed models (proxy to Ollama `/api/tags`) |
+| `GET /api/models/status` | What is loaded (`/api/ps`), what each configured model is used for, downloads under way, and whether this visitor may change anything |
+| `POST /api/models/pull` | Download a model — body `{ "name" }`. Streams NDJSON progress, then `{"done": true}` or `{"error"}`; carries on if the client leaves |
+| `POST /api/models/delete` | Remove a model from disk — body `{ "name" }` |
+| `POST /api/models/unload` | Free a model's memory now — body `{ "name" }`, or `{ "all": true }` |
 | `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears — that stream also sends a blank line every 20 s while the model is quiet, so skip empty lines rather than parsing them (both readers in the page already do). Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
 | `POST /api/chat/cancel` | Stop the turn running for a conversation — body `{ "conversation_id" }`. Needed because generation outlives the connection |
 | `GET /api/chat/status` | Is a turn still being generated for this conversation? `?conversation_id=` → `{"running": true\|false}`. Lets a page whose connection dropped tell "still coming" from "the server died", which otherwise look identical |

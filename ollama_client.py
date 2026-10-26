@@ -12,6 +12,8 @@ for internet traffic must not swallow that direct call.
 
 from __future__ import annotations
 
+import json
+import re
 import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -79,6 +81,85 @@ def post_ollama(path: str, payload: Dict[str, Any], timeout: float | None = None
         raise ValueError(f"Could not reach Ollama at {get_ollama_base()}: {exc}") from exc
 
     return _parse(resp, url)
+
+
+# ---------------------------------------------------------------------------
+# Managing models: what is loaded, downloading, deleting, unloading
+# ---------------------------------------------------------------------------
+
+# A name as Ollama writes one: "qwen3:30b", "library/llama3.2:3b",
+# "hf.co/user/repo:Q4_K_M". Nothing else reaches Ollama's model endpoints, so a
+# typo is a clear refusal here rather than a confusing one from Ollama.
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]*(?:/[A-Za-z0-9._\-]+)*(?::[A-Za-z0-9._\-]+)?$")
+
+
+def valid_model_name(name: str) -> bool:
+    return bool(name) and len(name) <= 200 and bool(_MODEL_NAME.match(name))
+
+
+def loaded_models() -> List[Dict[str, Any]]:
+    """Models in memory now, with how much VRAM each holds (Ollama /api/ps)."""
+    data = get_ollama("/api/ps", timeout=(get_timeouts()[0], 10))
+    models = data.get("models")
+    return [m for m in models if isinstance(m, dict)] if isinstance(models, list) else []
+
+
+def unload_model(name: str) -> None:
+    """Drop a model from memory now rather than when its keep-alive runs out."""
+    post_ollama("/api/generate", {"model": name, "keep_alive": 0},
+                timeout=(get_timeouts()[0], 60))
+
+
+def delete_model(name: str) -> None:
+    """Remove a model from disk. Raises ValueError with Ollama's reason."""
+    url = get_ollama_base() + "/api/delete"
+    try:
+        resp = _SESSION.delete(url, json={"model": name},
+                               timeout=(get_timeouts()[0], 60), proxies=_NO_PROXY)
+    except requests.RequestException as exc:
+        raise ValueError(f"Could not reach Ollama at {get_ollama_base()}: {exc}") from exc
+    invalidate_models_cache()
+    if resp.status_code == 404:
+        raise ValueError(f"{name} is not installed")
+    if not resp.ok:
+        raise ValueError(f"Ollama returned HTTP {resp.status_code}: {resp.text[:256]}")
+
+
+def pull_model(name: str) -> Iterator[Dict[str, Any]]:
+    """Download a model, yielding Ollama's progress lines as they arrive.
+
+    Each line is ``{"status", "digest"?, "total"?, "completed"?}``; an
+    ``{"error"}`` line is raised as ValueError. The read timeout is per chunk,
+    not for the whole download — a 19 GB model takes as long as it takes, but
+    a connection that goes silent for minutes has stopped.
+    """
+    url = get_ollama_base() + "/api/pull"
+    try:
+        resp = _SESSION.post(url, json={"model": name, "stream": True},
+                             timeout=(get_timeouts()[0], 300), stream=True,
+                             proxies=_NO_PROXY)
+    except requests.RequestException as exc:
+        raise ValueError(f"Could not reach Ollama at {get_ollama_base()}: {exc}") from exc
+    try:
+        if not resp.ok:
+            raise ValueError(f"Ollama returned HTTP {resp.status_code}: {resp.text[:256]}")
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            try:
+                line = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(line, dict):
+                continue
+            if line.get("error"):
+                raise ValueError(str(line["error"]))
+            yield line
+    except requests.RequestException as exc:
+        raise ValueError(f"The download stopped: {exc}") from exc
+    finally:
+        resp.close()
+        invalidate_models_cache()
 
 
 def embed(model: str, inputs: List[str], timeout: float = 30.0) -> List[List[float]]:
