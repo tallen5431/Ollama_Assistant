@@ -153,8 +153,14 @@ All settings are environment variables (the server manager injects them):
 | `WEB_FOLLOW_SCOPE`  | `site`                      | Which links may actually be **opened**. Deliberately stricter than what is shown; `any` lifts the same-site restriction |
 | `WEB_SHARE_LOCATION` | `1`                        | Whether a photo's GPS position may inform a search query. `0` keeps the date and camera and drops the position — see "Photo details" |
 | `WEB_TIMEOUT`       | `15`                        | Per-request timeout when fetching a page or searching |
-| `WEB_MAX_CHARS`     | `6000`                      | Text kept from each fetched page |
+| `WEB_MAX_CHARS`     | `6000`                      | Text from each page that reaches the model. A longer page is cut to the sections that bear on your question, not to its first 6000 characters — see "Reading more of the web" |
+| `WEB_READ_CHARS`    | `60000`                     | How much of a page is read to choose those sections from |
 | `WEB_MAX_BYTES`     | `2097152`                   | Hard cap on a downloaded document |
+| `WEB_MAX_PDF_BYTES` | `20971520`                  | Hard cap on a downloaded PDF. One over it is refused rather than cut short, since a truncated PDF cannot be read |
+| `WEB_EMBED_MODEL`   | *(unset)*                   | Ollama embedding model (e.g. `nomic-embed-text`) for choosing a long page's sections by meaning. Unset means by keywords |
+| `WEB_RENDER`        | `0`                         | Open a page that is empty without JavaScript in headless Chromium. Needs Playwright — see "Pages that need a browser" |
+| `WEB_SEARCH_ROUNDS` | `1`                         | Extra searches a turn may run when the pages read do not answer the question. `0` turns it off; at most `3` |
+| `WEB_CACHE_MINUTES` | `120`                       | How long a fetched page and its distillation are reused. Search results are kept a quarter as long. `0` turns it off |
 | `OLLAMA_NUM_CTX`    | `8192`                      | Context window requested when web context is attached |
 | `CHAT_AUTH_USER` / `CHAT_AUTH_PASSWORD` | *(unset)* | Enable HTTP Basic Auth (or use `CHAT_AUTH=user:password`). Both halves are needed — with only one set, auth stays **off**, and the startup banner says so rather than leaving you to assume otherwise |
 | `CHAT_AUTH_REALM`   | `Ollama Chat`               | Name the browser shows in its password prompt. Only read when Basic Auth is on |
@@ -505,6 +511,83 @@ its scratchpad — so the reply comes back truncated mid-thought with no query i
 it. The app asks Ollama for `think: false` on the planner call and strips any
 `<think>` block that arrives anyway, so `deepseek-r1` works; it is still slower
 and no better than a small instruct model. Prefer one.
+
+### Reading more of the web
+
+Four things change what a turn can find, all on by default except the browser.
+
+**PDFs are read.** Manuals, data sheets, papers and council minutes were
+refused as *"application/pdf, which has no text to read"*. They are now read
+page by page, with `[page 12]` markers kept in the text so a figure can be found
+again, and with the links inside them listed like a web page's. A scanned PDF —
+pictures of pages with no text layer — says so rather than failing quietly.
+Needs `pypdf`, which `requirements.txt` installs.
+
+**A long page is cut to the part that answers.** A page used to be cut to its
+first `WEB_MAX_CHARS` characters, which on a long article keeps the introduction
+and drops the answer. Now up to `WEB_READ_CHARS` is read, split into sections,
+and the sections that bear on your question are kept, in page order, with
+`[…]` where something was left out. The opening is always kept, because it says
+what the page is. A request with nothing to match — *"summarise this"* — keeps
+the front, as before. Matching is by keywords; set `WEB_EMBED_MODEL` to an
+Ollama embedding model and it is by meaning:
+
+```bash
+ollama pull nomic-embed-text      # ~270 MB, runs alongside anything
+WEB_EMBED_MODEL=nomic-embed-text
+```
+
+**A second search when the first falls short.** The first search is planned
+before anything has been read. Once the pages are in, the planner model looks at
+what they actually say and either answers `DONE` or names what is missing —
+*"widget 5 price"* when the pages had the specs and no price — and that is
+searched for, read and distilled like the first round. Pages already read are
+skipped. The panel under the reply shows each round and why it stopped.
+`WEB_SEARCH_ROUNDS` sets how many extra rounds are allowed (default 1, at most
+3, `0` off). It costs one short planner call per turn even when the answer is
+`DONE`, which is quick with a small `WEB_PLANNER_MODEL`.
+
+**Nothing is fetched twice in a while.** A page read in the last
+`WEB_CACHE_MINUTES` (120) is reused, as is its distillation for the same
+question; search results for a quarter as long. A follow-up, a regenerated
+answer and a second search round all tend to land on pages already read, and
+search engines rate-limit anything that looks automated. The cache is in memory
+and gone on restart. The panel says how many pages came from it.
+
+#### Pages that need a browser
+
+Some pages are an empty shell until their JavaScript runs — shops, dashboards,
+documentation sites — and read as *"Loading…"*. With `WEB_RENDER=1`, a page
+whose text comes out under a few hundred characters and that runs scripts is
+opened in headless Chromium and read again:
+
+```bash
+.venv/bin/pip install playwright==1.56.0
+.venv/bin/playwright install chromium     # ~150 MB, once
+WEB_RENDER=1
+```
+
+It is off by default because it runs a stranger's JavaScript on this machine.
+What keeps that contained:
+
+- Every request the page makes — the page, its scripts, its API calls, and each
+  hop of every redirect — goes through the same public-address check as any
+  other fetch. A browser follows redirects on its own, so the hops are followed
+  by hand and each one checked: a public page redirecting to your router's admin
+  page is refused, not loaded. WebSockets are closed, WebRTC address discovery
+  is off, and images, fonts and media are never loaded.
+- What it cannot close is DNS rebinding between that check and the browser's own
+  lookup. The ordinary fetch path pins the address it checked; a browser cannot
+  be made to. On a home network that is a narrow gap, but it is the reason this
+  is a choice rather than a default.
+
+#### Adding a kind of document
+
+Each kind of document is a *reader* in `readers.py` — what it accepts, how much
+may be downloaded for it, and how its bytes become text. `web.fetch` downloads
+and hands the bytes to the first reader that accepts them, so a new kind (a
+spreadsheet, an e-book) is one `readers.register(...)` call, with the fetching,
+address guard, cache and pipeline unchanged.
 
 ### Distilling pages before they reach the model
 
@@ -1970,6 +2053,9 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `web.py`          | Optional web fetching/search used to ground answers |
 | `store.py`        | SQLite conversation history, routines and records |
 | `records.py`      | Restating a routine's answer as the fields it declared |
+| `readers.py`      | How each kind of document becomes text: PDF, and the optional browser |
+| `focus.py`        | Cutting a long page to the sections that bear on the question |
+| `webcache.py`     | Short-lived memory of pages, searches and distillations |
 | `fields.py`       | Reading a routine's declaration, working out its sums, and suggesting one from its prompt |
 | `values.py`       | Reading and standardising one value — money, distance, speed, duration, timestamp |
 | `totals.py`       | Totals by week, month and all time; whether a run's odometer readings fit the log |

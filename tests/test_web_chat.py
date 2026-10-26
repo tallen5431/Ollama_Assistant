@@ -192,7 +192,7 @@ class TestMultiQueryPlanning:
 
     def test_unreadable_results_are_reported(self, rig, monkeypatch):
         rig["ollama"].planner_reply = "Q: anything"
-        monkeypatch.setattr(web, "fetch", lambda url: (_ for _ in ()).throw(web.WebError("403")))
+        monkeypatch.setattr(web, "fetch", lambda url, question="": (_ for _ in ()).throw(web.WebError("403")))
         resp = rig["client"].post(
             "/api/chat", json={"messages": [{"role": "user", "content": "widget 5?"}], "web": True}
         )
@@ -249,7 +249,7 @@ class TestPlannerDeclines:
 
 class TestRetrievalFailure:
     def test_a_dead_link_reports_and_still_answers(self, rig, monkeypatch):
-        monkeypatch.setattr(web, "fetch", lambda url: (_ for _ in ()).throw(web.WebError("boom")))
+        monkeypatch.setattr(web, "fetch", lambda url, question="": (_ for _ in ()).throw(web.WebError("boom")))
         resp = rig["client"].post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": f"read {rig['site_url']}"}], "web": True},
@@ -273,7 +273,7 @@ class TestRetrievalFailure:
             "snippet": "Widget 5 shipped on Tuesday with a new hinge.",
         }])
         monkeypatch.setattr(web, "fetch",
-                            lambda url: (_ for _ in ()).throw(web.WebError("HTTP 403")))
+                            lambda url, question="": (_ for _ in ()).throw(web.WebError("HTTP 403")))
         resp = rig["client"].post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "what is widget 5?"}], "web": True},
@@ -321,7 +321,7 @@ class TestSearchedButFoundNothing:
             {"url": "https://a.example/", "title": "A", "snippet": ""},
         ])
         monkeypatch.setattr(web, "fetch",
-                            lambda url: (_ for _ in ()).throw(web.WebError("HTTP 403")))
+                            lambda url, question="": (_ for _ in ()).throw(web.WebError("HTTP 403")))
         resp = rig["client"].post(
             "/api/chat",
             json={"messages": [{"role": "user", "content": "what is widget 5?"}], "web": True},
@@ -363,7 +363,7 @@ class TestFetchesDoNotWaitOnStragglers:
         import time as clock
         calls = []
 
-        def fetch(url):
+        def fetch(url, question=""):
             calls.append(url)
             if "slow" in url:
                 clock.sleep(5)
@@ -385,7 +385,7 @@ class TestFetchesDoNotWaitOnStragglers:
         two others finished — a second full timeout on top of the first."""
         import time as clock
 
-        def fetch(url):
+        def fetch(url, question=""):
             clock.sleep(2)
             return {"url": url, "title": url, "text": "body"}
 
@@ -407,7 +407,7 @@ class TestFetchesDoNotWaitOnStragglers:
         the fastest pages, not the best-ranked ones the search chose."""
         import time as clock
 
-        def fetch(url):
+        def fetch(url, question=""):
             clock.sleep(0.6 if url == "rank0" else 0.05)
             return {"url": url, "title": url, "text": "body"}
 
@@ -421,7 +421,7 @@ class TestFetchesDoNotWaitOnStragglers:
         """The grace period is bounded; a genuinely slow page is still dropped."""
         import time as clock
 
-        def fetch(url):
+        def fetch(url, question=""):
             clock.sleep(10 if url == "rank0" else 0.05)
             return {"url": url, "title": url, "text": "body"}
 
@@ -450,7 +450,7 @@ class TestFetchesDoNotWaitOnStragglers:
 
         monkeypatch.setattr(app_module, "as_completed", unhurried)
 
-        def fetch(url):
+        def fetch(url, question=""):
             clock.sleep(0.06 if url == "rank0" else 0.001)
             return {"url": url, "title": url, "text": "body"}
 
@@ -473,7 +473,7 @@ class TestFetchesDoNotWaitOnStragglers:
 
         monkeypatch.setattr(app_module, "as_completed", unhurried)
 
-        def fetch(url):
+        def fetch(url, question=""):
             clock.sleep(0.06 if url == "rank0" else 0.001)
             if url in ("rank0", "rank1"):
                 raise web.WebError(f"dead: {url}")
@@ -493,7 +493,7 @@ class TestFetchesDoNotWaitOnStragglers:
 
     def test_fewer_successes_than_wanted_does_not_hang(self):
         import time as clock
-        def fetch(url):
+        def fetch(url, question=""):
             raise web.WebError("dead")
         started = clock.monotonic()
         docs, errors = app_module._run_all(fetch, ["a", "b"], enough=3)
@@ -519,7 +519,7 @@ class TestFollowingLinks:
         import web as web_module
         base = rig["site_url"].rsplit("/", 1)[0]
 
-        def fake_fetch(url):
+        def fake_fetch(url, question=""):
             if url.endswith("/hinge"):
                 return {"url": url, "requested": url, "title": "Hinge design",
                         "text": "A titanium four-bar linkage rated to 200000 cycles.",
@@ -613,7 +613,7 @@ class TestFollowingLinksFromASearch:
     def searched_site(self, rig, monkeypatch):
         import web as web_module
 
-        def fake_fetch(url):
+        def fake_fetch(url, question=""):
             if url.endswith("/hinge"):
                 return {"url": url, "requested": url, "title": "Hinge design",
                         "text": "A titanium four-bar linkage rated to 200000 cycles.",
@@ -690,7 +690,7 @@ class TestFollowingLinksFromASearch:
                 "title": "Deep", "text": "the specification", "links": []}
         real = web.fetch
 
-        def fetch(url):
+        def fetch(url, question=""):
             if url.endswith("/deep"):
                 return deep
             doc = real(url)
@@ -716,7 +716,7 @@ class TestFollowingLinksFromASearch:
         monkeypatch.setenv("WEB_FOLLOW_SCOPE", "any")
         seen = []
 
-        def endless(url):
+        def endless(url, question=""):
             doc = {"url": url, "requested": url, "title": url, "text": "text",
                    "links": [{"url": f"{url}/{n}", "text": f"link {n}"}
                              for n in range(6)]}
@@ -752,7 +752,7 @@ class TestTheModelAskingForALink:
 
         monkeypatch.setattr(app_module, "chat_stream", fake_stream)
 
-        def fake_fetch(url):
+        def fake_fetch(url, question=""):
             if url.endswith("/hinge"):
                 return {"url": url, "requested": url, "title": "Hinge design",
                         "text": "A titanium four-bar linkage rated to 200000 cycles.",
@@ -821,7 +821,7 @@ class TestTheModelAskingForALink:
                                           else self.ANSWER},
                               "done": True, "eval_count": 4})
 
-        def counting_fetch(url):
+        def counting_fetch(url, question=""):
             fetched.append(url)
             return real(url)
 
@@ -849,7 +849,7 @@ class TestTheModelAskingForALink:
                                           else self.ANSWER},
                               "done": True, "eval_count": 4})
 
-        def counting_fetch(url):
+        def counting_fetch(url, question=""):
             fetched.append(url)
             return real(url)
 
@@ -885,7 +885,7 @@ class TestTheModelAskingForALink:
                                           else self.ANSWER},
                               "done": True, "eval_count": 4})
 
-        def counting_fetch(url):
+        def counting_fetch(url, question=""):
             fetched.append(url)
             if "elsewhere.example" in url:
                 return {"url": url, "requested": url, "title": "Outside",
@@ -912,7 +912,7 @@ class TestTheModelAskingForALink:
                                           else self.ANSWER},
                               "done": True, "eval_count": 4})
 
-        def counting_fetch(url):
+        def counting_fetch(url, question=""):
             fetched.append(url)
             return real(url)
 
@@ -938,7 +938,7 @@ class TestTheModelAskingForALink:
 
         real = web.fetch
 
-        def exploding_fetch(url):
+        def exploding_fetch(url, question=""):
             # Only the followed link, so the turn still has pages to answer
             # from — which is the whole point of not dying here.
             if url.endswith("/hinge"):
@@ -1340,7 +1340,7 @@ class TestDistillingPagesBeforeTheyReachTheModel:
         asked = []
         _stub_distil(monkeypatch,
                             lambda q, doc, model, **kw: asked.append(doc) or "cut")
-        monkeypatch.setattr(web, "fetch", lambda url: (_ for _ in ()).throw(
+        monkeypatch.setattr(web, "fetch", lambda url, question="": (_ for _ in ()).throw(
             web.WebError("paywalled")))
         monkeypatch.setattr(web, "search", lambda q, limit=3: [
             {"url": "https://x.dev/a", "title": "A", "snippet": "A lead about widgets."}])
@@ -1375,7 +1375,7 @@ class TestDistillingPagesBeforeTheyReachTheModel:
             {"url": good, "title": "Widget 5"},
             {"url": dead, "title": "Dead", "snippet": "A lead about widgets."}])
         real_fetch = web.fetch
-        monkeypatch.setattr(web, "fetch", lambda url: (
+        monkeypatch.setattr(web, "fetch", lambda url, question="": (
             real_fetch(url) if url == good
             else (_ for _ in ()).throw(web.WebError("gone"))))
         out = self.ask(rig)
@@ -1405,7 +1405,7 @@ class TestDistillingPagesBeforeTheyReachTheModel:
         distilling achieved nothing."""
         monkeypatch.setenv("WEB_DISTILLER_MODEL", "small:1b")
         _stub_distil(monkeypatch, lambda q, doc, model, **kw: None)
-        monkeypatch.setattr(web, "fetch", lambda url: {
+        monkeypatch.setattr(web, "fetch", lambda url, question="": {
             "url": url, "requested": url, "links": [], "title": "Big",
             "text": "Widget 5 shipped on Tuesday. " * 300})
         step = [x for x in self.steps(self.ask(rig)) if x.get("step") == "Distilled"][0]

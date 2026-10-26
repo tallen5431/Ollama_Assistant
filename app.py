@@ -63,6 +63,7 @@ from config import (
     get_share_photo_location,
     get_vision_model,
     get_web_fetch_hops,
+    get_web_search_rounds,
     get_web_follow_links,
     get_web_carry_turns,
     get_web_follow_on_search,
@@ -1164,7 +1165,8 @@ def api_chat() -> Any:
                 else:
                     yield _line({"status": f"Opening {_host_of(link['url'])}…"})
                     try:
-                        documents.append(web.fetch(link["url"]))
+                        documents.append(web.fetch(
+                            link["url"], question=web.last_user_text(turns)))
                     # Not just WebError. Following a link is an enhancement, and
                     # an enhancement that can take the whole turn down with it is
                     # a worse bug than the one it fixes — the reply is already
@@ -1663,7 +1665,8 @@ def _follow_links(
         return []
 
     yield _line({"status": "Following: " + " · ".join(c["text"][:40] for c in chosen)})
-    fetched, failures = _run_all(web.fetch, [c["url"] for c in chosen])
+    fetched, failures = _run_all(lambda url: web.fetch(url, question=question),
+                                 [c["url"] for c in chosen])
     documents.extend(fetched)
     if failed is not None:
         failed.extend(failures)
@@ -1739,7 +1742,7 @@ def _gather_web(
         for url in urls[:2]:
             yield _line({"status": f"Reading {_host_of(url)}…"})
             try:
-                documents.append(web.fetch(url))
+                documents.append(web.fetch(url, question=question))
             except web.WebError as exc:
                 failed.append(str(exc))
                 yield _line({"status": str(exc)})
@@ -1884,10 +1887,12 @@ def _gather_web(
 
     urls = [r["url"] for r in results]
     yield _line({"status": "Reading " + ", ".join(_host_of(u) for u in urls[:max_docs]) + "…"})
-    fetched, fetch_failures = _run_all(web.fetch, urls, enough=max_docs)
+    fetched, fetch_failures = _run_all(lambda url: web.fetch(url, question=question),
+                                       urls, enough=max_docs)
     failed.extend(fetch_failures)
     documents.extend(fetched[:max_docs])
     yield _step("Pages read", f"{len(fetched)} of {len(urls)} tried"
+                + _how_read(fetched[:max_docs])
                 + (f"; failures: {'; '.join(fetch_failures[:4])}" if fetch_failures else ""),
                 urls=[d.get("url", "") for d in fetched[:max_docs]])
 
@@ -1911,9 +1916,72 @@ def _gather_web(
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
     yield from _distil_documents(question, documents, model)
+    yield from _search_again(model, question, queries, documents, failed, outcome)
     yield _step("Context from the web",
                 f"{len(documents)} document(s), "
                 f"{sum(len(d.get('text') or '') for d in documents)} characters")
+
+
+def _how_read(documents: List[Dict[str, Any]]) -> str:
+    """How the pages were got, where it is not plain: " (2 from cache, 1 PDF)"."""
+    counts = [(sum(1 for d in documents if d.get(flag)), label) for flag, label in (
+        ("cached", "from cache"), ("rendered", "opened in a browser"),
+        ("focused", "cut to the question"))]
+    counts.append((sum(1 for d in documents if d.get("kind") == "pdf"), "PDF"))
+    said = [f"{n} {label}" for n, label in counts if n]
+    return f" ({', '.join(said)})" if said else ""
+
+
+def _search_again(model: str, question: str, queries: List[str],
+                  documents: List[Dict[str, Any]], failed: List[str],
+                  outcome: Dict[str, Any]) -> Any:
+    """Further rounds of searching, while the pages read fall short.
+
+    The first search is planned before anything has been read. Here a small
+    model looks at what the pages actually said and names what is still
+    missing — the price that was not on the overview, the version the release
+    notes left out — and that is searched for, read and distilled like the
+    first round. At most WEB_SEARCH_ROUNDS times, and never for a page already
+    read.
+    """
+    tried = list(queries)
+    max_docs = get_web_max_docs()
+    for round_number in range(2, get_web_search_rounds() + 2):
+        yield _line({"status": "Checking whether that answers it…"})
+        more = web.next_searches(question, documents, tried, model)
+        if more is None:
+            yield _step(f"Search round {round_number}",
+                        "the check could not be made; answering from what was read")
+            return
+        if not more:
+            yield _step(f"Search round {round_number}",
+                        "not needed — the pages read answer the question")
+            return
+        tried.extend(more)
+        yield _line({"status": "Searching again: " + " · ".join(more)})
+        groups, failures = _run_all(web.search, more)
+        read = {web.url_key(d.get(k) or "") for d in documents for k in ("url", "requested")}
+        results = [r for r in web.merge_results(groups, limit=max_docs * 2)
+                   if r.get("url") and web.url_key(r["url"]) not in read]
+        outcome.setdefault("found", []).extend(r["url"] for r in results)
+        if not results:
+            yield _step(f"Search round {round_number}",
+                        " · ".join(more) + " — nothing new found"
+                        + (f"; {failures[0]}" if failures else ""))
+            return
+        fetched, fetch_failures = _run_all(
+            lambda url: web.fetch(url, question=question),
+            [r["url"] for r in results], enough=max_docs)
+        failed.extend(fetch_failures)
+        fresh = fetched[:max_docs]
+        yield _step(f"Search round {round_number}",
+                    " · ".join(more) + f" — {len(fresh)} more page(s) read"
+                    + _how_read(fresh),
+                    urls=[d.get("url", "") for d in fresh])
+        if not fresh:
+            return
+        yield from _distil_documents(question, fresh, model)
+        documents.extend(fresh)
 
 
 def _distil_documents(question: str, documents: List[Dict[str, str]],

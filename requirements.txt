@@ -24,6 +24,16 @@ waitress==3.0.1
 Werkzeug==3.1.8
 urllib3==2.7.0
 
+# Reads PDFs found by a search or pasted as a link — manuals, data sheets,
+# papers. Pure Python. Without it a PDF is skipped with a note saying why.
+pypdf==5.1.0
+
+# Optional, and not installed by this file: opening pages that are empty
+# until their JavaScript runs (WEB_RENDER=1). See "Pages that need a browser"
+# in the README:
+#     .venv/bin/pip install playwright==1.56.0
+#     .venv/bin/playwright install chromium
+
 # Two advisories are knowingly not taken, so the next person to run pip-audit
 # does not have to work this out again. Both are minor-version bumps, and
 # neither reaches any code this app runs:
