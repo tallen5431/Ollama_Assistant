@@ -61,9 +61,12 @@ def clear_process_caches():
     that points at one fake Ollama sees the previous test's model list.
     """
     import ollama_client
+    import webcache
     ollama_client.invalidate_models_cache()
+    webcache.clear()
     yield
     ollama_client.invalidate_models_cache()
+    webcache.clear()
 
 
 @pytest.fixture(autouse=True)

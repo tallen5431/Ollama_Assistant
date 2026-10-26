@@ -217,6 +217,67 @@ def get_web_max_bytes() -> int:
     return int(_number("WEB_MAX_BYTES", 2 * 1024 * 1024))
 
 
+def get_web_max_pdf_bytes() -> int:
+    """Hard cap on a downloaded PDF.
+
+    Larger than the page cap because a PDF carries its fonts and images with
+    its text, so a 40-page manual is routinely several megabytes. A PDF cut
+    short cannot be read at all, so one over this is refused, not truncated.
+    """
+    return int(_number("WEB_MAX_PDF_BYTES", 20 * 1024 * 1024))
+
+
+def get_web_read_chars() -> int:
+    """How much of a page is read and kept before it is cut to the question.
+
+    WEB_MAX_CHARS is what reaches the model; this is what is chosen *from*.
+    Reading only the first WEB_MAX_CHARS meant a long article was judged on its
+    introduction, and the answer was usually further down.
+    """
+    return max(get_web_max_chars(), int(_number("WEB_READ_CHARS", 60000)))
+
+
+def get_web_cache_minutes() -> float:
+    """How long a fetched page (and its distillation) is reused. 0 turns it off.
+
+    Search results are kept for a quarter of this, since they move faster than
+    the pages behind them.
+    """
+    return max(0.0, _number("WEB_CACHE_MINUTES", 120))
+
+
+def get_web_embed_model() -> str:
+    """An Ollama embedding model for picking a long page's relevant parts.
+
+    Unset means keyword matching, which needs nothing installed. Set it to a
+    small embedding model (``nomic-embed-text``, about 270 MB) and sections are
+    chosen by meaning, so a page that answers in different words than the
+    question used is still found.
+    """
+    return os.getenv("WEB_EMBED_MODEL", "").strip()
+
+
+def get_web_render() -> bool:
+    """Whether a page that is empty without JavaScript is opened in a browser.
+
+    Off by default. It needs Playwright and a Chromium install on this
+    machine, and it runs a stranger's JavaScript — every request it makes is
+    checked against the same public-address guard as any other fetch, but a
+    full browser is a larger thing to point at the internet than an HTTP client.
+    """
+    return _flag("WEB_RENDER", default="0")
+
+
+def get_web_search_rounds() -> int:
+    """How many extra searches a turn may run when the pages fall short.
+
+    After the first round is read, a small model checks whether the pages
+    answer the question and, if not, says what to search for next. 1 by
+    default; 0 turns it off; at most 3.
+    """
+    return max(0, min(3, int(_number("WEB_SEARCH_ROUNDS", 1))))
+
+
 def get_web_follow_links() -> int:
     """How many linked pages may also be read, per hop.
 

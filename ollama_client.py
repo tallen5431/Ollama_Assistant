@@ -81,6 +81,20 @@ def post_ollama(path: str, payload: Dict[str, Any], timeout: float | None = None
     return _parse(resp, url)
 
 
+def embed(model: str, inputs: List[str], timeout: float = 30.0) -> List[List[float]]:
+    """One embedding vector per input, from an Ollama embedding model.
+
+    Short timeout: this picks which parts of a page to keep, and a caller that
+    gets nothing back falls back to keyword matching rather than waiting.
+    """
+    data = post_ollama("/api/embed", {"model": model, "input": list(inputs)},
+                       timeout=(get_timeouts()[0], timeout))
+    vectors = data.get("embeddings")
+    if not isinstance(vectors, list):
+        raise ValueError("Ollama returned no embeddings")
+    return vectors
+
+
 def _parse(resp: requests.Response, url: str) -> Dict[str, Any]:
     """Validate an Ollama HTTP response and return its JSON body."""
     if not resp.ok:
