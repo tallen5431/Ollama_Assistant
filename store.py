@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 import fields
+import recipes
 import totals
 import values
 from config import logger
@@ -122,6 +123,10 @@ _ADDED_COLUMNS = (
     # table can say "worked out" beside the figure it changed — and say what
     # the model had written there, which is in `raw`.
     ("records", "checked", "TEXT"),
+    # How a routine searches, when it says: only these sites, only recent
+    # results, how many pages and rounds, how the answer is laid out. JSON,
+    # validated by recipes.clean on the way in and on the way out.
+    ("routines", "recipe", "TEXT"),
 )
 
 _TITLE_MAX = 60
@@ -617,6 +622,7 @@ def _routine_row(row: sqlite3.Row) -> Dict[str, Any]:
         "photo_meta": _tri_column(row["photo_meta"]),
         "position": row["position"],
         "record": _record_fields(row["record"]),
+        "recipe": recipes.clean(_loads(row["recipe"]) if "recipe" in row.keys() else None),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -629,6 +635,7 @@ def create_routine(
     web: Optional[bool] = None,
     photo_meta: Optional[bool] = None,
     record: Optional[List[str]] = None,
+    recipe: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Save a routine and return its record."""
     now = time.time()
@@ -637,6 +644,7 @@ def create_routine(
     body = (body or "")[:_ROUTINE_BODY_MAX]
     photos = max(0, min(_ROUTINE_PHOTOS_MAX, int(photos or 0)))
     record = _record_fields(record)
+    recipe = recipes.clean(recipe)
     with _connect() as conn:
         # New ones go on the end of the strip. Ordering by "recently used" would
         # move a tap target that a thumb has learned where to find.
@@ -651,16 +659,17 @@ def create_routine(
         conn.execute(
             "INSERT INTO routines"
             " (id, name, body, photos, web, photo_meta, position, record,"
-            "  created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  recipe, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, name, body, photos,
              None if web is None else int(web),
              None if photo_meta is None else int(photo_meta),
-             position, json.dumps(record) if record else None, now, now),
+             position, json.dumps(record) if record else None,
+             json.dumps(recipe) if recipe else None, now, now),
         )
     return {"id": rid, "name": name, "body": body, "photos": photos,
             "web": web, "photo_meta": photo_meta, "position": position,
-            "record": record, "created_at": now, "updated_at": now}
+            "record": record, "recipe": recipe, "created_at": now, "updated_at": now}
 
 
 def list_routines(limit: int = 100) -> List[Dict[str, Any]]:
@@ -676,7 +685,7 @@ def list_routines(limit: int = 100) -> List[Dict[str, Any]]:
 # than from anything the request said — the column names are never interpolated
 # from input.
 _ROUTINE_COLUMNS = ("name", "body", "photos", "web", "photo_meta",
-                    "position", "record")
+                    "position", "record", "recipe")
 
 
 def update_routine(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -706,6 +715,9 @@ def update_routine(rid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]
         elif column == "record":
             names = _record_fields(value)
             updates[column] = json.dumps(names) if names else None
+        elif column == "recipe":
+            recipe = recipes.clean(value)
+            updates[column] = json.dumps(recipe) if recipe else None
         else:
             updates[column] = float(value)
     if not updates:
@@ -818,7 +830,22 @@ _STARTERS = (
 )
 
 
-def create_starters() -> List[Dict[str, Any]]:
+def create_recipe_starters() -> List[Dict[str, Any]]:
+    """Install the shipped research recipes, skipping any name already taken."""
+    return create_starters([(name, body, 0, True, None, (), recipe)
+                            for name, body, recipe in recipes.STARTERS])
+
+
+def get_routine(rid: str) -> Optional[Dict[str, Any]]:
+    """One routine by id, or None."""
+    if not rid or not db_path().exists():
+        return None
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM routines WHERE id = ?", (rid,)).fetchone()
+    return _routine_row(row) if row else None
+
+
+def create_starters(starters: Optional[List[tuple]] = None) -> List[Dict[str, Any]]:
     """Install the shipped routines, skipping any name already taken.
 
     Idempotent, and idempotent *under a double tap*: the read of what is
@@ -837,26 +864,29 @@ def create_starters() -> List[Dict[str, Any]]:
         position = conn.execute(
             "SELECT COALESCE(MAX(position), 0) AS top FROM routines"
         ).fetchone()["top"]
-        for name, body, photos, web, photo_meta, record in _STARTERS:
+        chosen = starters if starters is not None else [(*s, {}) for s in _STARTERS]
+        for name, body, photos, web, photo_meta, record, recipe in chosen:
             if name in taken:
                 continue
             position += 1
             rid = uuid.uuid4().hex
+            recipe = recipes.clean(recipe)
             conn.execute(
                 "INSERT INTO routines"
                 " (id, name, body, photos, web, photo_meta, position, record,"
-                "  created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  recipe, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (rid, name, body, photos,
                  None if web is None else int(web),
                  None if photo_meta is None else int(photo_meta),
                  position,
                  json.dumps(_record_fields(list(record))) if record else None,
+                 json.dumps(recipe) if recipe else None,
                  now, now),
             )
             made.append({"id": rid, "name": name, "body": body, "photos": photos,
                          "web": web, "photo_meta": photo_meta, "position": position,
-                         "record": _record_fields(list(record)),
+                         "record": _record_fields(list(record)), "recipe": recipe,
                          "created_at": now, "updated_at": now})
     return made
 

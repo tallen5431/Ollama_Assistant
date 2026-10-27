@@ -1447,6 +1447,38 @@ forces web access on sends the photo's coordinates to the search planner, whose
 queries go out to a search engine. The editor says so at the moment you pick it,
 `WEB_SHARE_LOCATION=0` prevents it, and no shipped routine does it.
 
+### Research recipes
+
+A routine can also say **how to search**, for research that wants something
+other than the defaults. Open a routine and expand **🔎 Research recipe**:
+
+| Setting | What it does |
+| --- | --- |
+| **Only these sites** | Searches carry `site:` and anything else that comes back is dropped. Type them however you like — `https://www.docs.python.org/3/`, `github.com` — up to five |
+| **How recent** | Past day, week, month or year, using the search engine's own date filter (SearXNG `time_range`, DuckDuckGo `df`) |
+| **Search again if the pages fall short** | Replaces `WEB_SEARCH_ROUNDS` for this routine: never, or up to 1–3 extra rounds |
+| **Pages to read** | Replaces `WEB_MAX_DOCS` for this routine, 2–6 |
+| **Answer as** | A table (with a Source column), bullet points, a short answer, step by step, or what each source says and where they disagree |
+
+Sites, recency, rounds and pages apply when 🌐 web access is on for the
+message; the answer layout always applies. The panel under each reply shows the
+recipe used (*Research recipe: only amazon.com, bestbuy.com · past month · 2
+extra round(s) · 5 page(s) · table*). The settings are read from the saved
+routine on the server, not taken from the page, so what runs is what was
+validated.
+
+**＋ Add research recipes** under the routine list installs four to start from:
+
+- **🛒 Compare prices** — past month, up to two extra rounds, five pages, a
+  table with shop, variant, price, stock and source. Add the shops you use under
+  *Only these sites*.
+- **📚 Check the docs** — answers from documentation only, as steps quoting the
+  exact setting or command. Add the project's docs site.
+- **📰 Latest news** — past week, five pages, what each outlet says and where
+  they disagree.
+- **📄 Explain this page** — paste a link after it; no extra searching, bullet
+  points that keep the page's own figures.
+
 ## Records
 
 A routine can keep a record of every run. Give it field names and each run
@@ -2039,15 +2071,16 @@ found nothing, and only the last of those means the retrieval worked.
 | `POST /api/models/pull` | Download a model — body `{ "name" }`. Streams NDJSON progress, then `{"done": true}` or `{"error"}`; carries on if the client leaves |
 | `POST /api/models/delete` | Remove a model from disk — body `{ "name" }` |
 | `POST /api/models/unload` | Free a model's memory now — body `{ "name" }`, or `{ "all": true }` |
-| `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"? }` or `{ "prompt": "..." }`. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears — that stream also sends a blank line every 20 s while the model is quiet, so skip empty lines rather than parsing them (both readers in the page already do). Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
+| `POST /api/chat`     | Chat completion. Streams `{"debug": {"step", "detail", …}}` lines alongside the reply — what the turn did, for the panel under it. Streams NDJSON by default; pass `{"stream": false}` for a single JSON reply. Body: `{ "model"?, "messages": [...], "conversation_id"?, "web"?, "routine_id"? }` or `{ "prompt": "..." }`; `routine_id` applies that routine's research recipe. Given a `conversation_id` the server writes the finished turn into that thread itself, and keeps generating even if the client disappears — that stream also sends a blank line every 20 s while the model is quiet, so skip empty lines rather than parsing them (both readers in the page already do). Messages may carry `"images": ["<base64>"]` for vision models, and `"image_meta": [{...}]` alongside it — one entry per image, `{"taken","lat","lon","altitude","camera"}`, all optional. |
 | `POST /api/chat/cancel` | Stop the turn running for a conversation — body `{ "conversation_id" }`. Needed because generation outlives the connection |
 | `GET /api/chat/status` | Is a turn still being generated for this conversation? `?conversation_id=` → `{"running": true\|false}`. Lets a page whose connection dropped tell "still coming" from "the server died", which otherwise look identical |
 | `GET /api/search`    | Find a phrase across conversations and records — `?q=`. Returns `{ "conversations": [...], "records": [...] }`; under two characters returns both empty |
 | `POST /api/photos/forget` | Apply the photo retention now — body `{ "days"? }`, defaulting to `PHOTO_KEEP_DAYS`. Returns what it dropped |
 | `GET /manifest.webmanifest` | Web app manifest, so a home-screen shortcut opens without browser chrome |
 | `GET /api/routines`  | Every saved routine, in strip order |
-| `POST /api/routines` | Save one — body `{ "name", "body", "photos"?, "web"?, "photo_meta"? }`. `web`/`photo_meta` are `true`/`false`/`null`, where null means "leave the toggle alone" |
+| `POST /api/routines` | Save one — body `{ "name", "body", "photos"?, "web"?, "photo_meta"?, "recipe"? }`, where `recipe` is `{ "sites"?, "fresh"?, "rounds"?, "pages"?, "format"? }`. `web`/`photo_meta` are `true`/`false`/`null`, where null means "leave the toggle alone" |
 | `POST /api/routines/starters` | Install the shipped routines, skipping names already taken. Idempotent |
+| `POST /api/routines/recipes` | Install the shipped research recipes, skipping names already taken. Idempotent |
 | `PATCH /api/routines/<id>` | Change any subset of those fields. An absent key leaves it alone; an explicit `null` clears a forcing. Saving `record` rechecks the routine's log and returns `"rechecked": {"records", "values", "changes"}` (as does `POST /api/routines`) |
 | `GET /api/routines/<id>/suggestion` | The declaration this routine's prompt already describes — `{"suggestion": {"record": [...], "why": [...]}}`, or `null` when there is nothing to suggest |
 | `DELETE /api/routines/<id>` | Remove one |
@@ -2088,6 +2121,7 @@ terminate TLS for you). `/healthz` stays open for uptime probes.
 | `web.py`          | Optional web fetching/search used to ground answers |
 | `store.py`        | SQLite conversation history, routines and records |
 | `records.py`      | Restating a routine's answer as the fields it declared |
+| `recipes.py`      | Research recipes: how a routine wants its searching done |
 | `readers.py`      | How each kind of document becomes text: PDF, and the optional browser |
 | `focus.py`        | Cutting a long page to the sections that bear on the question |
 | `webcache.py`     | Short-lived memory of pages, searches and distillations |

@@ -62,6 +62,7 @@ const webEl = { checked: false };
 let pendingImages = [], messages = [], busy = false, controller = null, pendingAutoSend = false;
 // send() reads this to decide whether a photo's own date goes with it.
 let exifOn = true;
+let pendingRoutine = null;   // the routine a message came from, if any
 // The store is the server's job now: /api/chat is given the thread id and
 // writes the turn itself, so what this side is responsible for is creating the
 // thread before the stream starts and taking it away again if the turn

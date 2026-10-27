@@ -1195,7 +1195,7 @@ def _duck_results(body: str, link_class: str, snippet_class: str,
     ][:limit] or _duck_by_redirector(body, limit)
 
 
-def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
+def _search_duckduckgo(query: str, limit: int, time_range: str = "") -> List[Dict[str, str]]:
     """Try each no-JS endpoint until one yields results.
 
     An endpoint answering 200 with nothing in it is the failure this exists
@@ -1212,7 +1212,9 @@ def _search_duckduckgo(query: str, limit: int) -> List[Dict[str, str]]:
     empty: List[str] = []
     for base, link_class, snippet_class in _DUCK_ENDPOINTS:
         try:
-            resp = _get(base + quote(query), headers={"User-Agent": _SEARCH_UA})
+            resp = _get(base + quote(query)
+                        + (f"&df={_DUCK_TIME[time_range]}" if time_range in _DUCK_TIME else ""),
+                        headers={"User-Agent": _SEARCH_UA})
         except (WebError, requests.RequestException) as exc:
             # Both, because _get raises whichever the failure was: WebError for
             # a deadline or a bad redirect, and requests' own exceptions
@@ -1330,9 +1332,12 @@ def _searxng_advice(status: int) -> str:
     return ""
 
 
-def _search_searxng(base: str, query: str, limit: int) -> List[Dict[str, str]]:
+def _search_searxng(base: str, query: str, limit: int,
+                    time_range: str = "") -> List[Dict[str, str]]:
     # Operator-configured, so allowed to be on localhost — see _get().
     url = f"{base}/search?format=json&q=" + quote(query)
+    if time_range in _DUCK_TIME:
+        url += "&time_range=" + time_range
     resp = _get(url, trusted=True)
     with resp:
         if not resp.ok:
@@ -1471,8 +1476,15 @@ def effective_search_url() -> str:
     return get_search_url() or local_searxng()
 
 
-def search(query: str, limit: int = 3) -> List[Dict[str, str]]:
-    """Return up to ``limit`` ``{"url", "title"}`` results for ``query``."""
+_DUCK_TIME = {"day": "d", "week": "w", "month": "m", "year": "y"}
+
+
+def search(query: str, limit: int = 3, time_range: str = "") -> List[Dict[str, str]]:
+    """Return up to ``limit`` ``{"url", "title"}`` results for ``query``.
+
+    ``time_range`` — "day", "week", "month" or "year" — asks the engine for
+    recent results only, using its own filter rather than words in the query.
+    """
     if not web_enabled():
         raise WebError("Web access is disabled on this server (WEB_ENABLED=0)")
     query = (query or "").strip()
@@ -1483,15 +1495,19 @@ def search(query: str, limit: int = 3) -> List[Dict[str, str]]:
     # The same query twice in a few minutes — a second search round, a
     # regenerated answer — is answered from memory rather than asked again of
     # an engine that rate-limits anything that looks automated.
-    key = (base or "duckduckgo", " ".join(query.lower().split()), limit)
+    time_range = time_range if time_range in _DUCK_TIME else ""
+    key = (base or "duckduckgo", " ".join(query.lower().split()), limit, time_range)
     cached = webcache.SEARCHES.get(key)
     if cached is not None:
         return cached
     try:
+        # Only passed when set, so a backend stand-in written for two
+        # arguments still works for every search that has no time limit.
+        extra = {"time_range": time_range} if time_range else {}
         if base:
-            results = _search_searxng(base, query, limit)
+            results = _search_searxng(base, query, limit, **extra)
         else:
-            results = _search_duckduckgo(query, limit)
+            results = _search_duckduckgo(query, limit, **extra)
     except WebError:
         raise
     except requests.RequestException as exc:
@@ -1842,6 +1858,7 @@ def plan_searches(
     image_note: Optional[str] = None,
     photo_note: str = "",
     must_search: bool = False,
+    note: str = "",
 ) -> Optional[List[str]]:
     """Turn the latest turn into search queries.
 
@@ -1884,7 +1901,7 @@ def plan_searches(
             planner_model,
             [
                 {"role": "system", "content": _PLANNER.format(today=today())
-                 + (_MUST_SEARCH if must_search else "")},
+                 + (_MUST_SEARCH if must_search else "") + note},
                 {"role": "user", "content": prompt},
             ],
             # Deterministic and short: this is a routing decision, not prose.
