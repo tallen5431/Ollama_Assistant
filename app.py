@@ -40,6 +40,7 @@ import authz
 import records
 import store
 import fields
+import recipes
 import values
 import voice
 import web
@@ -669,7 +670,7 @@ def api_conversation_add_message(convo_id: str) -> Any:
 # What a PATCH is allowed to change. Membership is tested against the request
 # body rather than read with .get(), because null is a real value here: absent
 # means "leave it alone", explicit null means "stop forcing this toggle".
-_ROUTINE_FIELDS = ("name", "body", "photos", "web", "photo_meta", "record")
+_ROUTINE_FIELDS = ("name", "body", "photos", "web", "photo_meta", "record", "recipe")
 
 
 def _tri(value: Any) -> Optional[bool]:
@@ -712,6 +713,7 @@ def api_routine_create() -> Any:
         name, text, _count(body.get("photos")),
         _tri(body.get("web")), _tri(body.get("photo_meta")),
         record if isinstance(record, list) else None,
+        recipes.clean(body.get("recipe")),
     )
     # Saved either way, and told what is wrong with it. A formula naming a
     # field that does not exist is not an error anywhere downstream — it
@@ -758,6 +760,18 @@ def api_routine_starters() -> Any:
     return jsonify({"routines": store.create_starters()})
 
 
+@app.route("/api/routines/recipes", methods=["POST"])
+def api_routine_recipes() -> Any:
+    """Install the shipped research recipes, skipping names already taken.
+
+    JSON only, for the same reason as the starters route: it reads no body, so
+    a plain form on another site could otherwise POST here.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Expected a JSON request"}), 415
+    return jsonify({"routines": store.create_recipe_starters()})
+
+
 @app.route("/api/routines/<routine_id>", methods=["PATCH"])
 def api_routine_update(routine_id: str) -> Any:
     """Change some of a routine, returning the whole normalised record."""
@@ -776,6 +790,8 @@ def api_routine_update(routine_id: str) -> Any:
             changes[field] = _count(body[field])
         elif field == "record":
             changes[field] = body[field] if isinstance(body[field], list) else []
+        elif field == "recipe":
+            changes[field] = recipes.clean(body[field])
         else:
             changes[field] = _tri(body[field])
     if not changes:
@@ -1060,6 +1076,10 @@ def api_chat() -> Any:
         return jsonify({"model": model, "reply": reply})
 
     use_web = bool(body.get("web")) and web_enabled()
+    # The routine this message came from, if any, for how it wants the search
+    # done. Looked up here rather than taken from the request, so what is used
+    # is what was saved and validated.
+    recipe = _recipe_for(body.get("routine_id"))
     # Which stored thread this turn belongs to, if any. The browser used to
     # write the reply down itself once the stream finished, which is fine right
     # up until the tab is not there when it finishes: a phone that locks past
@@ -1224,13 +1244,19 @@ def api_chat() -> Any:
             # can rebuild rather than stack: inserting a second block would
             # leave the model reading two overlapping copies of the same pages,
             # numbered differently, which is worse than not hopping at all.
+            if recipe:
+                yield _step("Research recipe", recipes.describe(recipe))
+                # Before `grounded` is taken, so a hop that rebuilds the page
+                # block keeps the layout the routine asked for.
+                if recipes.answer_note(recipe):
+                    convo = web.with_context(convo, recipes.answer_note(recipe))
             grounded = convo
 
             if use_web:
                 outcome: Dict[str, Any] = {}
                 for line in _gather_web(model, turns, documents, transcript, outcome,
                                         failed=failed,
-                                        photo_note=photo_note):
+                                        photo_note=photo_note, recipe=recipe):
                     yield line
                 found.extend(outcome.get("found") or [])
                 # A follow-up that did not search — "rank them", "in a table" —
@@ -1900,6 +1926,7 @@ def _gather_web(
     outcome: Optional[Dict[str, bool]] = None,
     photo_note: str = "",
     failed: Optional[List[str]] = None,
+    recipe: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Collect web documents for this turn, yielding progress lines as it goes.
 
@@ -2024,7 +2051,8 @@ def _gather_web(
     must = web.wants_source(question)
     queries = web.plan_searches(messages, model, image_note=image_note,
                                 photo_note=photo_note if images else "",
-                                must_search=must)
+                                must_search=must,
+                                note=recipes.planner_note(recipe or {}))
     if queries is None:
         yield _line({"status": "Could not plan a search; answering without one."})
         yield _step("Planned searches", "the planner could not be reached")
@@ -2043,9 +2071,9 @@ def _gather_web(
     # Concurrently: three searches then several fetches, run one after another,
     # each with its own timeout, is the sum of every round trip before the user
     # sees a single token.
-    groups, failures = _run_all(web.search, queries)
+    groups, failures = _run_all(_searcher(recipe or {}), queries)
 
-    max_docs = get_web_max_docs()
+    max_docs = (recipe or {}).get("pages") or get_web_max_docs()
     # Interleave so each query contributes, then fetch more candidates than
     # needed since some will be paywalled, JS-only, or plain unreachable.
     results = web.merge_results(groups, limit=max_docs * 2)
@@ -2097,7 +2125,8 @@ def _gather_web(
     if not documents:
         yield _line({"status": "Found results but couldn't read any of them."})
     yield from _distil_documents(question, documents, model)
-    yield from _search_again(model, question, queries, documents, failed, outcome)
+    yield from _search_again(model, question, queries, documents, failed, outcome,
+                             recipe or {})
     yield _step("Context from the web",
                 f"{len(documents)} document(s), "
                 f"{sum(len(d.get('text') or '') for d in documents)} characters")
@@ -2113,9 +2142,46 @@ def _how_read(documents: List[Dict[str, Any]]) -> str:
     return f" ({', '.join(said)})" if said else ""
 
 
+def _recipe_for(routine_id: Any) -> Dict[str, Any]:
+    """The research recipe of the routine a message came from, or ``{}``."""
+    if not isinstance(routine_id, str) or not routine_id:
+        return {}
+    try:
+        routine = store.get_routine(routine_id)
+    except Exception:  # noqa: BLE001 - a recipe is a refinement, never a requirement
+        logger.exception("Could not read routine %s", routine_id)
+        return {}
+    return (routine or {}).get("recipe") or {}
+
+
+def _searcher(recipe: Dict[str, Any]) -> Any:
+    """web.search, narrowed to the recipe's sites and time range where it has them.
+
+    Results off the named sites are dropped, since an engine that does not
+    understand ``site:`` returns them anyway. Several sites are asked for
+    together first and, if that finds nothing, one at a time — engines differ
+    in whether they read "site:a OR site:b".
+    """
+    if not recipe.get("sites") and not recipe.get("fresh"):
+        return web.search
+    extra = {"time_range": recipe["fresh"]} if recipe.get("fresh") else {}
+
+    def run(query: str) -> List[Dict[str, str]]:
+        def on_site(found: List[Dict[str, str]]) -> List[Dict[str, str]]:
+            return [r for r in found if recipes.allowed(r.get("url") or "", recipe)]
+        results = on_site(web.search(recipes.query_for(query, recipe), **extra))
+        if not results and len(recipe.get("sites") or []) > 1:
+            for site in recipe["sites"][:3]:
+                results.extend(on_site(web.search(
+                    recipes.query_for(query, recipe, site), **extra)))
+        return results
+    return run
+
+
 def _search_again(model: str, question: str, queries: List[str],
                   documents: List[Dict[str, Any]], failed: List[str],
-                  outcome: Dict[str, Any]) -> Any:
+                  outcome: Dict[str, Any],
+                  recipe: Optional[Dict[str, Any]] = None) -> Any:
     """Further rounds of searching, while the pages read fall short.
 
     The first search is planned before anything has been read. Here a small
@@ -2125,9 +2191,11 @@ def _search_again(model: str, question: str, queries: List[str],
     first round. At most WEB_SEARCH_ROUNDS times, and never for a page already
     read.
     """
+    recipe = recipe or {}
     tried = list(queries)
-    max_docs = get_web_max_docs()
-    for round_number in range(2, get_web_search_rounds() + 2):
+    max_docs = recipe.get("pages") or get_web_max_docs()
+    rounds = recipe["rounds"] if "rounds" in recipe else get_web_search_rounds()
+    for round_number in range(2, rounds + 2):
         yield _line({"status": "Checking whether that answers it…"})
         more = web.next_searches(question, documents, tried, model)
         if more is None:
@@ -2140,7 +2208,7 @@ def _search_again(model: str, question: str, queries: List[str],
             return
         tried.extend(more)
         yield _line({"status": "Searching again: " + " · ".join(more)})
-        groups, failures = _run_all(web.search, more)
+        groups, failures = _run_all(_searcher(recipe), more)
         read = {web.url_key(d.get(k) or "") for d in documents for k in ("url", "requested")}
         results = [r for r in web.merge_results(groups, limit=max_docs * 2)
                    if r.get("url") and web.url_key(r["url"]) not in read]

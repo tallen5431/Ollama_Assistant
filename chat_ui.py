@@ -681,6 +681,11 @@ _PAGE = r"""<!doctype html>
       .kept-gap:hover { color:var(--text); }
       /* The fix for a routine whose prompt does its sums in prose. One line
          per field, because each is a change to what the model is asked. */
+      .rrecipe { border:1px solid var(--border-soft); border-radius:var(--r1);
+                 padding:0.35rem 0.55rem; display:flex; flex-direction:column; gap:0.3rem; }
+      .rrecipe[open] { display:flex; }
+      .rrecipe summary { cursor:pointer; font-size:var(--fs-sm); }
+      .rrecipe label { margin-top:0.3rem; }
       .rsuggest { border:1px dashed var(--accent); border-radius:6px;
                   padding:0.4rem 0.6rem; margin:0.4rem 0; }
       .rsuggest p { white-space:pre-line; font-size:var(--fs-xs); margin:0 0 0.4rem; }
@@ -864,6 +869,49 @@ _PAGE = r"""<!doctype html>
             <option value="1">Turn on for this routine</option>
             <option value="0">Turn off for this routine</option>
           </select>
+          <!-- How the web part goes, for research rather than everyday asking.
+               Closed unless the routine has a recipe, so a routine that only
+               reads a photo does not show five settings it has no use for. -->
+          <details id="rRecipe" class="rrecipe">
+            <summary>🔎 Research recipe</summary>
+            <label for="rSites">Only these sites</label>
+            <input id="rSites" placeholder="e.g. docs.python.org, github.com"
+                   autocomplete="off" autocapitalize="off" spellcheck="false">
+            <label for="rFresh">How recent</label>
+            <select id="rFresh">
+              <option value="">Any time</option>
+              <option value="day">Past day</option>
+              <option value="week">Past week</option>
+              <option value="month">Past month</option>
+              <option value="year">Past year</option>
+            </select>
+            <label for="rRounds">Search again if the pages fall short</label>
+            <select id="rRounds">
+              <option value="">As set on the server</option>
+              <option value="0">Never</option>
+              <option value="1">Up to once</option>
+              <option value="2">Up to twice</option>
+              <option value="3">Up to three times</option>
+            </select>
+            <label for="rPages">Pages to read</label>
+            <select id="rPages">
+              <option value="">As set on the server</option>
+              <option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option>
+              <option value="6">6</option>
+            </select>
+            <label for="rFormat">Answer as</label>
+            <select id="rFormat">
+              <option value="">However the model likes</option>
+              <option value="table">A table</option>
+              <option value="bullets">Bullet points</option>
+              <option value="brief">A short answer</option>
+              <option value="steps">Step by step</option>
+              <option value="compare">What each source says</option>
+            </select>
+            <p class="hint">Sites, recency, rounds and pages apply when 🌐 web
+              access is on for the message; the answer layout always applies.</p>
+          </details>
           <label for="rRecord">Keep a record of each run</label>
           <!-- A box rather than a line, because a field can now say what it
                holds and how it is worked out, and those do not fit on one
@@ -2824,6 +2872,9 @@ _PAGE = r"""<!doctype html>
               model: modelEl.value || undefined,
               messages: withRecentImages(messages),
               web: webEl.checked || undefined,
+              // Which routine this came from, so the server can apply its
+              // research recipe — looked up there, not sent from here.
+              routine_id: (pendingRoutine && pendingRoutine.routine.id) || undefined,
               // Where to write this turn down when it is finished — including
               // when this tab is not the thing that finishes it.
               conversation_id: currentConvoId || undefined,
@@ -4693,11 +4744,21 @@ _PAGE = r"""<!doctype html>
           if (routine.photos) bits.push(routine.photos + (routine.photos === 1 ? " photo" : " photos"));
           if (routine.photo_meta !== null) bits.push("📍 " + (routine.photo_meta ? "on" : "off"));
           if (routine.web !== null) bits.push("🌐 " + (routine.web ? "on" : "off"));
+          if (routine.recipe && Object.keys(routine.recipe).length) bits.push("🔎 recipe");
           meta.textContent = bits.join(" · ") || "no photos";
           open.appendChild(title); open.appendChild(meta);
           open.addEventListener("click", () => openRoutineEditor(routine));
           row.appendChild(open);
           routineListEl.appendChild(row);
+        }
+        // Offered until some routine has a recipe — after that, whoever has
+        // one knows where they come from.
+        if (!routines.some(r => r.recipe && Object.keys(r.recipe).length)) {
+          const add = document.createElement("button");
+          add.type = "button"; add.className = "storage-act";
+          add.textContent = "＋ Add research recipes (prices, docs, news, explain a page)";
+          add.addEventListener("click", addRecipes);
+          routineListEl.appendChild(add);
         }
       }
 
@@ -4707,6 +4768,13 @@ _PAGE = r"""<!doctype html>
         rBodyEl.value = routine ? routine.body : "";
         rPhotosEl.value = String(routine ? routine.photos : 0);
         rRecordEl.value = routine && routine.record ? routine.record.join("\n") : "";
+        const recipe = (routine && routine.recipe) || {};
+        document.getElementById("rSites").value = (recipe.sites || []).join(", ");
+        document.getElementById("rFresh").value = recipe.fresh || "";
+        document.getElementById("rRounds").value = "rounds" in recipe ? String(recipe.rounds) : "";
+        document.getElementById("rPages").value = recipe.pages ? String(recipe.pages) : "";
+        document.getElementById("rFormat").value = recipe.format || "";
+        document.getElementById("rRecipe").open = Object.keys(recipe).length > 0;
         rMetaEl.value = routine && routine.photo_meta !== null ? (routine.photo_meta ? "1" : "0") : "";
         rWebEl.value = routine && routine.web !== null ? (routine.web ? "1" : "0") : "";
         rDeleteBtn.hidden = !routine;
@@ -4768,6 +4836,20 @@ _PAGE = r"""<!doctype html>
           : "";
       }
 
+      // The editor's recipe section as the server expects it. Empty settings
+      // are left out, and the server validates what remains.
+      function readRecipe() {
+        const recipe = {};
+        const sites = document.getElementById("rSites").value.split(/[\s,]+/).filter(Boolean);
+        if (sites.length) recipe.sites = sites;
+        for (const [key, id] of [["fresh", "rFresh"], ["rounds", "rRounds"],
+                                 ["pages", "rPages"], ["format", "rFormat"]]) {
+          const value = document.getElementById(id).value;
+          if (value !== "") recipe[key] = (key === "rounds" || key === "pages") ? Number(value) : value;
+        }
+        return recipe;
+      }
+
       let savingRoutine = false;
       async function saveRoutine() {
         // editingRoutineId is not set until after the await, so two taps on a
@@ -4784,7 +4866,8 @@ _PAGE = r"""<!doctype html>
                           photos: Number(rPhotosEl.value) || 0,
                           web: tri(rWebEl.value), photo_meta: tri(rMetaEl.value),
                           record: rRecordEl.value.split("\n")
-                            .map(f => f.trim()).filter(Boolean) };
+                            .map(f => f.trim()).filter(Boolean),
+                          recipe: readRecipe() };
         // Cleared before each attempt, not after a failed one. Fixing what a
         // warning complained about and saving again left the old text sitting
         // there, so a routine that was now fine still read as broken.
@@ -4869,6 +4952,16 @@ _PAGE = r"""<!doctype html>
         // with the routine alive, its toggles reverted and the editor stuck.
         if (pendingRoutine && pendingRoutine.routine.id === id) clearRoutine();
         closeRoutineEditor();
+        await refreshRoutines();
+        renderRoutineList();
+      }
+
+      async function addRecipes() {
+        try {
+          await fetch("api/routines/recipes", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: "{}" });
+        } catch (e) { return; }
         await refreshRoutines();
         renderRoutineList();
       }
