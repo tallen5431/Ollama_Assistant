@@ -618,3 +618,13 @@ class TestWhatTheFirstRealPDFTurnShowed:
         assert not web.followable(pdf, {"url": "https://arxiv.org/abs/1705.04304"})
         page = {"url": "https://arxiv.org/abs/1706.03762"}
         assert web.followable(page, {"url": "https://arxiv.org/abs/1705.04304"})
+
+    def test_a_section_from_the_middle_of_a_page_says_which_page(self):
+        """The model cited "page 6" for a table on page 8, because only the
+        section a page starts with carried its marker."""
+        paper = self.PAPER + "\n\n[page 9]\n" + " ".join(
+            "Filler on page nine about nothing." for _ in range(40)) \
+            + " Later on page nine: the base model has 8 heads in every layer."
+        cut = focus.focus(paper, self.QUESTION, 2500)
+        assert "[page 9] (continued)" in cut
+        assert len(cut) <= 2500

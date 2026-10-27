@@ -29,6 +29,10 @@ logger = logging.getLogger("ollama-chat")
 GAP = "\n[…]\n"
 _SECTION_CHARS = 900
 _WORD = re.compile(r"[a-z0-9]+")
+_PAGE = re.compile(r"\[page \d+\]")
+# What a kept section costs beyond its own text: the gap marker before it and
+# the "[page 12] (continued)" label it may be given.
+_EXTRA = len(GAP) + len("[page 9999] (continued)\n")
 _URL = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
 # How much a question word counts once a kept section already has it. Without
 # this, the first part of a two-part question fills the budget with sections
@@ -160,17 +164,32 @@ def focus(text: str, question: str, budget: int,
     else:
         ranked = _covering(weights, parts, budget - used)
     for index in ranked:
-        cost = len(parts[index]) + len(GAP)
+        cost = len(parts[index]) + _EXTRA
         if used + cost > budget:
             continue
         keep.add(index)
         used += cost
+    # Which page each section is on, for a document that marks its pages (a
+    # PDF does: "[page 8]"). Only the section a page starts with carries the
+    # marker, so a section kept from the middle of a page arrived with no page
+    # at all — and a model citing it guessed: 28.4 BLEU "on page 6", from a
+    # table on page 8.
+    pages: List[str] = []
+    current = ""
+    for part in parts:
+        found = _PAGE.findall(part)
+        pages.append(current if not part.startswith("[page ") else (found[0] if found else current))
+        if found:
+            current = found[-1]
     out: List[str] = []
     last = -1
     for index in sorted(keep):
         if out and index != last + 1:
             out.append(GAP.strip())
-        out.append(parts[index])
+        text = parts[index]
+        if pages[index] and not text.startswith("[page "):
+            text = f"{pages[index]} (continued)\n{text}"
+        out.append(text)
         last = index
     if last != len(parts) - 1:
         out.append(GAP.strip())
@@ -192,7 +211,7 @@ def _covering(weights: List[Dict[str, float]], parts: Sequence[str],
     while left and room > 0:
         def gain(i: int) -> float:
             return sum(v * (_ALREADY ** seen.get(w, 0)) for w, v in weights[i].items())
-        fits = [i for i in left if len(parts[i]) + len(GAP) <= room]
+        fits = [i for i in left if len(parts[i]) + _EXTRA <= room]
         if not fits:
             break
         best = max(fits, key=lambda i: (gain(i), -i))
@@ -200,7 +219,7 @@ def _covering(weights: List[Dict[str, float]], parts: Sequence[str],
             break
         order.append(best)
         left.discard(best)
-        room -= len(parts[best]) + len(GAP)
+        room -= len(parts[best]) + _EXTRA
         for word in weights[best]:
             seen[word] = seen.get(word, 0) + 1
     return order
