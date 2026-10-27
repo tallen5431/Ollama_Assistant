@@ -575,3 +575,46 @@ class TestASecondRound:
         turn["server"].checker = [f"Q: widget 5 price {i}" for i in range(10)]
         _ask(turn)
         assert len(turn["searched"]) <= 4
+
+
+class TestWhatTheFirstRealPDFTurnShowed:
+    """A real turn: the Transformer paper, asked for its head count and its
+    big model's BLEU. The BLEU was found; the head count was not sent to the
+    model at all, and two of the paper's citations were read instead."""
+
+    PAPER = "\n\n".join([
+        "[page 1]\nAttention Is All You Need\n" + "\n".join(
+            f"Author {i}\nGoogle Brain\nauthor{i}@google.com" for i in range(8)),
+        *[f"[page {p}]\n" + " ".join(
+            f"Part {p}.{k}: the model uses attention in the encoder and decoder, and "
+            "the base model and big model differ in size." for k in range(10))
+          for p in (2, 4, 5, 6, 7)],
+        "[page 3]\n3.2.2 Multi-Head Attention\nIn this work we employ h = 8 parallel "
+        "attention layers, or heads.",
+        "[page 8]\nTable 2: Transformer (base model) 27.3. Transformer (big) 28.4 BLEU "
+        "on the English-to-German translation task, a new state-of-the-art BLEU score.",
+        "[page 10]\nReferences\n" + "\n".join(
+            f"[{i}] A. Author. An attention model. arXiv preprint arXiv:1706.0{i:04d}, "
+            f"https://arxiv.org/pdf/1706.0{i:04d}" for i in range(60)),
+    ])
+    QUESTION = ("https://arxiv.org/pdf/1706.03762 How many attention heads does the "
+                "base model use, and what BLEU score did the big model get on "
+                "English-to-German?")
+
+    def test_both_halves_of_the_question_are_kept(self):
+        cut = focus.focus(self.PAPER, self.QUESTION, 2500)
+        assert "h = 8" in cut and "28.4" in cut
+
+    def test_the_link_in_the_question_does_not_pull_in_the_references(self):
+        cut = focus.focus(self.PAPER, self.QUESTION, 2500)
+        assert "arXiv preprint" not in cut
+
+    def test_the_author_list_does_not_take_a_third_of_the_room(self):
+        cut = focus.focus(self.PAPER, self.QUESTION, 2500)
+        assert cut.index("…[truncated]") <= 2500 // 8 + 20
+
+    def test_a_pdfs_citations_are_never_followed_by_the_app(self):
+        pdf = {"url": "https://arxiv.org/pdf/1706.03762", "kind": "pdf"}
+        assert not web.followable(pdf, {"url": "https://arxiv.org/abs/1705.04304"})
+        page = {"url": "https://arxiv.org/abs/1706.03762"}
+        assert web.followable(page, {"url": "https://arxiv.org/abs/1705.04304"})
