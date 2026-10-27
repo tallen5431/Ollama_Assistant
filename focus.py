@@ -22,13 +22,18 @@ from __future__ import annotations
 import logging
 import math
 import re
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger("ollama-chat")
 
 GAP = "\n[…]\n"
 _SECTION_CHARS = 900
 _WORD = re.compile(r"[a-z0-9]+")
+_URL = re.compile(r"https?://\S+|\bwww\.\S+", re.I)
+# How much a question word counts once a kept section already has it. Without
+# this, the first part of a two-part question fills the budget with sections
+# that all answer the same part — "28.4 BLEU" six ways and no "8 heads".
+_ALREADY = 0.35
 _STOP = frozenset("""
 a an and are as at be but by can do does for from has have how i if in into is
 it its me my of on or our so that the their them then there these this those to
@@ -71,27 +76,31 @@ def terms(text: str) -> List[str]:
     return [w for w in words if w not in _STOP and (len(w) > 2 or w.isdigit())]
 
 
-def _keyword_scores(question: str, parts: Sequence[str]) -> List[float]:
-    """BM25-ish: a rare question word in a section counts for more."""
+def _keyword_weights(question: str, parts: Sequence[str]) -> List[Dict[str, float]]:
+    """Per section, how much each question word counts there (BM25-ish).
+
+    A rare question word in a section counts for more than a common one.
+    """
     wanted = set(terms(question))
     if not wanted:
-        return [0.0] * len(parts)
+        return [{} for _ in parts]
     bags = [terms(p) for p in parts]
     n = len(parts)
     df = {w: sum(1 for bag in bags if w in bag) for w in wanted}
-    out = []
+    out: List[Dict[str, float]] = []
     for bag in bags:
-        if not bag:
-            out.append(0.0)
-            continue
-        score = 0.0
+        weights: Dict[str, float] = {}
         for word in wanted:
-            tf = bag.count(word)
+            tf = bag.count(word) if bag else 0
             if tf:
                 idf = math.log(1 + (n - df[word] + 0.5) / (df[word] + 0.5))
-                score += idf * (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * len(bag) / 120))
-        out.append(score)
+                weights[word] = idf * (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * len(bag) / 120))
+        out.append(weights)
     return out
+
+
+def _keyword_scores(question: str, parts: Sequence[str]) -> List[float]:
+    return [sum(w.values()) for w in _keyword_weights(question, parts)]
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -124,25 +133,33 @@ def focus(text: str, question: str, budget: int,
     text = str(text or "")
     if len(text) <= budget:
         return text
+    # A link in the question names the page, not what is wanted from it. Its
+    # pieces — "arxiv", "org", "pdf", "1706" — matched every entry in a
+    # paper's reference list, and those filled the budget in place of the
+    # section that said how many attention heads the model used.
+    question = _URL.sub(" ", str(question or ""))
     # Finer pieces for a tighter budget, so the best one always fits.
     parts = sections(text, size=min(_SECTION_CHARS, max(200, budget // 5)))
     if len(parts) < 2 or not terms(question):
         return _front(text, budget)
-    scores = (_meaning_scores(question, parts, embed) if embed else None) \
-        or _keyword_scores(question, parts)
-    if not any(scores):
+    meaning = _meaning_scores(question, parts, embed) if embed else None
+    weights = _keyword_weights(question, parts) if meaning is None else []
+    if meaning is None and not any(weights):
         return _front(text, budget)
-    # The opening is kept, but never at the cost of the answer: a page whose
-    # first section is most of the budget keeps only the start of it.
-    lead = budget // 3
+    # The opening is kept, because it says what the page is — but only its
+    # start. A paper's first section is its author list, and keeping a third
+    # of the budget for e-mail addresses is a third not spent on the answer.
+    lead = max(120, budget // 8)
     if len(parts[0]) > lead:
         parts[0] = _front(parts[0], lead)
     keep = {0}
     used = len(parts[0])
-    ranked = sorted(range(1, len(parts)), key=lambda i: -scores[i])
+    if meaning is not None:
+        ranked = [i for i in sorted(range(1, len(parts)), key=lambda i: -meaning[i])
+                  if meaning[i] > 0]
+    else:
+        ranked = _covering(weights, parts, budget - used)
     for index in ranked:
-        if scores[index] <= 0:
-            break
         cost = len(parts[index]) + len(GAP)
         if used + cost > budget:
             continue
@@ -159,6 +176,34 @@ def focus(text: str, question: str, budget: int,
         out.append(GAP.strip())
     result = "\n\n".join(out)
     return result if len(result) <= budget else _front(result, budget)
+
+
+def _covering(weights: List[Dict[str, float]], parts: Sequence[str],
+              room: int) -> List[int]:
+    """Sections in the order to keep them, so every part of the question is covered.
+
+    Greedy: each pick is the section adding most, counting a question word
+    for less once a kept section already has it. A section on the second half
+    of the question then beats a fourth section on the first half.
+    """
+    seen: Dict[str, int] = {}
+    left = set(range(1, len(parts)))
+    order: List[int] = []
+    while left and room > 0:
+        def gain(i: int) -> float:
+            return sum(v * (_ALREADY ** seen.get(w, 0)) for w, v in weights[i].items())
+        fits = [i for i in left if len(parts[i]) + len(GAP) <= room]
+        if not fits:
+            break
+        best = max(fits, key=lambda i: (gain(i), -i))
+        if gain(best) <= 0:
+            break
+        order.append(best)
+        left.discard(best)
+        room -= len(parts[best]) + len(GAP)
+        for word in weights[best]:
+            seen[word] = seen.get(word, 0) + 1
+    return order
 
 
 def _front(text: str, budget: int) -> str:

@@ -2178,6 +2178,12 @@ def followable(document: Dict[str, Any], link: Dict[str, str]) -> bool:
     either way and is not what this is for — this is about whose site a page
     can talk the model into visiting, which the address guard has no view of.
     """
+    # A PDF's links are its citations. Following them read two unrelated
+    # papers in place of the one asked about, so the app never picks one —
+    # they stay listed, and the answering model can still ask for one by
+    # number when it is plainly the missing piece.
+    if (document or {}).get("kind") == "pdf":
+        return False
     if get_web_follow_scope() == "any":
         return True
     return same_site((document or {}).get("url", ""), (link or {}).get("url", ""))
