@@ -293,7 +293,8 @@ class TestPagesThatNeedABrowser:
         monkeypatch.setattr(readers, "render",
                             lambda u, guard, timeout, ua: seen.update(guard=guard) or
                             {"url": u, "html": SHELL})
-        web.fetch(url)
+        with pytest.raises(web.WebError):
+            web.fetch(url)          # still a shell after rendering: nothing to read
         assert seen["guard"] is web.check_url
 
     def test_a_page_with_enough_text_is_not_opened(self, site, monkeypatch):
@@ -305,14 +306,17 @@ class TestPagesThatNeedABrowser:
         web.fetch(url)
         assert not called
 
-    def test_a_browser_that_fails_leaves_the_plain_reading(self, site, monkeypatch):
+    def test_a_browser_that_fails_leaves_an_honest_failure(self, site, monkeypatch):
+        """"Loading…" is not the page, and reading it as one let the model
+        answer from memory under a source that said nothing."""
         monkeypatch.setenv("WEB_RENDER", "1")
 
         def broken(*a):
             raise readers.ReadError("no chromium")
         monkeypatch.setattr(readers, "render", broken)
         url = site.add("/shop", SHELL)
-        assert "Loading" in web.fetch(url)["text"]
+        with pytest.raises(web.WebError, match="almost no text"):
+            web.fetch(url)
 
 
 def _chromium_works():
@@ -394,9 +398,17 @@ class TestFocusingALongPage:
     def test_the_front_was_all_a_plain_cut_kept(self):
         assert "36 months" not in _long_text()[:1500]
 
-    def test_a_request_with_nothing_to_match_keeps_the_front(self):
-        cut = focus.focus(_long_text(), "summarise this", 1500)
-        assert cut.endswith("…[truncated]") and cut.startswith("Welcome")
+    def test_a_request_with_nothing_to_match_skims_the_whole_document(self):
+        """A bare link to a manual kept its cover and legal notice, and the
+        model invented the capacity. A skim shows what is further in."""
+        text = "Cover of the manual.\n\n" + "\n\n".join(
+            f"Section {i}: " + f"words about part {i}. " * 15 for i in range(40))
+        cut = focus.focus(text, "summarise this", 1500)
+        assert cut.startswith("Cover of the manual.") and len(cut) <= 1500
+        assert "[…]" in cut
+        shown = [int(n) for n in __import__("re").findall(r"Section (\d+):", cut)]
+        assert max(shown) >= 30, "nothing from the end of the document"
+        assert len(shown) >= 3
 
     def test_a_short_page_is_untouched(self):
         assert focus.focus("short page", "warranty", 1500) == "short page"
@@ -628,3 +640,53 @@ class TestWhatTheFirstRealPDFTurnShowed:
         cut = focus.focus(paper, self.QUESTION, 2500)
         assert "[page 9] (continued)" in cut
         assert len(cut) <= 2500
+
+
+class TestWhatTheAirFryerTurnShowed:
+    """A real conversation: finding parts for a Gourmia GAF956. Shops answered
+    403, Walmart served "Robot or human?" which was read as the product page,
+    Reddit came back empty, and links to privacy and help pages were followed."""
+
+    def test_a_refused_page_is_asked_for_again_as_a_browser(self, site, monkeypatch):
+        calls = []
+        real = web._get
+
+        def counting(url, **kwargs):
+            calls.append((kwargs.get("headers") or {}).get("User-Agent", ""))
+            return real(url, **kwargs)
+        monkeypatch.setattr(web, "_get", counting)
+        url = site.add("/refuses", "<p>no bots</p>", status=403)
+        with pytest.raises(web.WebError, match="refuses automated readers"):
+            web.fetch(url)
+        assert len(calls) == 2 and calls[1].startswith("Mozilla/5.0 (Windows")
+
+    def test_a_bot_check_is_not_read_as_the_page(self, site):
+        url = site.add("/ip/123", "<html><head><title>Robot or human?</title></head>"
+                       "<body><p>Activate and hold the button to confirm that you're "
+                       "human. Thank You!</p></body></html>")
+        with pytest.raises(web.WebError, match="bot check"):
+            web.fetch(url)
+
+    def test_reddit_is_read_from_its_plain_html_address(self):
+        assert web._readable_address("https://www.reddit.com/r/airfryer/comments/1/x/") == \
+            "https://old.reddit.com/r/airfryer/comments/1/x/"
+        assert web._readable_address("https://example.com/r/x") == "https://example.com/r/x"
+
+    @pytest.mark.parametrize("path", ["/account/ccpa-redirect?native=false", "/privacy-policy",
+                                      "/gp/help/external/51", "/cart", "/ap/signin"])
+    def test_site_furniture_is_not_followed(self, path):
+        page = {"url": "https://www.walmart.com/ip/1"}
+        assert not web.followable(page, {"url": "https://www.walmart.com" + path})
+
+    def test_a_product_page_still_is(self):
+        page = {"url": "https://www.walmart.com/ip/1"}
+        assert web.followable(page, {"url": "https://www.walmart.com/ip/Gourmia-GAF956/2"})
+
+    def test_the_check_is_given_the_conversation(self, monkeypatch):
+        asked = []
+        monkeypatch.setattr(ollama_client, "chat",
+                            lambda model, messages, **k: asked.append(messages) or "DONE")
+        web.next_searches("What page is the capacity on?", PAGES, [], "m",
+                          conversation="user: find details on my Gourmia GAF956 air fryer")
+        user = asked[0][1]["content"]
+        assert "GAF956" in user and "Keep the product names" in asked[0][0]["content"]

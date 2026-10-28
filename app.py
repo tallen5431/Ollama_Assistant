@@ -2126,7 +2126,7 @@ def _gather_web(
         yield _line({"status": "Found results but couldn't read any of them."})
     yield from _distil_documents(question, documents, model)
     yield from _search_again(model, question, queries, documents, failed, outcome,
-                             recipe or {})
+                             recipe or {}, conversation=web.planner_input(messages))
     yield _step("Context from the web",
                 f"{len(documents)} document(s), "
                 f"{sum(len(d.get('text') or '') for d in documents)} characters")
@@ -2181,7 +2181,8 @@ def _searcher(recipe: Dict[str, Any]) -> Any:
 def _search_again(model: str, question: str, queries: List[str],
                   documents: List[Dict[str, Any]], failed: List[str],
                   outcome: Dict[str, Any],
-                  recipe: Optional[Dict[str, Any]] = None) -> Any:
+                  recipe: Optional[Dict[str, Any]] = None,
+                  conversation: str = "") -> Any:
     """Further rounds of searching, while the pages read fall short.
 
     The first search is planned before anything has been read. Here a small
@@ -2197,7 +2198,8 @@ def _search_again(model: str, question: str, queries: List[str],
     rounds = recipe["rounds"] if "rounds" in recipe else get_web_search_rounds()
     for round_number in range(2, rounds + 2):
         yield _line({"status": "Checking whether that answers it…"})
-        more = web.next_searches(question, documents, tried, model)
+        more = web.next_searches(question, documents, tried, model,
+                                 conversation=conversation)
         if more is None:
             yield _step(f"Search round {round_number}",
                         "the check could not be made; answering from what was read")

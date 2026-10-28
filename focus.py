@@ -144,8 +144,14 @@ def focus(text: str, question: str, budget: int,
     question = _URL.sub(" ", str(question or ""))
     # Finer pieces for a tighter budget, so the best one always fits.
     parts = sections(text, size=min(_SECTION_CHARS, max(200, budget // 5)))
-    if len(parts) < 2 or not terms(question):
+    if len(parts) < 2:
         return _front(text, budget)
+    if not terms(question):
+        # Nothing to match — a bare link, "summarise this". The front alone was
+        # a manual's cover, legal notice and safety warnings, and asked about
+        # the air fryer the model invented its capacity. A skim across the
+        # whole document at least shows what is in it.
+        return _skim(parts, budget)
     meaning = _meaning_scores(question, parts, embed) if embed else None
     weights = _keyword_weights(question, parts) if meaning is None else []
     if meaning is None and not any(weights):
@@ -169,6 +175,11 @@ def focus(text: str, question: str, budget: int,
             continue
         keep.add(index)
         used += cost
+    return _assemble(parts, sorted(keep), budget)
+
+
+def _assemble(parts: List[str], keep: List[int], budget: int) -> str:
+    """The kept sections in page order, with gaps marked and pages named."""
     # Which page each section is on, for a document that marks its pages (a
     # PDF does: "[page 8]"). Only the section a page starts with carries the
     # marker, so a section kept from the middle of a page arrived with no page
@@ -195,6 +206,27 @@ def focus(text: str, question: str, budget: int,
         out.append(GAP.strip())
     result = "\n\n".join(out)
     return result if len(result) <= budget else _front(result, budget)
+
+
+def _skim(parts: List[str], budget: int) -> str:
+    """The start of the document, then evenly spaced sections from the rest."""
+    lead = max(120, budget // 8)
+    first = _front(parts[0], lead) if len(parts[0]) > lead else parts[0]
+    room = budget - len(first)
+    rest = list(range(1, len(parts)))
+    # As many as fit at their own length, spread evenly from first to last.
+    average = max(1, sum(len(parts[i]) + _EXTRA for i in rest) // max(1, len(rest)))
+    wanted = max(1, min(len(rest), room // average))
+    step = len(rest) / wanted
+    chosen = sorted({rest[min(len(rest) - 1, int(k * step))] for k in range(wanted)})
+    keep = [0]
+    for index in chosen:
+        cost = len(parts[index]) + _EXTRA
+        if cost <= room:
+            keep.append(index)
+            room -= cost
+    parts = [first] + parts[1:]
+    return _assemble(parts, keep, budget)
 
 
 def _covering(weights: List[Dict[str, float]], parts: Sequence[str],
