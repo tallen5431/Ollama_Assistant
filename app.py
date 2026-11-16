@@ -21,6 +21,7 @@ import csv
 import io
 import json
 import os
+import subprocess
 import queue
 import re
 import socket
@@ -74,6 +75,9 @@ from config import (
     get_web_follow_scope,
     get_web_max_hops,
     get_web_max_docs,
+    get_web_cache_minutes,
+    get_web_max_chars,
+    get_web_render,
     logger,
     web_enabled,
 )
@@ -315,8 +319,46 @@ def health() -> Any:
             # Whether a browser that has never touched the toggle starts with
             # photo details on, so the deployment decides rather than the page.
             "photo_meta": get_photo_meta_default(),
+            # For the "Copy for Claude" report: which code this is and how it
+            # is set up, so a problem can be reproduced rather than guessed
+            # at. Model names and numbers only — nothing secret.
+            "version": _VERSION,
+            "settings": _settings_summary(),
         }
     )
+
+
+def _app_version() -> str:
+    """The checkout's commit, "8479aff Merge pull request #20", or "unknown"."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+             "log", "-1", "--format=%h %s"],
+            capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return (done.stdout.strip()[:120] or "unknown") if done.returncode == 0 else "unknown"
+
+
+_VERSION = _app_version()
+
+
+def _settings_summary() -> Dict[str, Any]:
+    """The settings that change how a turn goes, for a debug report."""
+    return {
+        "planner": get_planner_model() or "(answering model)",
+        "distiller": get_distiller_model() or "off",
+        "embed": get_web_embed_model() or "off",
+        "vision": get_vision_model() or "(auto)",
+        "num_ctx": get_num_ctx(),
+        "render": get_web_render(),
+        "search_rounds": get_web_search_rounds(),
+        "max_docs": get_web_max_docs(),
+        "max_chars": get_web_max_chars(),
+        "cache_minutes": get_web_cache_minutes(),
+        "carry_turns": get_web_carry_turns(),
+        "search_backend": "searxng" if web.effective_search_url() else "duckduckgo",
+    }
 
 
 # -------------------------------------------------------------------
