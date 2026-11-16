@@ -2059,6 +2059,23 @@ says which. The same goes for a web answer that hedges: the search may never
 have been planned, may have been planned from too little, or may have run and
 found nothing, and only the last of those means the retrieval worked.
 
+
+### Copying a turn for debugging
+
+**🐞 For Claude** under each reply copies a plain-text report of what happened:
+the question, the model and its speed, the app's version and the settings that
+shape a turn (planner, distiller, embedding model, `num_ctx`, render, rounds,
+pages, cache, search backend), every step from the panel, the sources and the
+answer. **This reply** copies one turn; **Whole chat** copies every turn in the
+conversation. It is there from the start of a reply, so a turn that failed can
+be copied too.
+
+The report is small and safe to paste anywhere: page text and the text sent to
+the model are clipped to their first few hundred characters, a photo's position
+and any map links are removed, images are never included, and no password,
+token or URL with credentials in it is part of the settings. The version and
+settings also appear in `/api/health` as `version` and `settings`.
+
 ## API endpoints
 
 | Method & path        | Purpose |

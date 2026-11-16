@@ -231,6 +231,13 @@ _PAGE = r"""<!doctype html>
         color:var(--faint); border:1px solid var(--border-soft);
         border-radius:var(--r1); opacity:0.75; }
       .replycopy:hover { opacity:1; color:var(--text); }
+      /* Two choices under one quiet button, so a phone's reply bar does not
+         grow a fourth and fifth control. */
+      .replyacts { display:flex; flex-wrap:wrap; gap:0.3rem; margin:0.3rem 0.4rem 0; }
+      .replyacts .replycopy { margin:0; }
+      .debugpick { display:flex; flex-wrap:wrap; gap:0.3rem; margin:0.3rem 0.4rem 0;
+        align-items:center; font-size:var(--fs-xs); color:var(--faint); }
+      .debugpick .replycopy { margin:0; }
       .sources { font-size:var(--fs-xs); color:var(--muted); margin:0.35rem 0.4rem 0; }
       .sources a { color:var(--muted); text-decoration:underline; }
       .sources a:hover { color:var(--text); }
@@ -1608,6 +1615,8 @@ _PAGE = r"""<!doctype html>
       // an answer looks wrong — and then it is the only thing that helps.
       function addStep(view, entry) {
         if (!view || !view.stepsBody || !entry || !entry.step) return;
+        // Kept as data as well as drawn, for "Copy for Claude".
+        (view.stepLog = view.stepLog || []).push(entry);
         view.steps.hidden = false;
         const row = document.createElement("div");
         row.className = "steprow";
@@ -2392,6 +2401,138 @@ _PAGE = r"""<!doctype html>
         view.meta.parentElement.insertBefore(btn, view.meta.nextSibling);
         view.copyBtn = btn;
         addReplySpeak(view);
+        addDebugCopy(view);
+      }
+
+      // ---- Copy for Claude ----
+      // One reply, or the whole chat, as plain text with everything needed to
+      // reproduce what happened: the question, the model and its speed, the
+      // app's version and settings, every step from the panel, the sources and
+      // the answer. Long text is clipped and a photo's position is removed, so
+      // what is pasted is small and says nothing about where you were.
+      // Shown from the start, not only once a reply finishes: a turn that
+      // failed is the one most worth copying.
+      const DEBUG_TEXT_MAX = 600, DEBUG_SYSTEM_MAX = 900, DEBUG_URLS_MAX = 12;
+
+      function addDebugCopy(view) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "replycopy replydebug";
+        btn.textContent = "🐞 For Claude";
+        btn.title = "Copy what happened in this reply, for debugging";
+        const pick = document.createElement("div");
+        pick.className = "debugpick";
+        pick.hidden = true;
+        const label = document.createElement("span");
+        label.textContent = "Copy:";
+        pick.appendChild(label);
+        for (const [text, build] of [["This reply", () => debugHeader() + "\n" + turnReport(view)],
+                                     ["Whole chat", chatReport]]) {
+          const choice = document.createElement("button");
+          choice.type = "button";
+          choice.className = "replycopy";
+          choice.textContent = text;
+          choice.addEventListener("click", async () => {
+            await shareOrCopy(build(), null, (how) => {
+              choice.textContent = how === "copied" ? "Copied — paste it to Claude"
+                : how === "manual" ? "Could not copy" : text;
+              setTimeout(() => { choice.textContent = text; pick.hidden = true; }, 1800);
+            });
+          });
+          pick.appendChild(choice);
+        }
+        btn.addEventListener("click", () => { pick.hidden = !pick.hidden; });
+        // One row for the reply's buttons. Stacked, three of them took three
+        // lines under every reply on a phone.
+        const row = document.createElement("div");
+        row.className = "replyacts";
+        view.copyBtn.parentElement.insertBefore(row, view.copyBtn);
+        for (const each of [view.copyBtn, view.speakBtn, btn]) if (each) row.appendChild(each);
+        row.parentElement.insertBefore(pick, row.nextSibling);
+        (debugViews = debugViews || []).push(view);
+        view.debugBtn = btn;
+      }
+
+      // What a photo's record says about where it was taken, out of anything
+      // copied: "at 51.507220, -0.127500" and map links.
+      function withoutPosition(text) {
+        return String(text || "")
+          .replace(/-?\d{1,3}\.\d{3,},\s*-?\d{1,3}\.\d{3,}/g, "[position removed]")
+          .replace(/https?:\/\/[^\s]*(?:maps|openstreetmap)[^\s]*/gi, "[map link removed]");
+      }
+
+      function clip(text, max) {
+        text = String(text || "");
+        return text.length > max ? text.slice(0, max) + " …[" + (text.length - max) + " more characters]" : text;
+      }
+
+      function debugHeader() {
+        const info = serverInfo || {};
+        const set = info.settings || {};
+        const lines = ["=== Ollama Assistant debug report ===",
+          "App: " + (info.version || "unknown") + " · copied " + new Date().toString().slice(0, 24)];
+        if (info.settings) {
+          lines.push("Settings: planner " + set.planner + " · distiller " + set.distiller +
+            " · embed " + set.embed + " · vision " + set.vision + " · num_ctx " + set.num_ctx +
+            " · render " + (set.render ? "on" : "off") + " · rounds " + set.search_rounds +
+            " · pages " + set.max_docs + " · page chars " + set.max_chars +
+            " · cache " + set.cache_minutes + " min · carry " + set.carry_turns +
+            " · search " + set.search_backend);
+        }
+        lines.push("Toggles: web " + (webEl.checked ? "on" : "off") + " · photo details " +
+          (exifEl.checked ? "on" : "off") + " · screen " + window.innerWidth + "px");
+        return lines.join("\n");
+      }
+
+      function turnReport(view) {
+        const out = [];
+        // The question is the user bubble just before this reply.
+        let prev = view.root.previousElementSibling;
+        while (prev && !prev.querySelector(".msg.user")) prev = prev.previousElementSibling;
+        if (prev) {
+          const bubble = prev.querySelector(".bubble");
+          const photos = prev.querySelectorAll("img").length;
+          out.push("--- You asked" + (photos ? " (" + photos + " photo(s) attached)" : "") + " ---");
+          out.push(clip(bubble ? bubble.textContent.trim() : "", 2000));
+        }
+        const role = view.root.querySelector(".role");
+        out.push("--- Reply from " + (role ? role.textContent : "?") + " ---");
+        if (view.meta && view.meta.textContent.trim()) out.push("Stats: " + view.meta.textContent.trim());
+        if (view.status && !view.status.hidden && view.status.textContent.trim()) {
+          out.push("Last status: " + view.status.textContent.trim());
+        }
+        out.push("--- Steps ---");
+        if (!(view.stepLog || []).length) out.push("(none recorded)");
+        for (const entry of view.stepLog || []) {
+          out.push("[" + entry.step + "] " + withoutPosition(entry.detail || ""));
+          if (entry.urls && entry.urls.length) {
+            for (const url of entry.urls.slice(0, DEBUG_URLS_MAX)) out.push("    " + url);
+            if (entry.urls.length > DEBUG_URLS_MAX) out.push("    …and " + (entry.urls.length - DEBUG_URLS_MAX) + " more");
+          }
+          if (entry.text) out.push("    " + clip(withoutPosition(entry.text), DEBUG_TEXT_MAX).replace(/\n/g, "\n    "));
+          for (const sys of entry.system || []) {
+            out.push("    [system] " + clip(withoutPosition(sys), DEBUG_SYSTEM_MAX).replace(/\n/g, "\n    "));
+          }
+        }
+        if (view.think && !view.think.hidden) {
+          out.push("--- Thinking (start) ---");
+          out.push(clip(view.thinkBody.textContent, 1500));
+        }
+        out.push("--- Answer ---");
+        out.push(clip(view.raw || view.bubble.textContent || "", 4000));
+        const sources = view.sourceList || [];
+        if (sources.length) {
+          out.push("--- Sources ---");
+          sources.forEach((src, i) => out.push("[" + (i + 1) + "] " + (src.title || "") + " — " + (src.url || "")));
+        }
+        return out.join("\n");
+      }
+
+      function chatReport() {
+        const views = (debugViews || []).filter(v => document.body.contains(v.root));
+        const parts = [debugHeader(), "Turns in this chat: " + views.length];
+        views.forEach((v, i) => { parts.push("", "##### Turn " + (i + 1) + " #####", turnReport(v)); });
+        return parts.join("\n");
       }
 
       // On demand, whatever the toggle says: wanting one reply read out is not
@@ -2414,6 +2555,7 @@ _PAGE = r"""<!doctype html>
       // Render the pages a reply was grounded in, numbered to match the [n]
       // citations the model is asked to use.
       function showSources(view, list) {
+        view.sourceList = list || [];
         view.sources.innerHTML = "";
         if (!list || !list.length) { view.sources.hidden = true; return; }
         view.sources.appendChild(document.createTextNode("Sources: "));
@@ -2512,6 +2654,7 @@ _PAGE = r"""<!doctype html>
       async function checkVoice() {
         try {
           const data = await (await fetch("api/health")).json();
+          serverInfo = data;
           if (data.web) webBar.hidden = false;
           // The dictation toggles sit in the same row now, so they need their
           // own gate: without vosk they are three settings for a button that
@@ -3249,6 +3392,10 @@ _PAGE = r"""<!doctype html>
       // another; this side just mirrors each completed message into it.
       let currentConvoId = null;
       let historyOn = false;
+      // What /api/health said: the app's version and settings, for the debug
+      // report. Read once at load; the report says "unknown" without it.
+      let serverInfo = null;
+      let debugViews = [];
       let modelVision = {};   // model name -> can it answer about an image
       let visionDefault = null;  // server's pick: smallest non-OCR vision model
       let ocrAvailable = null;   // an installed transcriber, if there is one
