@@ -690,3 +690,72 @@ class TestWhatTheAirFryerTurnShowed:
                           conversation="user: find details on my Gourmia GAF956 air fryer")
         user = asked[0][1]["content"]
         assert "GAF956" in user and "Keep the product names" in asked[0][0]["content"]
+
+
+class TestWhatTheFirstBenchResultShowed:
+    """T01 on the NucBox: SearXNG's brave, duckduckgo and startpage engines were
+    all refusing (rate limit, CAPTCHA), one YouTube result came back, and the
+    app followed YouTube's "How YouTube works" footer link."""
+
+    def test_when_every_engine_refuses_duckduckgo_is_tried_directly(self, monkeypatch):
+        monkeypatch.setenv("WEB_ENABLED", "1")
+        monkeypatch.setattr(web, "effective_search_url", lambda: "http://searx.local")
+
+        def refused(*a, **k):
+            raise web.WebError("SearXNG returned no results and reported brave (too many "
+                               "requests), duckduckgo (CAPTCHA)")
+        monkeypatch.setattr(web, "_search_searxng", refused)
+        monkeypatch.setattr(web, "_search_duckduckgo",
+                            lambda q, limit, **k: [{"url": "https://shop.example/w", "title": "W"}])
+        assert web.search("widget") == [{"url": "https://shop.example/w", "title": "W"}]
+
+    def test_both_reasons_are_said_when_both_refuse(self, monkeypatch):
+        monkeypatch.setenv("WEB_ENABLED", "1")
+        monkeypatch.setattr(web, "effective_search_url", lambda: "http://searx.local")
+        monkeypatch.setattr(web, "_search_searxng", lambda *a, **k: (_ for _ in ()).throw(
+            web.WebError("SearXNG returned no results and reported startpage (CAPTCHA)")))
+        monkeypatch.setattr(web, "_search_duckduckgo", lambda *a, **k: (_ for _ in ()).throw(
+            web.WebError("DuckDuckGo served a bot check")))
+        with pytest.raises(web.WebError) as caught:
+            web.search("widget")
+        assert "startpage (CAPTCHA)" in str(caught.value)
+        assert "direct DuckDuckGo search failed too" in str(caught.value)
+
+    def test_an_unreachable_instance_is_still_an_error(self, monkeypatch):
+        """SEARXNG_URL set means SearXNG is required; only blocked engines fall back."""
+        monkeypatch.setenv("WEB_ENABLED", "1")
+        monkeypatch.setattr(web, "effective_search_url", lambda: "http://searx.local")
+        monkeypatch.setattr(web, "_search_searxng", lambda *a, **k: (_ for _ in ()).throw(
+            web.WebError("SearXNG returned HTTP 502.")))
+        called = []
+        monkeypatch.setattr(web, "_search_duckduckgo", lambda *a, **k: called.append(1) or [])
+        with pytest.raises(web.WebError, match="502"):
+            web.search("widget")
+        assert not called
+
+    @pytest.mark.parametrize("url", [
+        "https://www.youtube.com/howyoutubeworks/?utm_source=ythp",
+        "https://www.youtube.com/about/press/", "https://example.com/about",
+        "https://example.com/advertise", "https://example.com/policies/terms"])
+    def test_footer_links_are_not_followed(self, url):
+        page = {"url": "https://www.youtube.com/watch?v=x"}
+        assert not web.followable(page, {"url": url})
+
+    def test_the_link_numbering_has_no_placeholder_to_copy(self):
+        """The reply said "[page.link 1.1]" — the model copied the explanation."""
+        out = web.link_map({"url": "https://a.example/", "links": [
+            {"url": "https://a.example/x", "text": "x"}]}, limit=5)
+        assert "page.link" not in out
+
+
+class TestRefusedSearchesAreSaidOutLoud:
+    def test_the_engines_are_named(self):
+        note = ("SearXNG returned no results and reported brave (too many requests), "
+                "duckduckgo (CAPTCHA). Engines that answer for one address may refuse another")
+        assert app_module._refusing([note]) == "brave (too many requests), duckduckgo (CAPTCHA)"
+        assert app_module._refusing(["SearXNG returned HTTP 502."]) == ""
+
+    def test_the_page_shows_it_under_the_reply(self):
+        import chat_ui
+        page = chat_ui.render_page("t")
+        assert 'if (entry.step === "Search engines refusing") showSearchWarning(view, entry);' in page

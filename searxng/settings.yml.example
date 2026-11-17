@@ -30,6 +30,25 @@ search:
   # for looking things up, and the filter mostly gets in the way of that.
   safe_search: 0
 
+  # How long an engine is benched after it refuses. SearXNG's defaults are an
+  # hour for a CAPTCHA and three minutes for "too many requests" — and one chat
+  # turn runs three to five searches at once, so a single busy turn could bench
+  # Brave, DuckDuckGo and Startpage together and leave the next hour's searches
+  # with nothing. Shorter here; Cloudflare and reCAPTCHA blocks are left as
+  # they are, since retrying those sooner only earns a longer block.
+  suspended_times:
+    SearxEngineAccessDenied: 120
+    SearxEngineCaptcha: 600
+    SearxEngineTooManyRequests: 60
+    cf_SearxEngineCaptcha: 1296000
+    cf_SearxEngineAccessDenied: 86400
+    recaptcha_SearxEngineCaptcha: 604800
+
+outgoing:
+  # SearXNG's default is 3 seconds per engine. A slower engine that would have
+  # answered is worth the wait more than an empty result.
+  request_timeout: 5.0
+
 # Making sure these four are on. Not a restriction to these four, which is what
 # this block used to claim: with `use_default_settings: true` an `engines:`
 # block is *merged* into SearXNG's default list by name, so naming an engine
@@ -57,6 +76,12 @@ search:
 # engine, which is the quick way to find out which ones your address is
 # welcome on. The app now names the engines that refused it whenever a search
 # comes back empty, which is the same question answered from the other side.
+#
+# Bing, Google, Qwant, Yahoo and Mojeek ship switched OFF in SearXNG. With only
+# Brave, DuckDuckGo and Startpage on, a real test turn had all three refuse at
+# once (one rate limit, two CAPTCHAs) and the whole search returned a single
+# YouTube video. More engines on means one of them is usually still answering.
+# Mojeek and Startpage are "inactive" by default, which is a separate switch.
 engines:
   - name: duckduckgo
     disabled: false
@@ -64,5 +89,17 @@ engines:
     disabled: false
   - name: startpage
     disabled: false
+    inactive: false
   - name: wikipedia
     disabled: false
+  - name: bing
+    disabled: false
+  - name: google
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: mojeek
+    disabled: false
+    inactive: false

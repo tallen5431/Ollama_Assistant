@@ -2132,6 +2132,14 @@ def _gather_web(
                 f"{len(results)} from {len(groups)} query group(s)"
                 + (f"; {' | '.join(unique)}" if unique else ""),
                 urls=[r["url"] for r in results[:12]])
+    refusing = _refusing(unique)
+    if refusing:
+        # Said under the reply, not only in the panel: an answer built on one
+        # stray result reads like an answer built on a real search, and the fix
+        # (other engines, or waiting) is on this box, not in the question.
+        yield _step("Search engines refusing", refusing)
+        failed.append("The search itself was mostly refused — " + refusing
+                      + " — so very little was found; say so if it matters.")
     if not results:
         yield _line({"status": failures[0] if failures else "No search results found."})
         return
@@ -2172,6 +2180,16 @@ def _gather_web(
     yield _step("Context from the web",
                 f"{len(documents)} document(s), "
                 f"{sum(len(d.get('text') or '') for d in documents)} characters")
+
+
+def _refusing(failures: List[str]) -> str:
+    """"brave (too many requests), duckduckgo (CAPTCHA)" from SearXNG's own
+    report that its engines refused, or "" when they did not."""
+    for note in failures:
+        found = re.search(r"returned no results and reported (.+?)\. ", note + " ")
+        if found:
+            return found.group(1)
+    return ""
 
 
 def _how_read(documents: List[Dict[str, Any]]) -> str:

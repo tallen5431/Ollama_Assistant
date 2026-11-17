@@ -1998,12 +1998,12 @@ class TestLinkMap:
         "cite sources by their [n] number", so a model cites [1.1] as if it
         were a source — which is the one page it definitely has not read."""
         out = web.link_map(self.DOC, number=1)
-        assert "[page.link]" in out
+        assert "numbered like [1.2] (page 1, link 2)" in out
         assert "never cite one as a source" in out
 
     def test_the_numbering_survives_into_the_assembled_block(self):
         ctx = web.build_context([{**self.DOC, "title": "Ada", "text": "body"}])
-        assert "[1.1]" in ctx and "[page.link]" in ctx
+        assert "[1.1]" in ctx and "(page 1, link 2)" in ctx
 
     def test_a_page_with_no_links_adds_nothing(self):
         assert web.link_map({"url": "https://a.example/", "links": []}) == ""
