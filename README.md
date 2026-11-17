@@ -855,23 +855,6 @@ the same.
 
 ### Running your own search — the durable fix
 
-> **Already running SearXNG from an older copy of this file?** The example now
-> switches on Bing, Google, Qwant, Yahoo and Mojeek (off in SearXNG by default)
-> and benches a refusing engine for minutes rather than an hour. With only
-> Brave, DuckDuckGo and Startpage on, all three refusing at once left a real
-> search with one result. To take the new file and keep your key:
->
-> ```bash
-> cd searxng
-> KEY=$(sudo grep -oP 'secret_key:\s*"\K[^"]+' config/settings.yml)
-> sudo cp settings.yml.example config/settings.yml
-> sudo sed -i "s|ultrasecretkey|$KEY|" config/settings.yml
-> docker restart searxng && sleep 5 && docker logs --tail 20 searxng
-> ```
->
-> The app now also tries DuckDuckGo directly when every SearXNG engine refuses,
-> and says under the reply when the search was mostly refused.
-
 [SearXNG](https://docs.searxng.org/) is a metasearch engine: it queries the
 engines for you and answers with JSON, so this app never scrapes anyone's HTML.
 It runs on the same box as everything else and needs no key. A compose file and
@@ -1094,6 +1077,24 @@ on the same machine — you already get to the box over Tailscale.
 
 `SEARXNG_URL` is allowed to point at a private address, unlike anything a model
 or a page asks for; see "What it will and won't reach" below.
+
+
+> **Already running SearXNG from an older copy of this file?** The example now
+> switches on Bing, Google, Qwant, Yahoo and Mojeek (off in SearXNG by default)
+> and benches a refusing engine for minutes rather than an hour. With only
+> Brave, DuckDuckGo and Startpage on, all three refusing at once left a real
+> search with one result. To take the new file and keep your key:
+>
+> ```bash
+> cd searxng
+> KEY=$(sudo grep -oP 'secret_key:\s*"\K[^"]+' config/settings.yml)
+> sudo cp settings.yml.example config/settings.yml
+> sudo sed -i "s|ultrasecretkey|$KEY|" config/settings.yml
+> docker restart searxng && sleep 5 && docker logs --tail 20 searxng
+> ```
+>
+> The app now also tries DuckDuckGo directly when every SearXNG engine refuses,
+> and says under the reply when the search was mostly refused.
 
 ### What it will and won't reach
 
