@@ -1648,6 +1648,7 @@ _PAGE = r"""<!doctype html>
         }
         view.stepsBody.appendChild(row);
         if (entry.step === "Links in the reply") showLinkWarning(view, entry);
+        if (entry.step === "Search engines refusing") showSearchWarning(view, entry);
       }
 
       // Links the reply gave that the search did not. Said under the reply, next
@@ -1663,6 +1664,18 @@ _PAGE = r"""<!doctype html>
           + (entry.urls.length === 1 ? "" : "s")
           + " in this reply didn't come from what was searched or read — "
           + "check before using: " + entry.urls.join(" · ");
+        view.sources.insertAdjacentElement("afterend", line);
+      }
+
+      // The search engines refused this box. Under the reply, because an answer
+      // built on one stray result otherwise reads like one built on a search.
+      function showSearchWarning(view, entry) {
+        if (!view || !view.sources || !entry.detail) return;
+        const line = document.createElement("div");
+        line.className = "linkwarn";
+        line.textContent = "⚠ The search engines mostly refused this search ("
+          + entry.detail + "), so this answer rests on very little. "
+          + "Try again in a few minutes, or turn on more engines in SearXNG.";
         view.sources.insertAdjacentElement("afterend", line);
       }
 

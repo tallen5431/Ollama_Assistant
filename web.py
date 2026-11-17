@@ -1573,7 +1573,25 @@ def search(query: str, limit: int = 3, time_range: str = "") -> List[Dict[str, s
         # arguments still works for every search that has no time limit.
         extra = {"time_range": time_range} if time_range else {}
         if base:
-            results = _search_searxng(base, query, limit, **extra)
+            try:
+                results = _search_searxng(base, query, limit, **extra)
+            except WebError as exc:
+                # Every engine SearXNG asked refused it (CAPTCHAs, rate limits).
+                # The instance itself answered — this is not the "SEARXNG_URL is
+                # set, so a missing instance is an error" case — so the direct
+                # route is tried once rather than handing back nothing. If that
+                # is refused too, both reasons are said.
+                if "returned no results and reported" not in str(exc):
+                    raise
+                try:
+                    results = _search_duckduckgo(query, limit, **extra)
+                except (WebError, requests.RequestException) as direct:
+                    raise WebError(f"{exc} The direct DuckDuckGo search failed too: "
+                                   f"{direct}") from exc
+                if not results:
+                    raise
+                logger.info("SearXNG's engines refused %r; DuckDuckGo answered directly",
+                            query)
         else:
             results = _search_duckduckgo(query, limit, **extra)
     except WebError:
@@ -2246,7 +2264,9 @@ def mapped_links(
 _FURNITURE = re.compile(
     r"/(?:account|accounts|ccpa[\w-]*|privacy[\w-]*|cookie[\w-]*|login|log-in|signin|"
     r"sign-in|signup|sign-up|register|cart|checkout|basket|wishlist|help|support/contact|"
-    r"terms[\w-]*|legal|careers|jobs|gp/help|ap/signin)(?:/|$|\?|\.)", re.I)
+    r"terms[\w-]*|legal|careers|jobs|gp/help|ap/signin|about|about-us|press|newsroom|"
+    r"advertis[\w-]*|copyright|policies|policy|howyoutubeworks|creators|investors|"
+    r"sitemap|accessibility)(?:/|$|\?|\.)", re.I)
 
 
 def followable(document: Dict[str, Any], link: Dict[str, str]) -> bool:
@@ -2322,8 +2342,8 @@ def link_map(
         # Unexplained they collide with the citation rule in the preamble —
         # "cite sources by their [n] number" — so a model reading [1.1] cites
         # it like a source, which is precisely the page it has *not* read.
-        "Other pages linked from this one, not fetched — numbered "
-        "[page.link]. Use them to say where something is covered. Never "
+        "Other pages linked from this one, not fetched — numbered like "
+        "[1.2] (page 1, link 2). Use them to say where something is covered. Never "
         "describe what they contain and never cite one as a source: you "
         "have not read them.\n" + "\n".join(rows)
     )
