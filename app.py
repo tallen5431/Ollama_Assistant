@@ -880,7 +880,7 @@ def api_routine_delete(routine_id: str) -> Any:
 @app.route("/api/records", methods=["GET"])
 def api_records() -> Any:
     """Kept records, newest first. ``?routine=`` narrows to one."""
-    rows = store.list_records(str(request.args.get("routine") or ""))
+    rows = store.annotate_records(store.list_records(str(request.args.get("routine") or "")))
     return jsonify({"records": rows, "columns": store.record_columns(rows)})
 
 
@@ -1005,6 +1005,10 @@ def api_record_update(record_id: str) -> Any:
     record = store.update_record(record_id, body["fields"])
     if record is None:
         return jsonify({"error": "No such record"}), 404
+    # With its trip date and checks worked out again against the rest of its
+    # log, so a corrected start time moves the row and clears its warning.
+    group = store.annotate_records(store.list_records(record["routine_name"]))
+    record = next((r for r in group if r["id"] == record["id"]), record)
     return jsonify({"ok": True, "record": record})
 
 
@@ -1049,7 +1053,7 @@ def api_records_csv() -> Any:
     A real endpoint rather than a download built in the browser: pulling this
     with curl from wherever the records are meant to end up is the point.
     """
-    rows = store.list_records(str(request.args.get("routine") or ""))
+    rows = store.annotate_records(store.list_records(str(request.args.get("routine") or "")))
     columns = store.record_columns(rows)
     # The unit moves to the header and the cell keeps the number alone. A cell
     # reading "$115.94" or "93 mi" is text to a spreadsheet: it will not sum, it
@@ -1071,11 +1075,13 @@ def api_records_csv() -> Any:
         heads.append(f"{name} ({unit})" if unit else name)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["taken_at", "routine"] + heads)
+    # trip_date beside taken_at: the day the work was done, which is what a
+    # spreadsheet should sort and group by — taken_at is only when it was saved.
+    writer.writerow(["taken_at", "trip_date", "routine"] + heads)
     for row in rows:
         stamp = datetime.fromtimestamp(row["created_at"]).isoformat(timespec="seconds")
         writer.writerow(
-            [stamp, _csv_safe(row["routine_name"])] +
+            [stamp, (row.get("trip") or {}).get("date", ""), _csv_safe(row["routine_name"])] +
             [_csv_safe(values.number_of(row["fields"].get(name, ""), kinds[name], name))
              for name in columns])
     return Response(

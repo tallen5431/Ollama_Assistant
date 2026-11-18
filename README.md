@@ -1525,9 +1525,26 @@ returns you to the conversation.
 
 The table, newest first:
 
-| When | Routine | distance | elapsed | average speed |
-| --- | --- | --- | --- | --- |
-| 07/08/26, 16:45 | 🚗 Trip | 68 miles | 3 h 08 min | 21.7 mph |
+| Trip date | Kept | Routine | distance | elapsed | average speed |
+| --- | --- | --- | --- | --- | --- |
+| 2026-08-07 15:20 | 07/08/26, 16:45 | 🚗 Trip | 68 miles | 3 h 08 min | 21.7 mph |
+
+**Trip date vs Kept.** *Kept* is when the row was saved; *Trip date* is when the
+work happened — the first timestamp field (Start time), and it is what the
+weekly totals count by. Every header sorts (tap again to flip). A start time
+with only a clock (`18:47`) takes the day it was kept, or the day before when it
+was kept earlier than that clock — a trip saved at 00:35 began yesterday.
+
+Dates that can't be right are flagged in the Trip date cell, and a chip above the
+table filters to them:
+
+- **⚠** a start more than 30 minutes after the row was saved, or an odometer
+  that puts the trip after another whose start time is later — one of the two
+  dates is wrong. Edit the Start time cell to fix it.
+- **ⓘ** a start time with no date — counted on the day it was kept; add the date
+  to be sure.
+
+The CSV export has a `trip_date` column beside `taken_at`.
 
 **How the fields are found.** The model that just answered is asked to restate
 its own answer as those fields, as JSON — temperature 0, a hard token cap, and
