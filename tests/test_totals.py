@@ -131,10 +131,24 @@ class TestPeriods:
         late["created_at"] = datetime(2026, 10, 19, 6, 3).timestamp()
         assert totals.day_of(late, KINDS, COLUMNS) == (date(2026, 10, 18), "Start time")
 
-    def test_a_time_with_no_date_falls_back_to_when_it_was_kept(self):
+    def test_a_time_with_no_date_takes_its_day_from_when_it_was_kept(self):
+        row = trip("2026-10-18 22:00", 800, 10, 1, 10, "c")
+        row["fields"]["Start time"] = "16:53 (UTC-05:00)"
+        row["created_at"] = datetime(2026, 11, 3, 22, 11).timestamp()
+        day, source = totals.day_of(row, KINDS, COLUMNS)
+        assert day == date(2026, 11, 3) and "no date" in source
+
+    def test_kept_after_midnight_means_the_day_before(self):
+        """Started at 18:47, saved at 06:01 the next morning."""
         row = trip("2026-10-18 22:00", 800, 10, 1, 10, "c")
         row["fields"]["Start time"] = "18:47"
-        row["fields"]["End time"] = "22:51"
+        row["created_at"] = datetime(2026, 10, 21, 6, 1).timestamp()
+        assert totals.day_of(row, KINDS, COLUMNS)[0] == date(2026, 10, 20)
+
+    def test_nothing_to_go_on_is_the_day_it_was_kept(self):
+        row = trip("2026-10-18 22:00", 800, 10, 1, 10, "c")
+        row["fields"]["Start time"] = ""
+        row["fields"]["End time"] = ""
         row["created_at"] = datetime(2026, 10, 21, 6, 1).timestamp()
         assert totals.day_of(row, KINDS, COLUMNS) == (date(2026, 10, 21), "")
 
@@ -261,3 +275,62 @@ class TestTheOdometerOnlyGoesUp:
         page = chat_ui.render_page("t")
         assert ".concat(fit.overlaps || [])" in page
         assert "if (fit.since) showSince(view, fit.since);" in page
+
+
+class TestDatesThatNeedFixing:
+    """From a real log: a trip "starting" at 17:36 on the 18th, saved at 00:35
+    that same morning, sat in the wrong week. And nine trips had clock times
+    with no date at all."""
+
+    def rows(self):
+        a = trip("2026-11-17 16:32", 110315, 71, 3.75, 108.57, "a")
+        a["created_at"] = datetime(2026, 11, 18, 0, 36).timestamp()
+        b = trip("2026-11-18 17:36", 110392, 130, 5.83, 137.90, "b")
+        b["created_at"] = datetime(2026, 11, 18, 0, 35).timestamp()
+        return [a, b]
+
+    def test_a_start_after_it_was_kept_is_an_error(self):
+        checks = totals.date_checks(self.rows(), PARSED, KINDS, COLUMNS)
+        assert [c["level"] for c in checks["b"]] == ["error"]
+        assert "after it was kept" in checks["b"][0]["text"]
+        assert "a" not in checks
+
+    def test_a_missing_date_is_a_note(self):
+        rows = self.rows()
+        rows[0]["fields"]["Start time"] = "16:32"
+        checks = totals.date_checks(rows, PARSED, KINDS, COLUMNS)
+        assert checks["a"][0]["level"] == "note"
+
+    def test_odometer_and_start_time_disagreeing_about_order(self):
+        a = trip("2026-11-12 16:00", 1000, 50, 3, 50, "a")
+        b = trip("2026-11-10 16:00", 1100, 50, 3, 50, "b")
+        for r in (a, b):
+            r["created_at"] = datetime(2026, 11, 13, 0, 0).timestamp()
+        checks = totals.date_checks([a, b], PARSED, KINDS, COLUMNS)
+        assert "odometer puts this after" in checks["b"][0]["text"]
+
+    def test_odometers_are_found_by_name_without_a_declaration(self):
+        plain = fields.parse(["Start odometer", "End odometer", "Start time"])
+        kinds = {"Start odometer": "distance", "End odometer": "distance",
+                 "Start time": "timestamp"}
+        assert totals._odometers(plain, kinds, fields.names(plain)) == [
+            ("Start odometer", "End odometer")]
+
+    def test_the_records_route_carries_trip_dates_and_checks(self, client):
+        store.create_routine("Trip", "b", record=DECL)
+        for row in self.rows():
+            kept = store.add_record("Trip", row["fields"])
+            with store._connect() as conn:
+                conn.execute("UPDATE records SET created_at = ? WHERE id = ?",
+                             (row["created_at"], kept["id"]))
+        got = client.get("/api/records?routine=Trip").get_json()["records"]
+        by_start = {r["trip"]["start"]: r for r in got}
+        assert by_start["2026-11-18 17:36"]["checks"][0]["level"] == "error"
+        assert by_start["2026-11-17 16:32"]["checks"] == []
+        assert by_start["2026-11-17 16:32"]["trip"]["date"] == "2026-11-17"
+
+    def test_the_table_sorts_by_trip_date_and_flags_them(self):
+        page = chat_ui.render_page("t")
+        assert 'let recordSort = { key: "trip", dir: -1 };' in page
+        assert 'const labels = ["Trip date", "Kept"]' in page
+        assert "recordChecksOnly = !recordChecksOnly" in page

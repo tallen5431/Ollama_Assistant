@@ -373,6 +373,9 @@ _CURRENCY_WORD = re.compile(
     r"|^(?:US\s*\$|USD)\s*(-?\s*(?:" + _NUM + r"))", re.I)
 
 
+_SYMBOL_AFTER = re.compile(r"^(-?\s*(?:" + _NUM + r"))\s*([$£€])\s*$")
+
+
 def rate_of(name: str) -> str:
     """The rate a column name declares — "mile", "hour", "km" — or ""."""
     match = _RATE_IN_NAME.search(str(name or ""))
@@ -421,6 +424,14 @@ def parse_as(text: str, kind: str, name: str = "") -> Optional[Value]:
         if word:
             amount = _digits(word.group(1) or word.group(2))
             body = f"-${amount[1:]}" if amount.startswith("-") else f"${amount}"
+        else:
+            # The symbol after the number, as a model sometimes writes it:
+            # "168.23 $", or "1.60 $" once a "/mi" the column states is gone.
+            after = _SYMBOL_AFTER.match(body)
+            if after:
+                amount = _digits(after.group(1))
+                body = (f"-{after.group(2)}{amount[1:]}" if amount.startswith("-")
+                        else f"{after.group(2)}{amount}")
     direct = {MONEY: _money, DISTANCE: _distance, SPEED: _speed,
               DURATION: _duration, TIMESTAMP: _timestamp}.get(kind)
     found = direct(body) if direct else None

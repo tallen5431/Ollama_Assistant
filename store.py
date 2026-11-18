@@ -1366,6 +1366,36 @@ def delete_record(rid: str) -> bool:
         return conn.execute("DELETE FROM records WHERE id = ?", (rid,)).rowcount > 0
 
 
+def annotate_records(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Each record with when its run started and anything wrong with that.
+
+    ``trip`` is ``{"date", "start", "source"}``: the day the run belongs to,
+    its start as "YYYY-MM-DD HH:MM" where known, and which field said so.
+    ``checks`` lists what looks wrong — a start after the record was kept, a
+    start time with no date, odometers and start times disagreeing about the
+    order. The table sorts on the first and flags the second; "When" (the time
+    a record was kept) says nothing about which week the work was in.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(row.get("routine_name") or "", []).append(row)
+    if not rows or not db_path().exists():
+        return rows
+    with _connect() as conn:
+        for name, group in groups.items():
+            declaration = _declaration_for(name, group[0].get("routine_id"), conn)
+            kinds = _column_kinds(name, {}, conn, fields.kinds(declaration))
+            columns = fields.names(declaration) or record_columns(group)
+            checks = totals.date_checks(group, declaration, kinds, columns)
+            for row in group:
+                start, day, source = totals.trip_start(row, kinds, columns)
+                row["trip"] = {"date": day.isoformat(),
+                               "start": start.strftime("%Y-%m-%d %H:%M") if start else "",
+                               "source": source}
+                row["checks"] = checks.get(row["id"], [])
+    return rows
+
+
 def record_columns(records: List[Dict[str, Any]]) -> List[str]:
     """Every field name across these records, in the order first seen.
 

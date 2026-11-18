@@ -712,6 +712,12 @@ _PAGE = r"""<!doctype html>
          empty one is information — it means nothing was recorded to work it
          out from — and an unmarked blank just looks like a failure. */
       #recordList .derived { color:var(--muted); font-style:italic; }
+      /* Sortable headers look like headers, not buttons, until hovered. */
+      #recordList .sorthead { background:transparent; border:0; padding:0; font:inherit;
+        font-weight:600; color:inherit; cursor:pointer; text-align:left; white-space:nowrap; }
+      #recordList .sorthead:hover { text-decoration:underline; }
+      #recordList .datewarn { color:var(--danger, #c0392b); font-weight:600; }
+      #recordList .datenote { color:var(--muted); }
       /* Worked out again from the readings, replacing what a model wrote. The
          hover says what it had written; the mark says there is something to
          hover for. */
@@ -4313,8 +4319,14 @@ _PAGE = r"""<!doctype html>
         }
         recordListEl.appendChild(recordFilterBar());
 
-        const shown = recordFilter
+        const inRoutine = recordFilter
           ? records.filter(r => r.routine_name === recordFilter) : records;
+        // Sorted by when the work was done, not when it was saved: a trip kept
+        // the next morning belongs to the evening it was driven, and the week it
+        // counts in follows its start time. Any column sorts with a tap.
+        const shown = (recordChecksOnly
+          ? inRoutine.filter(r => (r.checks || []).length) : inRoutine).slice()
+          .sort(compareRecords);
         // Only the columns the shown records actually use, so filtering to one
         // routine genuinely narrows the table rather than leaving empty columns.
         const columns = [];
@@ -4341,6 +4353,21 @@ _PAGE = r"""<!doctype html>
         count.className = "voicebar-label";
         count.textContent = shown.length + (shown.length === 1 ? " record" : " records");
         bar.appendChild(count);
+        // Trips whose date looks wrong or is a guess, one tap to see only them.
+        const flagged = inRoutine.filter(r => (r.checks || []).length);
+        if (flagged.length || recordChecksOnly) {
+          const errors = flagged.filter(r => r.checks.some(c => c.level === "error")).length;
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "chip" + (recordChecksOnly ? " active" : "");
+          chip.textContent = recordChecksOnly ? "Show all records"
+            : (errors ? "⚠ " + errors + " date" + (errors === 1 ? "" : "s") + " to fix · " : "")
+              + (flagged.length - errors ? "ⓘ " + (flagged.length - errors) + " without a date" : "")
+                .replace(/ · $/, "");
+          chip.title = "Trips whose start time is impossible, missing its date, or out of order with the odometer";
+          chip.addEventListener("click", () => { recordChecksOnly = !recordChecksOnly; renderRecords(); });
+          bar.appendChild(chip);
+        }
         recordListEl.appendChild(bar);
         // Totals need one routine's columns to mean anything, so they show
         // when the table is one routine's — chosen, or the only one there is.
@@ -4358,13 +4385,30 @@ _PAGE = r"""<!doctype html>
         const table = document.createElement("table");
         const head = document.createElement("tr");
         // The routine column is redundant once you have filtered to one.
-        const labels = ["When"].concat(recordFilter ? [] : ["Routine"])
+        const labels = ["Trip date", "Kept"].concat(recordFilter ? [] : ["Routine"])
                                .concat(columns).concat([""]);
-        for (const label of labels) {
+        const keys = ["trip", "kept"].concat(recordFilter ? [] : ["routine"])
+                               .concat(columns).concat([""]);
+        labels.forEach((label, i) => {
           const th = document.createElement("th");
-          th.textContent = label;
+          if (keys[i]) {
+            // A button, so the sort is reachable by keyboard and says what it does.
+            const sort = document.createElement("button");
+            sort.type = "button";
+            sort.className = "sorthead";
+            const on = recordSort.key === keys[i];
+            sort.textContent = label + (on ? (recordSort.dir > 0 ? " ▲" : " ▼") : "");
+            sort.title = "Sort by " + label;
+            sort.setAttribute("aria-sort", on ? (recordSort.dir > 0 ? "ascending" : "descending") : "none");
+            sort.addEventListener("click", () => {
+              recordSort = on ? { key: keys[i], dir: -recordSort.dir }
+                              : { key: keys[i], dir: keys[i] === "trip" || keys[i] === "kept" ? -1 : 1 };
+              renderRecords();
+            });
+            th.appendChild(sort);
+          }
           head.appendChild(th);
-        }
+        });
         const thead = document.createElement("thead");
         thead.appendChild(head);
         table.appendChild(thead);
@@ -4381,7 +4425,16 @@ _PAGE = r"""<!doctype html>
             row.appendChild(td);
             return td;
           };
-          cell("When", new Date(record.created_at * 1000)
+          const trip = record.trip || {};
+          const checks = record.checks || [];
+          const mark = checks.some(c => c.level === "error") ? "⚠ " : checks.length ? "ⓘ " : "";
+          const tripCell = cell("Trip date", mark + (trip.start || trip.date || ""));
+          if (checks.length) {
+            tripCell.classList.add(mark === "⚠ " ? "datewarn" : "datenote");
+          }
+          tripCell.title = checks.map(c => c.text).join("\n")
+            || (trip.source ? "From " + trip.source : "No start time — the day it was kept");
+          cell("Kept", new Date(record.created_at * 1000)
             .toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" }));
           if (!recordFilter) cell("Routine", record.routine_name);
           for (const name of columns) {
@@ -4526,6 +4579,35 @@ _PAGE = r"""<!doctype html>
           holder.appendChild(wrap);
         };
         draw();
+      }
+
+      // How the log is sorted: by trip start, newest first, until a header is
+      // tapped. Kept across redraws, which happen after every correction.
+      let recordSort = { key: "trip", dir: -1 };
+      let recordChecksOnly = false;
+
+      // A value to sort a cell by: a number where the cell starts with one
+      // ("$180.62", "150 mi", "6h 26m" sort by their figure), else its text.
+      function sortValue(record, key) {
+        if (key === "trip") return (record.trip && (record.trip.start || record.trip.date)) || "";
+        if (key === "kept") return record.created_at || 0;
+        if (key === "routine") return record.routine_name || "";
+        const text = String((record.fields || {})[key] || "").trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text;
+        const hm = text.match(/^(\d+)h(?:\s*(\d+)m)?$/);
+        if (hm) return Number(hm[1]) + Number(hm[2] || 0) / 60;
+        const num = text.match(/^[-$£€\s]*(-?[\d,]*\.?\d+)/);
+        return num ? Number(num[1].replace(/,/g, "")) : text;
+      }
+
+      function compareRecords(a, b) {
+        const x = sortValue(a, recordSort.key), y = sortValue(b, recordSort.key);
+        // Blanks last, whichever way the column is sorted.
+        if (x === "" && y !== "") return 1;
+        if (y === "" && x !== "") return -1;
+        const order = (typeof x === "number" && typeof y === "number") ? x - y
+          : String(x).localeCompare(String(y), undefined, { numeric: true });
+        return (order || (a.created_at || 0) - (b.created_at || 0)) * recordSort.dir;
       }
 
       function recordFilterBar() {

@@ -428,16 +428,17 @@ class TestTheRoutes:
         rows = list(csv.reader(io.StringIO(resp.get_data(as_text=True))))
         # The unit is in the header and the cell holds the bare number, so a
         # spreadsheet sums the column instead of treating it as text.
-        assert rows[0] == ["taken_at", "routine",
+        assert rows[0] == ["taken_at", "trip_date", "routine",
                            "distance (mi)", "elapsed (hours)"]
-        assert rows[1][1:] == ["🚗 Trip", "68", "3.1333"]
+        assert rows[1][2:] == ["🚗 Trip", "68", "3.1333"]
+        assert re.match(r"^\d{4}-\d{2}-\d{2}$", rows[1][1]), "the day the work was done"
         # An ISO timestamp, so a spreadsheet and a database both parse it.
         assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", rows[1][0])
 
     def test_csv_of_an_empty_log_is_still_valid_csv(self, client):
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
-        assert rows == [["taken_at", "routine"]]
+        assert rows == [["taken_at", "trip_date", "routine"]]
 
     def test_a_ragged_log_keeps_every_column(self, client):
         """Two runs of a routine that changed its fields between them.
@@ -449,9 +450,9 @@ class TestTheRoutes:
         store.add_record("T", {"b": "2"})
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
-        assert sorted(rows[0][2:]) == ["a", "b"], rows[0]
+        assert sorted(rows[0][3:]) == ["a", "b"], rows[0]
         assert all(len(r) == len(rows[0]) for r in rows), rows
-        assert sorted(r[2] + r[3] for r in rows[1:]) == ["1", "2"]
+        assert sorted(r[3] + r[4] for r in rows[1:]) == ["1", "2"]
 
     def test_the_routes_are_behind_auth_when_it_is_on(self, monkeypatch):
         """The log is as exposed as the history is."""
@@ -661,8 +662,8 @@ class TestTheLayoutFitsWhereItIsShown:
     def test_the_columns_follow_the_filter(self):
         """Otherwise filtering leaves the empty columns of the other routines."""
         page = self.page()
-        at = page.index("const shown = recordFilter")
-        window = page[at:at + 500]
+        at = page.index("const inRoutine = recordFilter")
+        window = page[at:at + 900]
         assert "for (const record of shown)" in window
         assert "columns.push(name)" in window
 
@@ -730,7 +731,7 @@ class TestTheLayoutFitsWhereItIsShown:
         store.add_record("T", {"v": value})
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
-        assert rows[1][2] == expected
+        assert rows[1][3] == expected
 
     @pytest.mark.parametrize("value", [
         "-2+3",                      # a spreadsheet opens this as 1
@@ -759,7 +760,7 @@ class TestTheLayoutFitsWhereItIsShown:
         store.add_record("=HYPERLINK(\"http://evil\")", {"v": "1"})
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
-        assert rows[1][1].startswith("'=")
+        assert rows[1][2].startswith("'=")
 
 
 class TestFieldsKeepTheirDeclaredOrder:
@@ -782,7 +783,7 @@ class TestFieldsKeepTheirDeclaredOrder:
         store.add_record("T", {name: str(i) for i, name in enumerate(order)})
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
-        assert rows[0][2:] == order
+        assert rows[0][3:] == order
 
     def test_it_is_switched_off_at_the_app_rather_than_per_route(self):
         """Every response, so a later route cannot quietly reintroduce it."""
@@ -899,8 +900,8 @@ class TestYouAreToldWhatIsWrongWithADeclaration:
                                           "routine_name": "T"})
         rows = list(csv.reader(io.StringIO(
             client.get("/api/records.csv").get_data(as_text=True))))
-        assert rows[0][2] == "Code", "a text column should carry no unit"
-        assert rows[1][2] == "100"
+        assert rows[0][3] == "Code", "a text column should carry no unit"
+        assert rows[1][3] == "100"
 
     def test_a_fixed_declaration_stops_reading_as_broken(self):
         """The warning was set on a failed save and never cleared, so fixing

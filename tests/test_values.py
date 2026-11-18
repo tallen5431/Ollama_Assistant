@@ -487,6 +487,10 @@ class TestARateTheColumnAlreadyStates:
         ("37.86 dollars/hour", "Earnings per hour", "$37.86"),
         ("1.05 dollars/mile", "Earnings per mile", "$1.05"),
         ("$12 an hour", "Hourly pay", "$12"),
+        ("168.23 $", "Earnings", "$168.23"),
+        ("1.60 $/mi", "Earnings per mile", "$1.60"),
+        ("29.83 $/h", "Earnings per hour", "$29.83"),
+        ("12 €", "Earnings", "€12"),
     ])
     def test_is_dropped(self, text, column, expected):
         assert values.canonical(text, values.MONEY, column) == expected

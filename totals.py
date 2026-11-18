@@ -82,24 +82,61 @@ def plan(declaration: List[fields.Field], kinds: Dict[str, str],
     return sorted(out, key=lambda c: order.get(c["name"], len(order)))
 
 
-def day_of(record: Dict[str, Any], kinds: Dict[str, str],
-           columns: List[str]) -> Tuple[date, str]:
-    """The day a run happened, and where that came from.
+_DATE_TIME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})")
+_CLOCK = re.compile(r"^(\d{1,2}):(\d{2})\b")
+NO_DATE = "no date in it — the day comes from when it was kept"
 
-    The run's own first timestamp where it has one with a date in it: a trip
-    that started at 18:34 and was logged at 06:03 the next morning belongs to
-    the day it was driven. Otherwise the day it was kept.
+
+def trip_start(record: Dict[str, Any], kinds: Dict[str, str],
+               columns: List[str]) -> Tuple[Optional[datetime], date, str]:
+    """When a run started — ``(start, day, where that came from)``.
+
+    From the run's first timestamp column that holds anything: a full date and
+    time gives both; a date alone gives the day. A clock time with no date
+    ("18:47", "16:53 (UTC-05:00)") is put on the day the run was kept — or the
+    day before, when it was kept earlier in the day than it started, which is
+    a trip driven in the evening and saved after midnight. With nothing to go
+    on, the day it was kept. ``start`` is wall-clock time as written.
     """
+    kept = datetime.fromtimestamp(float(record.get("created_at") or 0))
     for name in columns:
         if kinds.get(name) != values.TIMESTAMP:
             continue
-        match = _DATE.match(str(record["fields"].get(name, "")).strip())
-        if match:
+        text = str(record["fields"].get(name, "")).strip()
+        if not text:
+            continue
+        full = _DATE_TIME.match(text)
+        if full:
             try:
-                return date(*(int(g) for g in match.groups())), name
+                start = datetime(*(int(g) for g in full.groups()))
+                return start, start.date(), name
             except ValueError:
                 continue
-    return datetime.fromtimestamp(float(record.get("created_at") or 0)).date(), ""
+        day_only = _DATE.match(text)
+        if day_only:
+            try:
+                return None, date(*(int(g) for g in day_only.groups())), name
+            except ValueError:
+                continue
+        clock = _CLOCK.match(text)
+        if clock and int(clock.group(1)) < 24 and int(clock.group(2)) < 60:
+            start = kept.replace(hour=int(clock.group(1)), minute=int(clock.group(2)),
+                                 second=0, microsecond=0)
+            if start > kept:
+                start -= timedelta(days=1)
+            return start, start.date(), f"{name} ({NO_DATE})"
+    return None, kept.date(), ""
+
+
+def day_of(record: Dict[str, Any], kinds: Dict[str, str],
+           columns: List[str]) -> Tuple[date, str]:
+    """The day a run happened, and where that came from ("" for the day kept).
+
+    A trip that started at 18:34 and was logged at 06:03 the next morning
+    belongs to the day it was driven.
+    """
+    _, day, source = trip_start(record, kinds, columns)
+    return day, source
 
 
 def _week(day: date) -> date:
@@ -265,3 +302,70 @@ def continuity(record: Dict[str, Any], records: List[Dict[str, Any]],
 
 def _reading(number: float) -> str:
     return f"{number:,.0f}" if number == int(number) else f"{number:,}"
+
+
+def _odometers(declaration: List[fields.Field], kinds: Dict[str, str],
+               columns: List[str]) -> List[Tuple[str, str]]:
+    """The start/end odometer pair: from a declared "End - Start" distance, or
+    failing that from two distance columns named start … and end … ."""
+    found = _spans(declaration, kinds)
+    if found:
+        return found
+    starts = [c for c in columns if kinds.get(c) == values.DISTANCE and
+              re.search(r"\bstart", c, re.I)]
+    ends = [c for c in columns if kinds.get(c) == values.DISTANCE and
+            re.search(r"\bend", c, re.I)]
+    return [(starts[0], ends[0])] if starts and ends else []
+
+
+def _when(moment: datetime) -> str:
+    return f"{moment.day} {moment:%b} {moment:%H:%M}"
+
+
+def date_checks(records: List[Dict[str, Any]], declaration: List[fields.Field],
+                kinds: Dict[str, str], columns: List[str]) -> Dict[str, List[Dict[str, str]]]:
+    """What looks wrong with each run's date, by record id, as
+    ``{"level": "error" | "note", "text"}``.
+
+    Three things a log can show by itself, without anyone's help:
+
+    * a start time **after** the run was kept — impossible, so the date is
+      wrong (a real log had a trip "starting" seventeen hours after it was
+      saved, which put it in the wrong week);
+    * a start time with **no date**, so its week is a best guess;
+    * runs whose **odometers and start times disagree about the order** —
+      the odometer only goes up, so the run with the higher reading came later.
+    """
+    out: Dict[str, List[Dict[str, str]]] = {}
+    starts: Dict[str, Optional[datetime]] = {}
+    for record in records:
+        start, day, source = trip_start(record, kinds, columns)
+        starts[record["id"]] = start if source and NO_DATE not in source else None
+        kept = datetime.fromtimestamp(float(record.get("created_at") or 0))
+        notes: List[Dict[str, str]] = []
+        if start is not None and NO_DATE not in source and start > kept + timedelta(minutes=30):
+            notes.append({"level": "error",
+                          "text": f"Starts {_when(start)}, after it was kept ({_when(kept)}) — "
+                                  "the date is probably wrong"})
+        if NO_DATE in source:
+            notes.append({"level": "note",
+                          "text": f"Start time has no date, so it is counted on {day.day} "
+                                  f"{day:%b} from when it was kept — add the date to be sure"})
+        if notes:
+            out[record["id"]] = notes
+    for start_col, end_col in _odometers(declaration, kinds, columns):
+        ordered = []
+        for record in records:
+            span = _span(record, start_col, end_col)
+            if span and starts.get(record["id"]):
+                ordered.append((span[0], span[1], starts[record["id"]], record))
+        ordered.sort(key=lambda item: item[0])
+        for before, after in zip(ordered, ordered[1:]):
+            if after[2] < before[2] - timedelta(minutes=30):
+                out.setdefault(after[3]["id"], []).append({
+                    "level": "error",
+                    "text": f"The odometer puts this after the {_when(before[2])} run "
+                            f"({before[0]:,.0f}–{before[1]:,.0f}), but its start time is "
+                            "earlier — one of the two dates is wrong"})
+        break
+    return out
